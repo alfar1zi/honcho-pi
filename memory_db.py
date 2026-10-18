@@ -19,6 +19,7 @@ so identical content with same source+project produces same ID (no duplicates).
 import sqlite3
 import json
 import hashlib
+import re
 import os
 import sys
 import shutil
@@ -352,6 +353,9 @@ def _healthy(conn: sqlite3.Connection) -> bool:
 
 
 
+_REOBSERVE_BOOST = 0.02
+
+
 def upsert_record(conn: sqlite3.Connection, rtype: str, content: str, evidence: str = "",
                   verified: int = 0, confidence: float = 0.5, source: str = "",
                   tags: str = "", session_id: str = "", project_id: str = "",
@@ -369,15 +373,23 @@ def upsert_record(conn: sqlite3.Connection, rtype: str, content: str, evidence: 
 
     if existing:
         record_id = existing["id"]
-        conn.execute(
-            "UPDATE records SET updated_at=?, evidence=? WHERE id=?",
-            (now_iso(), evidence if evidence else None, record_id)
-        )
+        # Re-observation raises confidence slightly and refreshes evidence;
+        # it must never lower what was already established.
+        conn.execute("""
+            UPDATE records
+               SET updated_at=?,
+                   evidence=CASE WHEN ?<>'' THEN ? ELSE evidence END,
+                   verified=CASE WHEN ?=1 THEN 1 ELSE verified END,
+                   confidence=MIN(1.0, MAX(confidence, ?) + ?)
+             WHERE id=?
+        """, (now_iso(), evidence, evidence, 1 if verified else 0,
+              confidence, _REOBSERVE_BOOST, record_id))
     else:
         conn.execute("""
             INSERT INTO records (id,type,content,evidence,verified,confidence,source,tags,created_at,updated_at,session_id,project_id,parent_id)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (record_id, rtype, content, evidence, 1 if verified else 0, confidence, source, tags, now_iso(), now_iso(), project_key, project_key, parent_id))
+        """, (record_id, rtype, content, evidence, 1 if verified else 0, confidence,
+              source, tags, now_iso(), now_iso(), session_id, project_key, parent_id))
 
     conn.commit()
 
@@ -389,31 +401,106 @@ def upsert_record(conn: sqlite3.Connection, rtype: str, content: str, evidence: 
     return record_id
 
 
-def search(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = None,
-           project_id: str = None, verified_only: bool = False, min_confidence: float = 0.0):
-    sql = """
-        SELECT r.id, r.type, r.content, r.evidence, r.verified, r.confidence, r.source, r.tags,
-               r.created_at, r.updated_at, r.session_id, r.project_id, r.parent_id,
-               bm25(records_fts) AS rank
-        FROM records_fts
-        JOIN records r ON r.id = records_fts.id
-        WHERE records_fts MATCH ?
+_STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "from", "are", "was", "were",
+    "yang", "dan", "untuk", "dari", "dengan", "pada", "itu", "ini", "atau",
+    "adalah", "tidak", "bisa", "akan", "juga", "kalau", "saat", "agar", "apa",
+}
+
+
+def _fts_query(query: str) -> str:
+    """Turn arbitrary user text into a safe, selective FTS5 MATCH expression.
+
+    Guards two failure modes:
+      1. Raw input breaks MATCH on FTS5 operator characters.
+      2. Weak tokens ("md", "max") match nearly every row and drown the real
+         hit, because bm25 cannot discriminate when confidence is uniform.
+    Tokens under 3 chars, stopwords and pure numbers are dropped; if that
+    empties the set, the original tokens are kept as a fallback.
     """
-    params = [query]
-    if rtype:
-        sql += " AND r.type = ?"
-        params.append(rtype)
-    if project_id:
-        sql += " AND r.project_id = ?"
-        params.append(project_id)
-    if verified_only:
-        sql += " AND r.verified = 1"
-    if min_confidence > 0:
-        sql += " AND r.confidence >= ?"
-        params.append(min_confidence)
-    sql += " ORDER BY r.confidence DESC, r.updated_at DESC LIMIT ?"
-    params.append(limit)
-    return [dict(row) for row in conn.execute(sql, params)]
+    raw = [t for t in re.split(r"[^\w]+", query, flags=re.UNICODE) if t]
+    useful = [t for t in raw
+              if len(t) >= 3 and t.lower() not in _STOPWORDS and not t.isdigit()]
+    tokens = useful or raw
+    if not tokens:
+        return ""
+    return " OR ".join(f'"{t}"' for t in tokens)
+
+
+def search(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = None,
+           project_id: str = None, verified_only: bool = False, min_confidence: float = 0.0,
+           min_score: float = 0.0):
+    """Ranked recall.
+
+    Final score blends lexical relevance (bm25, normalised) with stored
+    confidence, so a well-reinforced rule outranks a lexical near-miss.
+    Falls back to LIKE when the FTS expression yields nothing, which keeps
+    recall working for punctuation-only or single-character queries.
+    """
+    match = _fts_query(query)
+    rows = []
+    if match:
+        sql = """
+            SELECT r.id, r.type, r.content, r.evidence, r.verified, r.confidence, r.source,
+                   r.tags, r.created_at, r.updated_at, r.session_id, r.project_id, r.parent_id,
+                   bm25(records_fts) AS rank
+            FROM records_fts
+            JOIN records r ON r.id = records_fts.id
+            WHERE records_fts MATCH ?
+        """
+        params: list = [match]
+        if rtype:
+            sql += " AND r.type = ?"
+            params.append(rtype)
+        if project_id:
+            sql += " AND (r.project_id = ? OR r.project_id = '')"
+            params.append(project_id)
+        if verified_only:
+            sql += " AND r.verified = 1"
+        if min_confidence > 0:
+            sql += " AND r.confidence >= ?"
+            params.append(min_confidence)
+        sql += " LIMIT ?"
+        params.append(max(limit * 4, limit))
+        try:
+            rows = [dict(row) for row in conn.execute(sql, params)]
+        except sqlite3.OperationalError:
+            rows = []
+
+    if not rows:
+        sql = """SELECT r.id, r.type, r.content, r.evidence, r.verified, r.confidence, r.source,
+                        r.tags, r.created_at, r.updated_at, r.session_id, r.project_id, r.parent_id,
+                        0.0 AS rank
+                   FROM records r
+                  WHERE r.content LIKE ? ESCAPE '\\'"""
+        params = [f"%{query.replace('%', '\\%').replace('_', '\\_')}%"]
+        if rtype:
+            sql += " AND r.type = ?"
+            params.append(rtype)
+        if project_id:
+            sql += " AND (r.project_id = ? OR r.project_id = '')"
+            params.append(project_id)
+        if verified_only:
+            sql += " AND r.verified = 1"
+        if min_confidence > 0:
+            sql += " AND r.confidence >= ?"
+            params.append(min_confidence)
+        sql += " LIMIT ?"
+        params.append(max(limit * 4, limit))
+        rows = [dict(row) for row in conn.execute(sql, params)]
+
+    # Relevance must dominate: a corpus with uniform confidence (0.92 across
+    # most rows) would otherwise outvote bm25 and surface unrelated records.
+    for r in rows:
+        # bm25() is negative in SQLite; larger magnitude means a better match.
+        raw_rank = abs(float(r.get("rank") or 0.0))
+        lexical = raw_rank / (1.0 + raw_rank) if raw_rank else 0.0
+        r["score"] = round(0.85 * lexical + 0.15 * float(r["confidence"]), 4)
+
+    rows.sort(key=lambda r: (r["score"], r["confidence"], r["updated_at"]), reverse=True)
+    if min_score > 0:
+        rows = [r for r in rows if r["score"] >= min_score]
+    return rows[:limit]
 
 
 def get_record(conn: sqlite3.Connection, record_id: str):
