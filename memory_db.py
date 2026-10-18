@@ -302,6 +302,18 @@ def _create_schema(conn: sqlite3.Connection):
     CREATE INDEX IF NOT EXISTS idx_sessions_profile   ON sessions(profile);
     CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON pre_compress_checkpoints(session_id);
     CREATE INDEX IF NOT EXISTS idx_reinforcement_record ON reinforcement(record_id);
+    CREATE INDEX IF NOT EXISTS idx_records_updated    ON records(updated_at);
+
+    CREATE TRIGGER IF NOT EXISTS records_ai AFTER INSERT ON records BEGIN
+        INSERT INTO records_fts(id, content, tags) VALUES (new.id, new.content, new.tags);
+    END;
+    CREATE TRIGGER IF NOT EXISTS records_ad AFTER DELETE ON records BEGIN
+        DELETE FROM records_fts WHERE id = old.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS records_au AFTER UPDATE OF content, tags ON records BEGIN
+        DELETE FROM records_fts WHERE id = old.id;
+        INSERT INTO records_fts(id, content, tags) VALUES (new.id, new.content, new.tags);
+    END;
     """)
 
 def init_db(conn: sqlite3.Connection, db_path: str = DB_PATH, auto_repair: bool = True):
@@ -367,8 +379,6 @@ def upsert_record(conn: sqlite3.Connection, rtype: str, content: str, evidence: 
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (record_id, rtype, content, evidence, 1 if verified else 0, confidence, source, tags, now_iso(), now_iso(), project_key, project_key, parent_id))
 
-    conn.execute("DELETE FROM records_fts WHERE id=?", (record_id,))
-    conn.execute("INSERT INTO records_fts(id, content, tags) VALUES (?,?,?)", (record_id, content, tags))
     conn.commit()
 
     try:
