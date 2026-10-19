@@ -135,38 +135,75 @@ def call_gate_leave(key: tuple, ok: bool) -> None:
         else:
             state["stuck"] += 1
 
+def quarantine_db(db_path: str) -> str:
+    """Move a corrupt database aside instead of destroying it.
 
-def connect(db_path: str = DB_PATH) -> sqlite3.Connection:
-    ensure_dirs()
-    conn = sqlite3.connect(db_path, timeout=BUSY_TIMEOUT_MS / 1000.0)
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("SELECT 1").fetchone()
-        return conn
-    except sqlite3.DatabaseError:
+    Never deletes: a damaged-but-present DB may still be partially readable and
+    is the only forensic evidence of what went wrong. Files land next to the
+    original so a human can inspect them.
+    """
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    moved = []
+    for suffix in ("", "-wal", "-shm"):
+        src = db_path + suffix
+        if not os.path.exists(src):
+            continue
+        dst = f"{db_path}.corrupt.{ts}{suffix}"
         try:
-            conn.close()
-        except Exception:
-            pass
-        try:
-            os.remove(db_path)
-            for ext in ("-wal", "-shm"):
-                p = db_path + ext
-                if os.path.exists(p):
-                    os.remove(p)
+            os.replace(src, dst)
+            moved.append(dst)
         except OSError:
             pass
-        conn = sqlite3.connect(db_path, timeout=BUSY_TIMEOUT_MS / 1000.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+    return moved[0] if moved else ""
+
+
+def _open(db_path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path, timeout=BUSY_TIMEOUT_MS / 1000.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("SELECT 1").fetchone()
+    return conn
+
+
+def connect(db_path: str = DB_PATH) -> sqlite3.Connection:
+    """Open the memory DB, quarantining (never deleting) an unreadable file.
+
+    Recovery order:
+      1. open as-is
+      2. on DatabaseError: quarantine the corrupt file, restore newest
+         backup that passes integrity_check
+      3. no usable backup: quarantine and start a fresh DB at the same path
+    The corrupt file is always preserved on disk.
+    """
+    ensure_dirs()
+    try:
+        return _open(db_path)
+    except sqlite3.DatabaseError:
+        try:
+            os.replace(db_path, f"{db_path}.quarantine")
+        except OSError:
+            pass
+
+    quarantined = quarantine_db(db_path)
+    if quarantined:
+        sys.stderr.write(
+            f"[honcho] corrupt database quarantined at {quarantined}; "
+            "attempting restore from backup\n"
+        )
+
+    if repair_from_backup(db_path):
+        try:
+            conn = _open(db_path)
+            sys.stderr.write("[honcho] restored from newest verified backup\n")
+            return conn
+        except sqlite3.DatabaseError:
+            pass
+
+    sys.stderr.write("[honcho] no usable backup; starting a fresh database\n")
+    return _open(db_path)
 
 
 def integrity_check(conn: sqlite3.Connection) -> bool:
@@ -267,39 +304,40 @@ def _create_schema(conn: sqlite3.Connection):
     CREATE INDEX IF NOT EXISTS idx_reinforcement_record ON reinforcement(record_id);
     """)
 
-
 def init_db(conn: sqlite3.Connection, db_path: str = DB_PATH, auto_repair: bool = True):
-    try:
-        ok = quick_check(conn)
-    except sqlite3.DatabaseError:
-        ok = False
-    if not ok:
-        try:
-            ok = integrity_check(conn)
-        except sqlite3.DatabaseError:
-            ok = False
+    """Create schema, repairing through quarantine + backup restore.
+
+    Returns the (possibly replaced) connection. A corrupt database is never
+    deleted: it is quarantined so nothing is silently lost.
+    """
+    ok = _healthy(conn)
     if not ok and auto_repair:
         try:
             conn.close()
-            if repair_from_backup(db_path):
-                conn = connect(db_path)
-                ok = quick_check(conn)
-            else:
-                ok = False
         except sqlite3.DatabaseError:
-            ok = False
+            pass
+        # connect() performs quarantine + backup restore; never deletes.
+        conn = connect(db_path)
+        ok = _healthy(conn)
     if not ok:
         try:
             conn.close()
-            os.remove(db_path)
-            for ext in ("-wal", "-shm"):
-                p = db_path + ext
-                if os.path.exists(p):
-                    os.remove(p)
-            conn = connect(db_path)
-        except (OSError, sqlite3.DatabaseError):
+        except sqlite3.DatabaseError:
             pass
+        quarantined = quarantine_db(db_path)
+        if quarantined:
+            sys.stderr.write(f"[honcho] quarantined unreadable db at {quarantined}\n")
+        conn = _open(db_path)
     _create_schema(conn)
+    return conn
+
+
+def _healthy(conn: sqlite3.Connection) -> bool:
+    try:
+        return quick_check(conn)
+    except sqlite3.DatabaseError:
+        return False
+
 
 
 def upsert_record(conn: sqlite3.Connection, rtype: str, content: str, evidence: str = "",
