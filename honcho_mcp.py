@@ -18,9 +18,6 @@ Tools
     reinforce   Confirm or refute an existing memory after observing reality.
     forget      Retire a memory that is provably wrong.
     stats       Inspect what the agent has learned.
-    reinforce   Confirm or refute an existing memory after observing reality.
-    forget      Retire a memory that is provably wrong.
-    stats       Inspect what the agent has learned.
 
 Environment
     OMP_MEMORY_DB          explicit DB path (wins over all else)
@@ -113,6 +110,7 @@ def get_conn(user: str = ""):
 def _clip(text: str, limit: int = MAX_CONTENT) -> str:
     text = (text or "").strip()
     return text if len(text) <= limit else text[: limit - 3] + "..."
+
 
 def tool_recall(args: Dict[str, Any], user: str = "") -> str:
     conn = get_conn(user)
@@ -226,6 +224,41 @@ def _scan_secret(text: str) -> Optional[str]:
             return label
     return None
 
+_handoff_mod = None
+
+
+def _handoff():
+    """Lazy import so the MCP server starts fast and degrades if absent."""
+    global _handoff_mod
+    if _handoff_mod is None:
+        try:
+            import handoff as _h
+            _handoff_mod = _h
+        except ImportError:
+            return None
+    return _handoff_mod
+
+
+def tool_handoff(args: Dict[str, Any], user: str = "") -> str:
+    """Working-context brief, flagging a model switch when one was detected."""
+    h = _handoff()
+    if h is None:
+        return "handoff: handoff.py is not installed next to honcho_mcp.py"
+    try:
+        brief = h.build(int(args.get("max_chars") or 24000))
+    except Exception as exc:  # noqa: BLE001
+        return f"handoff: could not build brief: {exc}"
+    if brief.get("error"):
+        return f"handoff: {brief['error']}"
+    state = brief.get("model") or {}
+    if state.get("switched"):
+        return (
+            f"[MODEL SWITCH DETECTED] {state.get('previous')} -> {state.get('current')}. "
+            "The context below is authoritative; continue from it without re-asking.\n\n"
+            + brief["text"]
+        )
+    return brief["text"]
+
 TOOLS = [
     {
         "name": "recall",
@@ -298,6 +331,23 @@ TOOLS = [
         "description": "Counts of stored memory by type, plus verified totals.",
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "handoff",
+        "description": (
+            "Full working-context brief for a model that just took over this session. "
+            "Derived from the real transcript (operator's verbatim requests, failures "
+            "observed, files touched, recorded decisions) rather than a summary. Call this "
+            "first when you are continuing a session started under a different model, or "
+            "after a context reset."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "max_chars": {"type": "integer", "default": 24000,
+                              "description": "Cap on brief size."},
+            },
+        },
+    },
 ]
 
 _HANDLERS = {
@@ -306,6 +356,7 @@ _HANDLERS = {
     "reinforce": tool_reinforce,
     "forget": tool_forget,
     "stats": tool_stats,
+    "handoff": tool_handoff,
 }
 
 INSTRUCTIONS = (
@@ -381,7 +432,6 @@ def handle_message(msg: Dict[str, Any], user: str = "") -> Optional[Dict[str, An
 # Transport: stdio
 # --------------------------------------------------------------------------
 
-
 def serve_stdio() -> None:
     """Newline-delimited JSON-RPC on stdin/stdout, as MCP stdio expects."""
     for raw in sys.stdin:
@@ -405,9 +455,84 @@ def serve_stdio() -> None:
 
 # --------------------------------------------------------------------------
 # Transport: http (streamable single-POST JSON-RPC, bearer auth)
+# --------------------------------------------------------------------------
+
+class _Handler(BaseHTTPRequestHandler):
+    tokens: set = set()
+
+    def log_message(self, fmt, *args):  # quieter default logging
+        sys.stderr.write("[honcho-http] " + (fmt % args) + "\n")
+
+    def _user(self) -> Optional[str]:
+        if not self.tokens:
+            return ""
+        header = self.headers.get("Authorization", "").strip()
+        if not header.lower().startswith("bearer "):
+            return None
+        token = header[7:].strip()
+        return token if token in self.tokens else None
+
+    def _send(self, code: int, payload: Any) -> None:
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path.rstrip("/") in ("/health", "/healthz"):
+            self._send(200, {"ok": True, "server": SERVER_NAME, "version": SERVER_VERSION})
+            return
+        self._send(404, {"error": "not found"})
+
+    def do_POST(self):
+        user = self._user()
+        if user is None:
+            self._send(401, {"error": "unauthorized"})
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > 1_000_000:
+            self._send(413, {"error": "payload too large"})
+            return
+        try:
+            msg = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            self._send(400, {"error": "invalid json"})
+            return
+        if isinstance(msg, list):
+            out = [r for r in (handle_message(m, user) for m in msg) if r is not None]
+            self._send(200, out)
+        else:
+            resp = handle_message(msg, user)
+            self._send(200, resp or {})
+        return
+
+
+def serve_http() -> None:
+    host = os.environ.get("HONCHO_HOST", "127.0.0.1")
+    port = int(os.environ.get("HONCHO_PORT", "8765"))
+    tokens = {t.strip() for t in os.environ.get("HONCHO_TOKENS", "").split(",") if t.strip()}
+    _Handler.tokens = tokens
+    if host not in ("127.0.0.1", "localhost", "::1") and not tokens:
+        sys.stderr.write(
+            "[honcho-http] refusing to bind a public interface without HONCHO_TOKENS\n"
+        )
+        raise SystemExit(2)
+    srv = ThreadingHTTPServer((host, port), _Handler)
+    sys.stderr.write(
+        f"[honcho-http] listening on http://{host}:{port} "
+        f"({'token auth' if tokens else 'no auth, loopback only'})\n"
+    )
+    srv.serve_forever()
+
 
 def main() -> None:
-    serve_stdio()
+    transport = os.environ.get("HONCHO_TRANSPORT", "stdio").lower()
+    if transport == "http":
+        serve_http()
+    else:
+        serve_stdio()
 
 
 if __name__ == "__main__":
