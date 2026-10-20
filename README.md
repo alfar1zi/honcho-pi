@@ -1,130 +1,175 @@
-# omp-memory
+# honcho-pi
 
-OMP Memory System - Persistent memory system for omp agents with SQLite + FTS5 full-text search.
+Persistent memory for coding agents, stored in one SQLite file on your machine.
 
-## Overview
+Your agent forgets every lesson at the end of a session. It re-learns the same
+build command, re-makes the same wrong assumption, and asks you to explain the
+same constraint again next week. honcho-pi fixes that with a local database and
+a searchable memory the agent can read at the start of a turn.
 
-omp-memory is a persistent, cross-session memory system for AI agents. It stores session learnings, insights, and patterns in a SQLite database with FTS5 full-text search. Designed for per-user deployment (each user has their own `~/.omp/memory/` directory).
-
-## Features
-
-- **SQLite + FTS5** - Full-text search for fast memory retrieval
-- **WAL journal mode** - Concurrent read/write safety
-- **Automatic backup** - Rotating backups (max 10) with 0600 permissions
-- **Auto-repair** - Corrupt database recovery from backups
-- **Session lineage** - Parent/child session tracking for context continuity
-- **Pre-compress checkpoints** - Fail-safe checkpoints before context compression
-- **Profile isolation** - Per-user isolation via environment-based configuration
-- **Secret scanning** - Automatic detection and blocking of API keys, passwords, tokens
-- **Input sanitization** - Proper JSON escaping for all inputs
-- **Deduplication** - Content-based deduplication to prevent duplicate records
-- **Plugin system** - OpenCode plugin with auto-reload and fallback
-
-## Quick Start
-
-### Prerequisites
-
-- Python 3.8+
-- SQLite3 (usually pre-installed on Linux/macOS)
-- Node.js (for the plugin)
-
-### Installation
+No server. No API key. No embeddings bill. One file you can back up with `cp`.
 
 ```bash
-# Clone the repository
-git clone https://github.com/alfar1zi/honcho-pi.git
+npx skills add alfar1zi/honcho-pi
+```
+
+## Why it exists
+
+Three failure modes kill agent memory in practice:
+
+1. **Memory that lies.** A note written once and never re-checked becomes
+   confidently wrong. honcho-pi stores `verified`, `confidence`, and a
+   reinforcement history per record, so a lesson that failed twice drops below
+   the promotion threshold instead of hardening into a rule.
+2. **Memory that vanishes.** Compression, crashes, and context resets erase what
+   the agent just learned. Capture writes an append-only JSONL log before it
+   touches the database, and a pre-compress checkpoint stores the full record
+   payload for restore.
+3. **Memory that corrupts.** A raw `cp` of a live SQLite database captures a
+   torn state, and an "auto-repair" that deletes the file on open failure
+   destroys the only copy. honcho-pi takes consistent `VACUUM INTO` snapshots,
+   never deletes a database it failed to open, and repairs only from a backup
+   that passes `quick_check`.
+
+## Install
+
+Requires Python 3.9+ with the `sqlite3` module (standard library).
+
+```bash
+# as an agent skill
+npx skills add alfar1zi/honcho-pi
+
+# or as a python package
+pip install git+https://github.com/alfar1zi/honcho-pi
+```
+
+Manual install into `~/.omp/memory`:
+
+```bash
+git clone https://github.com/alfar1zi/honcho-pi
 cd honcho-pi
-
-# Make scripts executable
-chmod +x memory_db.py capture-session.sh analyze-session.sh recap-service.sh memory-guard.sh disk-check.sh secret-scan.sh audit-log.sh health-check.sh clean-code.sh
-
-# Initialize the database
-python3 memory_db.py
-
-# Add to your shell profile (~/.bashrc, ~/.zshrc, etc.)
-export OMP_MEMORY_DIR="$HOME/.omp/memory"
-export OMP_MEMORY_DB="$HOME/.omp/memory/memory.db"
-export PATH="$HOME/.omp/memory:$PATH"
+bash install.sh
+source ~/.omp/memory/env.sh
+omp-memory health
 ```
 
-## Usage
+`install.sh` is idempotent. Re-running it replaces the code and leaves your
+database, backups, capture logs, and audit log alone. Use `--dry-run` to preview.
 
-### Capture a lesson
+## Use
 
 ```bash
-capture-session.sh --task "Fix database connection" --outcome "Connection pool fixed with pool_size=10" --type FACT --verified 1 --confidence 0.9 --evidence "Tested under load for 1 hour" --tags "database,fix"
+# record what happened, and whether it worked
+omp-memory capture --task "fix WAL corruption" --outcome "set busy_timeout" --verified
+
+# search it back, any time later
+omp-memory search "wal corruption"
+
+# what did this session actually do
+omp-memory recap --session sess-20261029T101500Z
+
+# a fenced block ready to inject into a prompt
+omp-memory context "sqlite backup"
+
+# mark the lesson as good or bad
+omp-memory reinforce <record_id> success
+
+# verified + confident inferences become rules
+omp-memory promote --threshold 0.85
+
+# snapshot the evidence before a context compression
+omp-memory checkpoint --session sess-20261029T101500Z
 ```
 
-### Recall memory
+Every command supports `--json` where the output is structured, so an agent can
+parse it without scraping.
+
+## How it works
+
+```
+capture ──> sessions + records ──> records_fts (FTS5, trigger-synced)
+   │                │
+   │                └──> reinforcement (append-only signal log)
+   └──> sessions/*.jsonl (append-only, written before the DB)
+
+records ──> checkpoint payload (JSON) ──> restore after compression
+```
+
+- **Records** carry `type` (FACT, ASSUMPTION, INFERENCE, DECISION, RULE,
+  CORRECTION), `evidence`, `verified`, `confidence`, `source`, `tags`,
+  `session_id`, `project_id`, and `parent_id`.
+- **Identity is content-addressed.** `sha256(type:content:source:project)` means
+  the same lesson captured twice updates one row instead of piling up
+  duplicates. Different projects stay separate.
+- **FTS5 is maintained by triggers**, so any write path keeps the index honest.
+  Search input is tokenised and quoted, so a query containing `"`, `*`, `-`, or
+  `NEAR(` is searched for, not executed as an operator.
+- **Confidence is clamped to [0, 1]** and every change is recorded in
+  `reinforcement` with the signal, delta, source, and timestamp.
+- **Sessions** are a tree. `parent_id` records lineage across a compression or a
+  delegated sub-session, so a recap can walk back to the parent context.
+- **Profiles** are isolated through `profile_contexts`, keyed by
+  `(profile, key)`, with no module-level mutable state.
+
+## Reliability
+
+| Concern | Behaviour |
+|---|---|
+| Concurrent writers | `journal_mode=WAL`, `busy_timeout=30000` (configurable) |
+| Backup | `VACUUM INTO`, consistent snapshot, 0600, rotated to `OMP_MEMORY_MAX_BACKUPS` |
+| Corrupt database | `quick_check` then `integrity_check`; open failure raises and leaves the file in place |
+| Repair | newest backup that passes `quick_check`, restored via atomic `os.replace` |
+| Capture durability | JSONL appended before the DB write |
+| Secret leakage | scan runs before store; `--allow-secrets` is an explicit opt-in |
+| Disk exhaustion | capture refuses below `--min-free-mb` (default 100) |
+
+## Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OMP_MEMORY_DB` | `~/.omp/memory/memory.db` | database file |
+| `OMP_MEMORY_BACKUP_DIR` | `~/.omp/memory/backups` | snapshot directory |
+| `OMP_MEMORY_MAX_BACKUPS` | `10` | snapshots kept |
+| `OMP_MEMORY_BUSY_TIMEOUT_MS` | `30000` | SQLite lock wait |
+| `OMP_MEMORY_HOME` | `~/.omp/memory` | install target for `install.sh` |
+
+## Agent integration
+
+The package ships a `MemoryProvider` base class and a context scrubber so an
+agent runtime can wire recall in without importing internals:
+
+```python
+from omp_memory import MemoryProvider, build_memory_context_block, sanitize_context
+
+class MyMemory(MemoryProvider):
+    @property
+    def name(self) -> str:
+        return "honcho-pi"
+
+    def is_available(self) -> bool:
+        return True
+
+    def initialize(self, session_id: str, **kwargs) -> None:
+        self.session_id = session_id
+
+    def prefetch(self, query: str, *, session_id: str = "") -> str:
+        # return build_memory_context_block(...) from your search results
+        return ""
+```
+
+`sanitize_context` and `StreamingContextScrubber` strip the fence from anything
+that leaves the agent, including when a fence is split across streaming deltas.
+
+## Development
 
 ```bash
-python3 -c "
-import sys; sys.path.insert(0, '.')
-from memory_db import connect, init_db, search
-conn = connect(); init_db(conn)
-results = search(conn, 'database connection', limit=5)
-for r in results:
-    print(f\"{r['content']} (conf={r['confidence']})\")
-conn.close()
-"
+python -m pytest          # 79 tests, no network, no shared state
+bash bin/clean-code.sh    # secrets, eval, markers, em dashes, line length
+bash install.sh --dry-run # preview an install
 ```
 
-### Analyze sessions
-
-```bash
-./analyze-session.sh analyze --project myproject
-./analyze-session.sh promote --threshold 0.85 --project myproject
-```
-
-### Health check
-
-```bash
-./memory-guard.sh health
-./memory-guard.sh backup-and-health
-```
-
-## Project Structure
-
-```
-honcho-pi/
-├── memory_db.py          # SQLite + FTS5 memory database
-├── memory_provider.py    # Hermes-inspired MemoryProvider ABC
-├── memory_context.py     # Context fencing, StreamingContextScrubber
-├── capture-session.sh    # Capture lessons from sessions
-├── analyze-session.sh    # Analyze patterns and reinforce knowledge
-├── recap-service.sh      # Auto-capture idle sessions, recap memory
-├── memory-guard.sh       # Health check, backup, repair
-├── disk-check.sh         # Disk space verification
-├── secret-scan.sh        # Secret scanning (API keys, passwords, tokens)
-├── audit-log.sh          | Audit logging for all operations
-| health-check.sh         | Health check for all components
-| clean-code.sh           | Code quality verification
-| index.js                | OpenCode plugin
-| memory_summary.md       | Primary memory summary
-| .gitignore              | Git ignore rules
-| LICENSE.md              | MIT license
-| README.md               | This file
-| INSTALL.md              | Installation guide
-```
-
-## Security
-
-- All memory data is stored locally in `~/.omp/memory/`
-- Backup files have 0600 permissions (owner read/write only)
-- Secret scanning prevents API keys, passwords, and tokens from being stored
-- Input validation on all inputs
+Tests use a per-test temporary database. Nothing touches your real memory.
 
 ## License
 
-MIT License - see LICENSE.md for details.
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
-
-## Support
-
-For issues and feature requests, please open an issue on GitHub.
+MIT. See [LICENSE.md](LICENSE.md).
