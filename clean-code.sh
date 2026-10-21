@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# clean-code.sh — Clean code validation script for omp-memory project.
+# clean-code.sh - Clean code validation script for omp-memory project.
 # Checks for code quality issues, AI-generated patterns, and common anti-patterns.
 
 set -euo pipefail

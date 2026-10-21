@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# secret-scan.sh — Scan text for potential secrets.
+# secret-scan.sh - Scan text for potential secrets.
 # Usage: secret-scan.sh "text to scan"
 set -uo pipefail
 

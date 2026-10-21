@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# audit-log.sh — Audit logging for omp-memory operations.
+# audit-log.sh - Audit logging for omp-memory operations.
 # Usage: audit-log.sh <action> <session> <project>
 set -uo pipefail
 

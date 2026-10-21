@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# memory-guard.sh — OMP memory guard: health check, backup, repair.
+# memory-guard.sh - OMP memory guard: health check, backup, repair.
 set -uo pipefail
 
 MEMORY_DIR="$HOME/.omp/memory"
@@ -35,9 +35,9 @@ if mode == 'backup-and-health':
         print('Attempting repair...')
         if repair_from_backup(db):
             h2 = health(db)
-            print(f"Repair: success — status={h2['status']}, records={h2['total_records']}")
+            print(f"Repair: success - status={h2['status']}, records={h2['total_records']}")
         else:
-            print('Repair: failed — DB may need manual intervention')
+            print('Repair: failed - DB may need manual intervention')
             conn.close()
             sys.exit(1)
     conn.close()
