@@ -245,7 +245,7 @@ def test_mcp_handshake_and_tools():
         assert init["result"]["serverInfo"]["name"] == "honcho"
         tools = _rpc(p, "tools/list", {}, 2)
         names = {t["name"] for t in tools["result"]["tools"]}
-        assert names == {"recall", "remember", "reinforce", "forget", "stats", "handoff"}, names
+        assert names == {"recall", "remember", "reinforce", "forget", "stats"}, names
         p.stdin.close()
         p.terminate()
     finally:
@@ -323,104 +323,6 @@ def test_mcp_memory_persists_across_processes():
         p2.terminate()
     finally:
         shutil.rmtree(root, ignore_errors=True)
-
-# ---------------------------------------------------------------- handoff
-
-def _write_session(root: Path, models: list[str], turns: list[str]) -> Path:
-    """Build a minimal session log shaped like omp's."""
-    sdir = root / "sessions" / "-proj"
-    sdir.mkdir(parents=True, exist_ok=True)
-    path = sdir / "2026-01-01T00-00-00-000Z_test.jsonl"
-    lines = []
-    for m in models:
-        lines.append(json.dumps({
-            "type": "model_change", "id": f"m{len(lines)}",
-            "timestamp": "2026-01-01T00:00:00.000Z", "model": m,
-        }))
-    for t in turns:
-        lines.append(json.dumps({
-            "type": "message", "timestamp": "2026-01-01T00:01:00.000Z",
-            "message": {"role": "user", "content": [{"type": "text", "text": t}]},
-        }))
-    lines.append(json.dumps({
-        "type": "message", "timestamp": "2026-01-01T00:02:00.000Z",
-        "message": {"role": "toolResult", "toolName": "bash",
-                    "content": [{"type": "text", "text": "Error: module not found"}]},
-    }))
-    path.write_text("\n".join(lines), encoding="utf-8")
-    return path
-
-
-@test
-def test_handoff_detects_model_switch():
-    import handoff
-    root = Path(tempfile.mkdtemp(prefix="honcho-ho-"))
-    old = os.environ.get("PI_CODING_AGENT_DIR")
-    try:
-        _write_session(root, ["vendor/model-a", "vendor/model-b"], ["build the parser"])
-        os.environ["PI_CODING_AGENT_DIR"] = str(root)
-        st = handoff.detect()
-        assert st["current"] == "vendor/model-b", st
-        assert st["previous"] == "vendor/model-a", st
-        assert st["switched"] is True, st
-    finally:
-        os.environ["PI_CODING_AGENT_DIR"] = old or ""
-        shutil.rmtree(root, ignore_errors=True)
-
-
-@test
-def test_handoff_ignores_duplicate_model_rows():
-    """omp writes several model_change rows for one logical switch."""
-    import handoff
-    root = Path(tempfile.mkdtemp(prefix="honcho-ho-"))
-    old = os.environ.get("PI_CODING_AGENT_DIR")
-    try:
-        _write_session(root, ["m-a", "m-b", "m-b", "m-b"], ["do the thing"])
-        os.environ["PI_CODING_AGENT_DIR"] = str(root)
-        st = handoff.detect()
-        assert st["previous"] == "m-a", st
-        assert st["current"] == "m-b", st
-        assert st["changes"] == 1, st
-    finally:
-        os.environ["PI_CODING_AGENT_DIR"] = old or ""
-        shutil.rmtree(root, ignore_errors=True)
-
-
-@test
-def test_handoff_brief_contains_evidence_not_summary():
-    import handoff
-    root = Path(tempfile.mkdtemp(prefix="honcho-ho-"))
-    old = os.environ.get("PI_CODING_AGENT_DIR")
-    try:
-        _write_session(root, ["m-a", "m-b"],
-                       ["refactor the auth module so tokens rotate hourly"])
-        os.environ["PI_CODING_AGENT_DIR"] = str(root)
-        text = handoff.build(24000)["text"]
-        assert "refactor the auth module" in text, "verbatim request missing"
-        assert "module not found" in text, "observed failure missing"
-        assert "m-a -> m-b" in text, "switch not reported"
-        assert "[HANDOFF]" in text
-    finally:
-        os.environ["PI_CODING_AGENT_DIR"] = old or ""
-        shutil.rmtree(root, ignore_errors=True)
-
-
-@test
-def test_handoff_respects_char_cap():
-    import handoff
-    root = Path(tempfile.mkdtemp(prefix="honcho-ho-"))
-    old = os.environ.get("PI_CODING_AGENT_DIR")
-    try:
-        _write_session(root, ["m-a"], ["x " * 5000 for _ in range(3)])
-        os.environ["PI_CODING_AGENT_DIR"] = str(root)
-        brief = handoff.build(2000)
-        assert brief["chars"] <= 2000, brief["chars"]
-        assert "truncated" in brief["text"]
-    finally:
-        os.environ["PI_CODING_AGENT_DIR"] = old or ""
-        shutil.rmtree(root, ignore_errors=True)
-
-
 
 # ---------------------------------------------------------------- migration
 

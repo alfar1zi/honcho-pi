@@ -63,8 +63,7 @@ python3 honcho/reclaim.py --all             # import, verify, archive
 ```
 
 Restart omp. The agent now sees `mcp__mem_recall`, `mcp__mem_remember`,
-`mcp__mem_reinforce`, `mcp__mem_forget`, `mcp__mem_stats` and
-`mcp__mem_handoff`.
+`mcp__mem_reinforce`, `mcp__mem_forget` and `mcp__mem_stats`.
 
 ---
 
@@ -238,9 +237,11 @@ python3 guard.py compact --threshold-bytes 10000
 Schedule it:
 
 ```cron
-0 3 * * * PI_CODING_AGENT_DIR=$HOME/.omp/profiles/max/agent \
-  python3 $HOME/.omp/profiles/max/agent/honcho/guard.py compact >> /tmp/honcho-guard.log 2>&1
+0 3 * * * HONCHO_HOME=$HOME/.honcho python3 $HOME/.honcho/guard.py compact >> /tmp/honcho-guard.log 2>&1
 ```
+
+`guard.py` is omp/pi specific: it compacts `memories/*.md`, which only those
+harnesses write. Under anything else it finds nothing and exits.
 
 ### When to prune tools instead
 
@@ -250,78 +251,6 @@ servers, not smaller memories. Disable a server in `mcp.json` with
 
 ---
 
-## Auto-handoff on model switch
-
-A model switch mid-session is not neutral. The new model gets the message
-history but loses what was implicit: what was being attempted, what already
-failed, which decision was deliberate.
-
-Measured on real usage: **196 `model_change` entries across 90 sessions, 16
-sessions switching mid-work.**
-
-### Why not use omp's `Auto-handoff`?
-
-It exists, but it fires on **compaction** (context full), not on model change,
-and produces a Markdown *summary*. A summary is lossy by construction — it
-cannot report what a specific stack trace said.
-
-### What this does
-
-```
-handoff.py  detect   ->  which model is active, did it change
-            build    ->  structured brief from the real transcript
-            watch    ->  print a brief every time the model changes
-```
-
-The brief is assembled from **evidence**, never from another model's
-paraphrase:
-
-| Section | Source |
-|---|---|
-| Operator requests | user turns, verbatim, oldest first |
-| Observed failures | error text in tool results |
-| Files referenced | tool arguments |
-| Decisions | honcho memory (`DECISION`/`CORRECTION`/`RULE`) |
-| Tool usage, command output | tool result entries |
-
-Size is capped (default 24k chars ≈ 6k tokens) with an explicit truncation
-marker, so a handoff can never be what overflows the window.
-
-### Detection detail
-
-omp emits `model_changed` only inside its TUI — there is no hook to subscribe
-to. The durable signal is the session log at
-`sessions/<project>/<ts>_<id>.jsonl`:
-
-```json
-{"type":"model_change","timestamp":"...","model":"vendor/model-b"}
-```
-
-`--model` can appear several times seconds apart for one logical switch
-(role resolution), so consecutive duplicates collapse into one.
-
-### Delivery
-
-The `handoff` MCP tool returns the brief. When a switch is detected it prefixes:
-
-```
-[MODEL SWITCH DETECTED] vendor/model-a -> vendor/model-b.
-The context below is authoritative; continue from it without re-asking.
-```
-
-`APPEND_SYSTEM.md` instructs the agent to call `mem_handoff` before asking the
-operator anything when it suspects a model switch or a context reset.
-
-### Watch mode
-
-```bash
-python3 handoff.py watch > /tmp/handoff.log &
-```
-
-Prints a fresh brief each time the active model changes — useful when you
-switch models from a second terminal.
-
----
 
 ## License
 

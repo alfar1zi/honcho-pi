@@ -1,0 +1,42 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Check SQLite has FTS5
+        run: |
+          python - <<'PY'
+          import sqlite3
+          c = sqlite3.connect(":memory:")
+          c.execute("CREATE VIRTUAL TABLE t USING fts5(a)")
+          print("fts5 ok", sqlite3.sqlite_version)
+          PY
+
+      - name: Lint
+        run: |
+          python -m compileall -q *.py
+          python - <<'PY'
+          import ast, pathlib
+          for p in pathlib.Path(".").glob("*.py"):
+              ast.parse(p.read_text(), filename=str(p))
+          print("all modules parse")
+          PY
+
+      - name: Test
+        run: python test_honcho.py -v

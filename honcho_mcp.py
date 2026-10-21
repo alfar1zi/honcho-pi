@@ -224,41 +224,6 @@ def _scan_secret(text: str) -> Optional[str]:
             return label
     return None
 
-_handoff_mod = None
-
-
-def _handoff():
-    """Lazy import so the MCP server starts fast and degrades if absent."""
-    global _handoff_mod
-    if _handoff_mod is None:
-        try:
-            import handoff as _h
-            _handoff_mod = _h
-        except ImportError:
-            return None
-    return _handoff_mod
-
-
-def tool_handoff(args: Dict[str, Any], user: str = "") -> str:
-    """Working-context brief, flagging a model switch when one was detected."""
-    h = _handoff()
-    if h is None:
-        return "handoff: handoff.py is not installed next to honcho_mcp.py"
-    try:
-        brief = h.build(int(args.get("max_chars") or 24000))
-    except Exception as exc:  # noqa: BLE001
-        return f"handoff: could not build brief: {exc}"
-    if brief.get("error"):
-        return f"handoff: {brief['error']}"
-    state = brief.get("model") or {}
-    if state.get("switched"):
-        return (
-            f"[MODEL SWITCH DETECTED] {state.get('previous')} -> {state.get('current')}. "
-            "The context below is authoritative; continue from it without re-asking.\n\n"
-            + brief["text"]
-        )
-    return brief["text"]
-
 TOOLS = [
     {
         "name": "recall",
@@ -331,23 +296,6 @@ TOOLS = [
         "description": "Counts of stored memory by type, plus verified totals.",
         "inputSchema": {"type": "object", "properties": {}},
     },
-    {
-        "name": "handoff",
-        "description": (
-            "Full working-context brief for a model that just took over this session. "
-            "Derived from the real transcript (operator's verbatim requests, failures "
-            "observed, files touched, recorded decisions) rather than a summary. Call this "
-            "first when you are continuing a session started under a different model, or "
-            "after a context reset."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "max_chars": {"type": "integer", "default": 24000,
-                              "description": "Cap on brief size."},
-            },
-        },
-    },
 ]
 
 _HANDLERS = {
@@ -356,7 +304,6 @@ _HANDLERS = {
     "reinforce": tool_reinforce,
     "forget": tool_forget,
     "stats": tool_stats,
-    "handoff": tool_handoff,
 }
 
 INSTRUCTIONS = (
