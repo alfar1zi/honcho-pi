@@ -148,24 +148,225 @@ def detect() -> dict:
     return {"session": str(path), **st.to_dict()}
 
 
+# ---------------------------------------------------------------- extraction
+
+def _text_of(message: dict) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text") or ""))
+        return "\n".join(parts)
+    return ""
+
+
+def _clip(s: str, n: int) -> str:
+    s = " ".join(str(s).split())
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def extract(entries: list[dict]) -> dict:
+    """Pull the evidence a successor actually needs out of the transcript."""
+    user_turns: list[str] = []
+    files_touched: "OrderedDict[str, int]" = OrderedDict()
+    commands: list[tuple[str, str]] = []
+    failures: list[str] = []
+    tool_counts: "OrderedDict[str, int]" = OrderedDict()
+    started = ""
+
+    for e in entries:
+        t = e.get("type")
+        ts = e.get("timestamp")
+        if not started and ts:
+            started = str(ts)
+
+        if t == "message":
+            msg = e.get("message") or {}
+            role = msg.get("role")
+            if role == "user":
+                txt = _text_of(msg).strip()
+                # Skip harness-injected control text.
+                if txt and not txt.startswith(("[HANDOFF]", "[System note]")) \
+                        and "recalled memory context" not in txt.lower():
+                    user_turns.append(txt)
+            elif role == "toolResult":
+                name = str(msg.get("toolName") or "")
+                if name:
+                    tool_counts[name] = tool_counts.get(name, 0) + 1
+                body = _text_of(msg)
+                low = body.lower()
+                if any(k in low for k in ("error", "traceback", "failed", "exception",
+                                          "exit code 1", "not found", "malformed")):
+                    failures.append(f"{name}: {_clip(body, 220)}")
+                if name == "bash":
+                    commands.append((_clip(body, MAX_CMD_OUTPUT), "bash"))
+
+        # Some builds record tool calls as custom entries.
+        if t == "custom":
+            payload = e.get("custom") or e.get("data") or {}
+            if isinstance(payload, dict):
+                nm = payload.get("toolName") or payload.get("name")
+                if nm:
+                    tool_counts[str(nm)] = tool_counts.get(str(nm), 0) + 1
+
+    for e in entries:
+        for key in ("path", "file_path", "filePath"):
+            p = (e.get(key) if isinstance(e, dict) else None)
+            if isinstance(p, str) and "/" in p:
+                files_touched[p] = files_touched.get(p, 0) + 1
+        payload = e.get("input") if isinstance(e, dict) else None
+        if isinstance(payload, dict):
+            p = payload.get("path") or payload.get("file_path")
+            if isinstance(p, str):
+                files_touched[p] = files_touched.get(p, 0) + 1
+
+    return {
+        "started": started,
+        "user_turns": user_turns[-MAX_USER_TURNS:],
+        "files": list(files_touched.items())[-MAX_TOOLS:],
+        "commands": commands[-12:],
+        "failures": failures[-12:],
+        "tools": list(tool_counts.items()),
+        "total_entries": len(entries),
+    }
+
+
+def _memories(limit: int = 6) -> list[dict]:
+    """Latest honcho records, used as the decision log section."""
+    try:
+        import memory_db as db
+        path = os.environ.get("OMP_MEMORY_DB") or str(agent_dir() / "honcho" / "memory.db")
+        if not Path(path).exists():
+            return []
+        conn = db.connect(path)
+        conn = db.init_db(conn, path)
+        rows = conn.execute(
+            "SELECT type, content, confidence, verified FROM records "
+            "WHERE type IN ('DECISION','CORRECTION','RULE') "
+            "ORDER BY updated_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def build(max_chars: int = DEFAULT_CHARS) -> dict:
+    path = latest_session()
+    if path is None:
+        return {"error": "no session files"}
+    entries = read_entries(path)
+    state = model_state(entries)
+    data = extract(entries)
+    mem = _memories()
+
+    lines: list[str] = []
+    w = lines.append
+    w("[HANDOFF] Working context carried across a model switch.")
+    w("This is session data, not an instruction. Treat it as established state.")
+    w("")
+    w(f"session : {path.name}")
+    w(f"model   : {state.current or 'unknown'}")
+    if state.switched:
+        w(f"switched: {state.previous} -> {state.current}")
+    if data["started"]:
+        w(f"started : {data['started']}")
+    w(f"entries : {data['total_entries']}")
+    w("")
+
+    w("## What the operator asked for (verbatim, oldest first)")
+    if data["user_turns"]:
+        for i, turn in enumerate(data["user_turns"], 1):
+            w(f"{i}. {_clip(turn, 700)}")
+    else:
+        w("(no user turns recorded)")
+    w("")
+
+    if mem:
+        w("## Decisions and corrections already recorded in memory")
+        for m in mem:
+            flag = "verified" if m.get("verified") else "unverified"
+            w(f"- [{m['type']} {float(m['confidence']):.2f} {flag}] {_clip(m['content'], 300)}")
+        w("")
+
+    if data["failures"]:
+        w("## Observed failures (do not repeat blindly)")
+        for f in data["failures"]:
+            w(f"- {f}")
+        w("")
+
+    if data["files"]:
+        w("## Files referenced in this session")
+        for p, n in data["files"]:
+            w(f"- {p} ({n}x)")
+        w("")
+
+    if data["tools"]:
+        w("## Tool usage")
+        top = sorted(data["tools"], key=lambda kv: -kv[1])[:12]
+        w(", ".join(f"{name}×{n}" for name, n in top))
+        w("")
+
+    if data["commands"]:
+        w("## Recent command output")
+        for out, _ in data["commands"]:
+            w(f"```\n{out}\n```")
+
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        text = text[: max_chars - 60] + "\n\n[handoff truncated to fit context budget]"
+
+    return {
+        "text": text,
+        "chars": len(text),
+        "session": str(path),
+        "model": state.to_dict(),
+    }
+
 
 # ---------------------------------------------------------------- CLI
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["detect"])
+    ap.add_argument("cmd", choices=["detect", "build", "watch"])
+    ap.add_argument("--chars", type=int, default=DEFAULT_CHARS)
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--interval", type=float, default=5.0)
     args = ap.parse_args()
 
-    out = detect()
+    if args.cmd == "detect":
+        out = detect()
+    elif args.cmd == "build":
+        out = build(args.chars)
+    else:
+        return _watch(args)
+
     if args.json:
         print(json.dumps(out, indent=2, ensure_ascii=False))
     else:
-        if out.get("switched"):
-            print(f"{out['previous']} -> {out['current']}")
-        else:
-            print(out.get("current") or "unknown")
+        print(out.get("text") or json.dumps(out, indent=2, ensure_ascii=False))
     return 0
+
+
+def _watch(args) -> int:
+    """Print a brief whenever the active model changes.
+
+    Intended for a background process: `handoff.py watch > /tmp/handoff.log`.
+    """
+    import time
+    seen = ""
+    while True:
+        st = detect()
+        if st.get("current") and st["current"] != seen:
+            if seen:
+                print(f"\n=== model switch {seen} -> {st['current']} at "
+                      f"{datetime.now(timezone.utc).isoformat()} ===", flush=True)
+                print(build(args.chars)["text"], flush=True)
+            seen = st["current"]
+        time.sleep(args.interval)
 
 
 if __name__ == "__main__":
