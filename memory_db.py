@@ -526,7 +526,14 @@ def list_records(conn: sqlite3.Connection, rtype: str = None, project_id: str = 
     return [dict(row) for row in conn.execute(sql, params)]
 
 
-def reinforce(conn: sqlite3.Connection, record_id: str, signal: str, delta: float = 0.1, source: str = "") -> float:
+def reinforce(conn: sqlite3.Connection, record_id: str, signal: str, delta: float = None,
+              source: str = "") -> float:
+    """Apply a feedback signal and return the new confidence.
+
+    Confidence is clamped to [0,1]. No per-call backup: rewriting the whole DB
+    on every reinforcement was the main source of write amplification and
+    lock contention under concurrent sessions.
+    """
     if signal not in VALID_SIGNALS:
         raise ValueError(f"invalid signal: {signal}")
 
@@ -534,8 +541,8 @@ def reinforce(conn: sqlite3.Connection, record_id: str, signal: str, delta: floa
     if not rec:
         raise ValueError(f"record not found: {record_id}")
 
-    actual_delta = VALID_SIGNAL_DELTAS.get(signal, delta)
-    new_conf = min(1.0, max(0.0, rec["confidence"] + actual_delta))
+    actual_delta = _VALID_SIGNAL_DELTAS.get(signal, delta if delta is not None else 0.0)
+    new_conf = min(1.0, max(0.0, float(rec["confidence"]) + actual_delta))
 
     conn.execute("UPDATE records SET confidence=?, updated_at=? WHERE id=?",
                  (new_conf, now_iso(), record_id))
@@ -543,14 +550,49 @@ def reinforce(conn: sqlite3.Connection, record_id: str, signal: str, delta: floa
         INSERT INTO reinforcement (record_id, signal, delta, source, ts)
         VALUES (?, ?, ?, ?, ?)
     """, (record_id, signal, actual_delta, source, now_iso()))
-
     conn.commit()
-    try:
-        backup_db(DB_PATH)
-    except Exception:
-        pass
-
     return new_conf
+
+
+def _parse_iso(value: str) -> datetime:
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except (ValueError, AttributeError):
+        return datetime.now(timezone.utc)
+
+
+def apply_decay(conn: sqlite3.Connection, half_life_days: float = 30.0,
+                floor: float = 0.15, now: datetime = None) -> int:
+    """Age unverified memories toward `floor` on a half-life curve.
+
+    This is what makes memory *learn* rather than accumulate: a claim never
+    re-observed loses confidence until it stops outranking verified knowledge.
+    Verified records and RULE/CORRECTION rows are exempt.
+
+    Decay is derived from `updated_at`, so repeated runs on the same day are
+    stable rather than compounding.
+    """
+    now = now or datetime.now(timezone.utc)
+    rows = conn.execute(
+        "SELECT id, confidence, updated_at FROM records "
+        "WHERE verified=0 AND type NOT IN ('RULE','CORRECTION') AND confidence > ?",
+        (floor,),
+    ).fetchall()
+    changed = 0
+    for r in rows:
+        last = _parse_iso(r["updated_at"])
+        age_days = max(0.0, (now - last).total_seconds() / 86400.0)
+        if age_days < 1.0:
+            continue
+        factor = 0.5 ** (age_days / max(half_life_days, 0.001))
+        new_conf = floor + (float(r["confidence"]) - floor) * factor
+        if new_conf < float(r["confidence"]) - 1e-4:
+            conn.execute("UPDATE records SET confidence=? WHERE id=?", (new_conf, r["id"]))
+            changed += 1
+    if changed:
+        conn.commit()
+    return changed
 
 
 def start_session(conn: sqlite3.Connection, session_id: str, project_id: str = "",
