@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MemoryProvider — Abstract base class for pluggable memory providers.
+MemoryProvider - Abstract base class for pluggable memory providers.
 Inspired by Hermes Agent (NousResearch/hermes-agent).
 """
 

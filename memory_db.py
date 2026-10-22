@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-omp-memory-db — SQLite-backed memory system with FTS5 full-text search.
+omp-memory-db - SQLite-backed memory system with FTS5 full-text search.
 Architecture inspired by Hermes Agent (NousResearch/hermes-agent):
 - Session lineage (parent/child) for context continuity across compressions
 - Pre-compress checkpoint v2 (fail-closed evidence handoff before compression)
-- Profile isolation (profile_contexts table) — no module/class-level mutable state
+- Profile isolation (profile_contexts table) - no module/class-level mutable state
 - WAL journal mode + busy_timeout for concurrent access
 - integrity_check on every open with auto-repair from backup
 - Automatic backup before every write (rotation, max 10)

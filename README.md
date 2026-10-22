@@ -1,130 +1,86 @@
 # omp-memory
 
-OMP Memory System — Persistent memory system for omp agents with SQLite + FTS5 full-text search.
+Persistent memory system for omp agents. SQLite + FTS5 full-text search.
 
-## Overview
+## Architecture
 
-omp-memory is a persistent, cross-session memory system for AI agents. It stores session learnings, insights, and patterns in a SQLite database with FTS5 full-text search. Designed for per-user deployment (each user has their own `~/.omp/memory/` directory).
+```svg
+<svg viewBox="0 0 700 420" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif" font-size="13">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="var(--c1)"/>
+    </marker>
+  </defs>
 
-## Features
+  <!-- Capture -->
+  <rect x="40" y="30" width="140" height="60" rx="6" fill="var(--surface)" stroke="var(--border)" stroke-width="1"/>
+  <text x="110" y="52" text-anchor="middle" fill="var(--fg)">Capture Session</text>
+  <text x="110" y="70" text-anchor="middle" fill="var(--muted)">capture-session.sh</text>
 
-- **SQLite + FTS5** — Full-text search for fast memory retrieval
-- **WAL journal mode** — Concurrent read/write safety
-- **Automatic backup** — Rotating backups (max 10) with 0600 permissions
-- **Auto-repair** — Corrupt database recovery from backups
-- **Session lineage** — Parent/child session tracking for context continuity
-- **Pre-compress checkpoints** — Fail-safe checkpoints before context compression
-- **Profile isolation** — Per-user isolation via environment-based configuration
-- **Secret scanning** — Automatic detection and blocking of API keys, passwords, tokens
-- **Input sanitization** — Proper JSON escaping for all inputs
-- **Deduplication** - Content-based deduplication to prevent duplicate records
-- **Plugin system** - OpenCode plugin with auto-reload and fallback
+  <!-- Store -->
+  <rect x="280" y="30" width="140" height="60" rx="6" fill="var(--surface)" stroke="var(--border)" stroke-width="1"/>
+  <text x="350" y="52" text-anchor="middle" fill="var(--fg)">Memory DB</text>
+  <text x="350" y="70" text-anchor="middle" fill="var(--muted)">SQLite + FTS5</text>
+
+  <!-- Analyze -->
+  <rect x="520" y="30" width="140" height="60" rx="6" fill="var(--surface)" stroke="var(--border)" stroke-width="1"/>
+  <text x="590" y="52" text-anchor="middle" fill="var(--fg)">Analyze</text>
+  <text x="590" y="70" text-anchor="middle" fill="var(--muted)">analyze-session.sh</text>
+
+  <!-- Backup -->
+  <rect x="280" y="130" width="140" height="60" rx="6" fill="var(--surface)" stroke="var(--border)" stroke-width="1"/>
+  <text x="350" y="152" text-anchor="middle" fill="var(--fg)">Backup &amp; Guard</text>
+  <text x="350" y="170" text-anchor="middle" fill="var(--muted)">memory-guard.sh</text>
+
+  <!-- Arrows -->
+  <line x1="180" y1="60" x2="280" y2="60" stroke="var(--c1)" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="350" y1="90" x2="520" y2="60" stroke="var(--c2)" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="350" y1="90" x2="350" y2="130" stroke="var(--c3)" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Labels -->
+  <text x="230" y="50" text-anchor="middle" fill="var(--muted)" font-size="11">store</text>
+  <text x="425" y="75" text-anchor="middle" fill="var(--muted)" font-size="11">analyze</text>
+  <text x="350" y="125" text-anchor="middle" fill="var(--muted)" font-size="11">protect</text>
+</svg>
+```
+
+## Components
+
+| File | Purpose |
+|------|---------|
+| memory_db.py | SQLite + FTS5 core: WAL, integrity check, auto-backup, dedup |
+| memory_provider.py | Abstract base class for pluggable memory providers |
+| memory_context.py | Context fencing and output scrubbing |
+| capture-session.sh | Capture session lessons with secret scanning |
+| analyze-session.sh | Pattern detection and reinforcement |
+| recap-service.sh | Session recap and summary |
+| memory-guard.sh | Health check, backup, repair |
+| disk-check.sh | Disk space validation |
+| secret-scan.sh | Secret pattern detection |
+| audit-log.sh | Audit logging |
+| health-check.sh | System health verification |
+| clean-code.sh | Clean code validation |
+| install.sh | Installation script |
+
+## Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| OMP_MEMORY_DB | ~/.omp/memory/memory.db | Database path |
+| OMP_MEMORY_BACKUP_DIR | ~/.omp/memory/backups | Backup directory |
+| OMP_MEMORY_MAX_BACKUPS | 10 | Maximum backup count |
+| OMP_MEMORY_BUSY_TIMEOUT_MS | 30000 | SQLite busy timeout |
 
 ## Quick Start
 
-### Prerequisites
-
-- Python 3.8+
-- SQLite3 (usually pre-installed on Linux/macOS)
-- Node.js (for the plugin)
-
-### Installation
-
 ```bash
-# Clone the repository
 git clone https://github.com/alfar1zi/honcho-pi.git
 cd honcho-pi
-
-# Make scripts executable
-chmod +x memory_db.py capture-session.sh analyze-session.sh recap-service.sh memory-guard.sh disk-check.sh secret-scan.sh audit-log.sh health-check.sh clean-code.sh
-
-# Initialize the database
-python3 memory_db.py
-
-# Add to your shell profile (~/.bashrc, ~/.zshrc, etc.)
-export OMP_MEMORY_DIR="$HOME/.omp/memory"
-export OMP_MEMORY_DB="$HOME/.omp/memory/memory.db"
-export PATH="$HOME/.omp/memory:$PATH"
+chmod +x *.sh
+./install.sh
+./health-check.sh
 ```
-
-## Usage
-
-### Capture a lesson
-
-```bash
-capture-session.sh --task "Fix database connection" --outcome "Connection pool fixed with pool_size=10" --type FACT --verified 1 --confidence 0.9 --evidence "Tested under load for 1 hour" --tags "database,fix"
-```
-
-### Recall memory
-
-```bash
-python3 -c "
-import sys; sys.path.insert(0, '.')
-from memory_db import connect, init_db, search
-conn = connect(); init_db(conn)
-results = search(conn, 'database connection', limit=5)
-for r in results:
-    print(f\"{r['content']} (conf={r['confidence']})\")
-conn.close()
-"
-```
-
-### Analyze sessions
-
-```bash
-./analyze-session.sh analyze --project myproject
-./analyze-session.sh promote --threshold 0.85 --project myproject
-```
-
-### Health check
-
-```bash
-./memory-guard.sh health
-./memory-guard.sh backup-and-health
-```
-
-## Project Structure
-
-```
-honcho-pi/
-├── memory_db.py          # SQLite + FTS5 memory database
-├── memory_provider.py    # Hermes-inspired MemoryProvider ABC
-├── memory_context.py     # Context fencing, StreamingContextScrubber
-├── capture-session.sh    # Capture lessons from sessions
-├── analyze-session.sh    # Analyze patterns and reinforce knowledge
-├── recap-service.sh      # Auto-capture idle sessions, recap memory
-├── memory-guard.sh       # Health check, backup, repair
-├── disk-check.sh         # Disk space verification
-├── secret-scan.sh        # Secret scanning (API keys, passwords, tokens)
-├── audit-log.sh          | Audit logging for all operations
-| health-check.sh         | Health check for all components
-| clean-code.sh           | Code quality verification
-| index.js                | OpenCode plugin
-| memory_summary.md       | Primary memory summary
-| .gitignore              | Git ignore rules
-| LICENSE.md              | MIT license
-| README.md               | This file
-| INSTALL.md              | Installation guide
-```
-
-## Security
-
-- All memory data is stored locally in `~/.omp/memory/`
-- Backup files have 0600 permissions (owner read/write only)
-- Secret scanning prevents API keys, passwords, and tokens from being stored
-- Input validation on all inputs
 
 ## License
 
-MIT License - see LICENSE.md for details.
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
-
-## Support
-
-For issues and feature requests, please open an issue on GitHub.
+MIT License.
