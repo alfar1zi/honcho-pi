@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# capture-session.sh — capture lessons from the current omp session into memory DB.
+# capture-session.sh - capture lessons from the current omp session into memory DB.
 # Reboot-safe: never fails hard, creates DB if missing, graceful degrade on error.
 # Supports session lineage (parent_id) for context continuity across compressions.
 # Security: disk space check, secret scanning, JSON escaping, dedup.

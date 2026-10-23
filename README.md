@@ -1,6 +1,6 @@
 # omp-memory
 
-OMP Memory System — Persistent memory system for omp agents with SQLite + FTS5 full-text search.
+OMP Memory System - Persistent memory system for omp agents with SQLite + FTS5 full-text search.
 
 ## Overview
 
@@ -8,15 +8,15 @@ omp-memory is a persistent, cross-session memory system for AI agents. It stores
 
 ## Features
 
-- **SQLite + FTS5** — Full-text search for fast memory retrieval
-- **WAL journal mode** — Concurrent read/write safety
-- **Automatic backup** — Rotating backups (max 10) with 0600 permissions
-- **Auto-repair** — Corrupt database recovery from backups
-- **Session lineage** — Parent/child session tracking for context continuity
-- **Pre-compress checkpoints** — Fail-safe checkpoints before context compression
-- **Profile isolation** — Per-user isolation via environment-based configuration
-- **Secret scanning** — Automatic detection and blocking of API keys, passwords, tokens
-- **Input sanitization** — Proper JSON escaping for all inputs
+- **SQLite + FTS5** - Full-text search for fast memory retrieval
+- **WAL journal mode** - Concurrent read/write safety
+- **Automatic backup** - Rotating backups (max 10) with 0600 permissions
+- **Auto-repair** - Corrupt database recovery from backups
+- **Session lineage** - Parent/child session tracking for context continuity
+- **Pre-compress checkpoints** - Fail-safe checkpoints before context compression
+- **Profile isolation** - Per-user isolation via environment-based configuration
+- **Secret scanning** - Automatic detection and blocking of API keys, passwords, tokens
+- **Input sanitization** - Proper JSON escaping for all inputs
 - **Deduplication** - Content-based deduplication to prevent duplicate records
 - **Plugin system** - OpenCode plugin with auto-reload and fallback
 

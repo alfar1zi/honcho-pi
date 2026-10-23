@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# recap-service.sh — Recap service for omp-memory system.
+# recap-service.sh - Recap service for omp-memory system.
 # Provides session recap and summary generation.
 set -uo pipefail
 
