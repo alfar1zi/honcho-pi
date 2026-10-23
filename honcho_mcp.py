@@ -18,6 +18,9 @@ Tools
     reinforce   Confirm or refute an existing memory after observing reality.
     forget      Retire a memory that is provably wrong.
     stats       Inspect what the agent has learned.
+    reinforce   Confirm or refute an existing memory after observing reality.
+    forget      Retire a memory that is provably wrong.
+    stats       Inspect what the agent has learned.
 
 Environment
     OMP_MEMORY_DB          explicit DB path (wins over all else)
@@ -170,6 +173,43 @@ def tool_remember(args: Dict[str, Any], user: str = "") -> str:
     )
 
 
+def tool_reinforce(args: Dict[str, Any], user: str = "") -> str:
+    conn = get_conn(user)
+    rid = str(args.get("id") or "").strip()
+    signal = str(args.get("signal") or "").strip().lower()
+    if not rid:
+        return "reinforce: id is required"
+    if signal not in db.VALID_SIGNALS:
+        return f"reinforce: invalid signal {signal}; use one of {sorted(db.VALID_SIGNALS)}"
+    try:
+        new_conf = db.reinforce(conn, rid, signal, source=str(args.get("source") or "agent"))
+    except ValueError as exc:
+        return f"reinforce: {exc}"
+    return f"Reinforced {rid} with {signal} -> confidence {new_conf:.2f}"
+
+
+def tool_forget(args: Dict[str, Any], user: str = "") -> str:
+    conn = get_conn(user)
+    rid = str(args.get("id") or "").strip()
+    if not rid:
+        return "forget: id is required"
+    rec = db.get_record(conn, rid)
+    if not rec:
+        return f"forget: no record {rid}"
+    # reinforcement rows hold an FK to records; delete children first or the
+    # parent delete fails with FOREIGN KEY constraint failed.
+    conn.execute("DELETE FROM reinforcement WHERE record_id=?", (rid,))
+    conn.execute("DELETE FROM records WHERE id=?", (rid,))
+    conn.commit()
+    return f"Forgot {rid} ({rec['type']})"
+
+
+def tool_stats(args: Dict[str, Any], user: str = "") -> str:
+    conn = get_conn(user)
+    s = db.stats(conn)
+    return json.dumps(s, indent=2, sort_keys=True)
+
+
 _SECRET_PATTERNS = [
     (r"sk-[A-Za-z0-9_-]{20,}", "openai-style key"),
     (r"ghp_[A-Za-z0-9]{20,}", "github token"),
@@ -231,11 +271,41 @@ TOOLS = [
             "required": ["content"],
         },
     },
+    {
+        "name": "reinforce",
+        "description": (
+            "Adjust a memory's confidence after observing reality. signal=success when it "
+            "held, failure when it did not, correction when you learned the right answer, "
+            "decay to fade it. This is how memory stays calibrated instead of trusting stale notes."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "signal": {"type": "string", "enum": sorted(db.VALID_SIGNALS)},
+                "source": {"type": "string"},
+            },
+            "required": ["id", "signal"],
+        },
+    },
+    {
+        "name": "forget",
+        "description": "Delete a memory record that is provably wrong. Prefer reinforce(failure) when merely uncertain.",
+        "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
+    },
+    {
+        "name": "stats",
+        "description": "Counts of stored memory by type, plus verified totals.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
 ]
 
 _HANDLERS = {
     "recall": tool_recall,
     "remember": tool_remember,
+    "reinforce": tool_reinforce,
+    "forget": tool_forget,
+    "stats": tool_stats,
 }
 
 INSTRUCTIONS = (
