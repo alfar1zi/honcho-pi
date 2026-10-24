@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# analyze-session.sh — analyze captured sessions into patterns, reinforce, and promote.
+# analyze-session.sh - analyze captured sessions into patterns, reinforce, and promote.
 # Reboot-safe: never fails hard, graceful degrade on DB error.
 # Hermes-inspired: multi-keyword pattern detection, session lineage analysis, reinforcement learning.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — Install omp-memory system.
+# install.sh - Install omp-memory system.
 set -euo pipefail
 
 MEMORY_DIR="$HOME/.omp/memory"
