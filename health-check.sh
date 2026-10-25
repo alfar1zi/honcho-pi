@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# health-check.sh — Health check for omp-memory system.
+# health-check.sh - Health check for omp-memory system.
 set -uo pipefail
 
 MEMORY_DIR="$HOME/.omp/memory"
