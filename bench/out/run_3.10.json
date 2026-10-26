@@ -7,7 +7,7 @@
     "init_db": "init_db",
     "list_records": "list_records",
     "quick_check": "quick_check",
-    "recall": null,
+    "recall": "recall",
     "reinforce": "reinforce",
     "remember": "remember",
     "search": "search",
@@ -100,6 +100,7 @@
               "p1,p2"
             ],
             "source_values": [
+              "s1,s2",
               "s1"
             ],
             "status": "OK",
@@ -189,6 +190,7 @@
               "p1,p2"
             ],
             "source_values": [
+              "s1,s2",
               "s1"
             ],
             "status": "OK",
@@ -301,8 +303,8 @@
             "results": {
               "paraphrase": {
                 "hit_at_1": 1.0,
-                "latency_ms_p50": 0.395,
-                "latency_ms_p95": 0.565,
+                "latency_ms_p50": 0.223,
+                "latency_ms_p95": 0.227,
                 "mrr": 1.0,
                 "queries": 4,
                 "recall_at_k": 1.0,
@@ -311,8 +313,8 @@
               },
               "specific": {
                 "hit_at_1": 1.0,
-                "latency_ms_p50": 0.406,
-                "latency_ms_p95": 0.534,
+                "latency_ms_p50": 0.249,
+                "latency_ms_p95": 0.254,
                 "mrr": 1.0,
                 "queries": 4,
                 "recall_at_k": 1.0,
@@ -332,8 +334,8 @@
             "results": {
               "paraphrase": {
                 "hit_at_1": 1.0,
-                "latency_ms_p50": 0.762,
-                "latency_ms_p95": 0.775,
+                "latency_ms_p50": 0.342,
+                "latency_ms_p95": 0.355,
                 "mrr": 1.0,
                 "queries": 4,
                 "recall_at_k": 1.0,
@@ -342,8 +344,8 @@
               },
               "specific": {
                 "hit_at_1": 1.0,
-                "latency_ms_p50": 1.014,
-                "latency_ms_p95": 1.22,
+                "latency_ms_p50": 0.43,
+                "latency_ms_p95": 0.45,
                 "mrr": 1.0,
                 "queries": 4,
                 "recall_at_k": 1.0,
@@ -358,7 +360,7 @@
             }
           }
         },
-        "search_api": "search",
+        "search_api": "recall",
         "win": 100
       },
       "status": "OK"
@@ -366,18 +368,18 @@
     "C_token": {
       "data": {
         "compact": {
-          "chars": 540,
-          "est_chars_div4": 135.0,
-          "est_words_x135": 81.0
+          "chars": 305,
+          "est_chars_div4": 76.2,
+          "est_words_x135": 40.5
         },
-        "compact_over_full": 0.3529,
+        "compact_over_full": 0.3,
         "estimators": "len(text)//4 and word_count*1.35; both coarse, no tokenizer run",
         "full": {
-          "chars": 1760,
-          "est_chars_div4": 440.0,
-          "est_words_x135": 229.5
+          "chars": 894,
+          "est_chars_div4": 223.5,
+          "est_words_x135": 135.0
         },
-        "row_width_full": 352.0,
+        "row_width_full": 178.8,
         "rows": 5
       },
       "status": "OK"
@@ -434,6 +436,6 @@
   "harness": "honcho-pi bench",
   "measured_constant_DB_PATH": "/home/farizi/Documents/project/honcho-pi/bench/db/bench.db",
   "measured_module": "/home/farizi/Documents/project/honcho-pi/src/omp_memory/db.py",
-  "module_md5": "4590f61d3073b38bf45fc4e80e2d0749",
+  "module_md5": "9f95e0ddcc7e806a7b9f6446de27fbe1",
   "python": "3.10.21"
 }

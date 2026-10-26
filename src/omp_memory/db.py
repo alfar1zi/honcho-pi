@@ -58,6 +58,25 @@ FORGET_WINDOW_DAYS = 365
 PRE_COMPRESS_CHECKPOINT_API_VERSION = 2
 SCHEMA_VERSION = 5
 
+# Recall reranking weights and candidate pooling parameters.
+# Lexical is dominant (0.60) because recall is primarily an inquiry of relevance.
+# Heat is moderate (0.25) so stale yet relevant records do not sink while breaking
+# ties among equally relevant facts.
+# Type prior is small (0.05) so trusted kinds (RULE, FACT) outrank INFERENCE
+# without overriding topical relevance.
+RECALL_WEIGHTS = {"lexical": 0.60, "confidence": 0.10, "heat": 0.25, "type_prior": 0.05}
+TYPE_PRIOR = {
+    "RULE": 1.0,
+    "FACT": 1.0,
+    "CORRECTION": 0.85,
+    "DECISION": 0.60,
+    "ASSUMPTION": 0.35,
+    "INFERENCE": 0.25,
+}
+RECALL_POOL_MIN = 20
+RECALL_POOL_FACTOR = 4
+SNIPPET_CHARS = 120
+
 _profile_context = threading.local()
 _promotion_context = threading.local()
 
@@ -760,7 +779,8 @@ def _fts_query(query: str) -> str:
 
 
 def search(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = None,
-           project_id: str = None, verified_only: bool = False, min_confidence: float = 0.0):
+           project_id: str = None, verified_only: bool = False, min_confidence: float = 0.0,
+           pool: int = None):
     if not query or not query.strip():
         return []
     sql = """
@@ -783,9 +803,99 @@ def search(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = N
     if min_confidence > 0:
         sql += " AND r.confidence >= ?"
         params.append(min_confidence)
-    sql += " ORDER BY rank, r.confidence DESC, r.updated_at DESC LIMIT ?"
-    params.append(limit)
-    return [dict(row) for row in conn.execute(sql, params)]
+    sql += " ORDER BY rank, r.verified DESC, r.confidence DESC, r.updated_at DESC LIMIT ?"
+    params.append(pool if pool is not None else limit)
+    rows = [dict(row) for row in conn.execute(sql, params)]
+    if not rows:
+        return []
+    ranks = [r["rank"] for r in rows]
+    min_rank, max_rank = min(ranks), max(ranks)
+    denom = max_rank - min_rank
+    for r in rows:
+        if denom == 0.0:
+            r["lexical"] = 1.0
+        else:
+            r["lexical"] = 1.0 - (r["rank"] - min_rank) / denom
+    return rows
+
+
+def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = False,
+           pool: int = None, rtype: str = None, project_id: str = None, now=None) -> list:
+    """Rerank candidate memories combining lexical match, confidence, heat and type prior."""
+    if not query or not query.strip():
+        return []
+    pool_size = max(pool or 0, limit * RECALL_POOL_FACTOR, RECALL_POOL_MIN)
+    candidates = search(conn, query, limit=pool_size, pool=pool_size,
+                        rtype=rtype, project_id=project_id)
+    if not candidates:
+        return []
+
+    scored = []
+    for cand in candidates:
+        signals = _record_signals(conn, cand["id"])
+        parts = heat_parts(cand, signals, now=now)
+        heat = parts["heat"]
+        lexical = cand.get("lexical", 1.0)
+        confidence = float(cand.get("confidence") or 0.0)
+        prior = TYPE_PRIOR.get(cand.get("type"), 0.0)
+        score = round(
+            RECALL_WEIGHTS["lexical"] * lexical
+            + RECALL_WEIGHTS["confidence"] * confidence
+            + RECALL_WEIGHTS["heat"] * heat
+            + RECALL_WEIGHTS["type_prior"] * prior,
+            6,
+        )
+        scored.append((cand, parts, heat, lexical, prior, score))
+
+    def _sort_key(item):
+        c, parts, heat, lexical, prior, score = item
+        ts = _parse_ts(c.get("updated_at"))
+        epoch = ts.timestamp() if ts else 0.0
+        return (
+            -score,
+            -int(bool(c.get("verified"))),
+            -float(c.get("confidence") or 0.0),
+            -epoch,
+            str(c.get("id") or ""),
+        )
+
+    scored.sort(key=_sort_key)
+    top = scored[:limit]
+
+    out = []
+    if full:
+        for c, parts, heat, lexical, prior, score in top:
+            out.append({
+                "id": c["id"],
+                "type": c["type"],
+                "confidence": c["confidence"],
+                "verified": c["verified"],
+                "score": score,
+                "heat": heat,
+                "content": c.get("content", ""),
+                "evidence": c.get("evidence", ""),
+                "lexical": lexical,
+                "type_prior": prior,
+                "age_days": parts["age_days"],
+                "successes": parts["successes"],
+            })
+    else:
+        for c, parts, heat, lexical, prior, score in top:
+            norm = normalize_content(c.get("content") or "")
+            if len(norm) > SNIPPET_CHARS:
+                snippet = norm[:SNIPPET_CHARS - 3] + "..."
+            else:
+                snippet = norm
+            out.append({
+                "id": c["id"],
+                "type": c["type"],
+                "confidence": c["confidence"],
+                "verified": c["verified"],
+                "score": score,
+                "heat": heat,
+                "snippet": snippet,
+            })
+    return out
 
 
 def get_record(conn: sqlite3.Connection, record_id: str):
