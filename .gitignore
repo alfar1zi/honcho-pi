@@ -13,3 +13,7 @@ backups/
 sessions/
 audit.log
 .DS_Store
+
+# Bench runtime state: per-interpreter DB files and crash leftovers.
+bench/db/
+bench/out/*.err

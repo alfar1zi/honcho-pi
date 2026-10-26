@@ -18,9 +18,47 @@
   "groups": {
     "A_dedup": {
       "data": {
-        "ceiling": "5 of the 6 variants differ only in casing, whitespace or provenance, so a content-normalising path reaches units_for_one_fact=1 for them. The paraphrase variant ('relay backlog kept for 30 days') shares no wording and stays a separate row on any lexical identity; collapsing it needs a similarity layer, which is measured separately.",
-        "paths": {
+        "ceiling": "5 of the 6 variants differ only in casing, whitespace or provenance, so the floor for a content-normalising path is 2 rows: those 5 collapse to one and the wording-disjoint paraphrase stays its own row unless a similarity guard merges it. dedup_ratio 1.0 = nothing merged, 0.3333 = the expected floor for this 6-variant set.",
+        "modes": {
           "remember": {
+            "actions": [
+              {
+                "action": "create",
+                "advisory": "",
+                "reason": "novel",
+                "variant": "base"
+              },
+              {
+                "action": "update",
+                "advisory": "",
+                "reason": "identical",
+                "variant": "casing"
+              },
+              {
+                "action": "update",
+                "advisory": "",
+                "reason": "identical",
+                "variant": "whitespace"
+              },
+              {
+                "action": "update",
+                "advisory": "",
+                "reason": "identical",
+                "variant": "source"
+              },
+              {
+                "action": "update",
+                "advisory": "",
+                "reason": "identical",
+                "variant": "project"
+              },
+              {
+                "action": "create",
+                "advisory": "similar to 15094107f3ac3670 at 0.5556; keep separate unless it is the same fact",
+                "reason": "similar",
+                "variant": "paraphrase"
+              }
+            ],
             "applied_sequence": [
               {
                 "applied": "inserted",
@@ -58,8 +96,97 @@
               "329900f1f49e04ba"
             ],
             "project_provenance": [
-              "p1,p2",
-              "p1"
+              "p1",
+              "p1,p2"
+            ],
+            "source_values": [
+              "s1"
+            ],
+            "status": "OK",
+            "stored_content": [
+              "RETENTION POLICY FOR RELAY BACKLOG IS 30 DAYS",
+              "relay backlog kept for 30 days"
+            ],
+            "units_for_one_fact": 2
+          },
+          "remember_upsert": {
+            "actions": [
+              {
+                "action": "create",
+                "advisory": "",
+                "reason": "novel",
+                "variant": "base"
+              },
+              {
+                "action": "update",
+                "advisory": "",
+                "reason": "identical",
+                "variant": "casing"
+              },
+              {
+                "action": "update",
+                "advisory": "",
+                "reason": "identical",
+                "variant": "whitespace"
+              },
+              {
+                "action": "update",
+                "advisory": "",
+                "reason": "identical",
+                "variant": "source"
+              },
+              {
+                "action": "update",
+                "advisory": "",
+                "reason": "identical",
+                "variant": "project"
+              },
+              {
+                "action": "create",
+                "advisory": "similar to 15094107f3ac3670 at 0.5556; keep separate unless it is the same fact",
+                "reason": "similar",
+                "variant": "paraphrase"
+              }
+            ],
+            "applied_sequence": [
+              {
+                "applied": "inserted",
+                "variant": "base"
+              },
+              {
+                "applied": "updated",
+                "variant": "casing"
+              },
+              {
+                "applied": "updated",
+                "variant": "whitespace"
+              },
+              {
+                "applied": "updated",
+                "variant": "source"
+              },
+              {
+                "applied": "updated",
+                "variant": "project"
+              },
+              {
+                "applied": "inserted",
+                "variant": "paraphrase"
+              }
+            ],
+            "dedup_ratio": 0.3333,
+            "distinct_ids_returned": 2,
+            "ids": [
+              "15094107f3ac3670",
+              "15094107f3ac3670",
+              "15094107f3ac3670",
+              "15094107f3ac3670",
+              "15094107f3ac3670",
+              "329900f1f49e04ba"
+            ],
+            "project_provenance": [
+              "p1",
+              "p1,p2"
             ],
             "source_values": [
               "s1"
@@ -72,6 +199,32 @@
             "units_for_one_fact": 2
           },
           "upsert_record": {
+            "actions": [
+              {
+                "action": null,
+                "variant": "base"
+              },
+              {
+                "action": null,
+                "variant": "casing"
+              },
+              {
+                "action": null,
+                "variant": "whitespace"
+              },
+              {
+                "action": null,
+                "variant": "source"
+              },
+              {
+                "action": null,
+                "variant": "project"
+              },
+              {
+                "action": null,
+                "variant": "paraphrase"
+              }
+            ],
             "applied_sequence": [
               {
                 "applied": null,
@@ -148,8 +301,8 @@
             "results": {
               "paraphrase": {
                 "hit_at_1": 1.0,
-                "latency_ms_p50": 0.38,
-                "latency_ms_p95": 0.426,
+                "latency_ms_p50": 0.395,
+                "latency_ms_p95": 0.565,
                 "mrr": 1.0,
                 "queries": 4,
                 "recall_at_k": 1.0,
@@ -158,8 +311,8 @@
               },
               "specific": {
                 "hit_at_1": 1.0,
-                "latency_ms_p50": 0.449,
-                "latency_ms_p95": 0.535,
+                "latency_ms_p50": 0.406,
+                "latency_ms_p95": 0.534,
                 "mrr": 1.0,
                 "queries": 4,
                 "recall_at_k": 1.0,
@@ -179,8 +332,8 @@
             "results": {
               "paraphrase": {
                 "hit_at_1": 1.0,
-                "latency_ms_p50": 0.726,
-                "latency_ms_p95": 1.091,
+                "latency_ms_p50": 0.762,
+                "latency_ms_p95": 0.775,
                 "mrr": 1.0,
                 "queries": 4,
                 "recall_at_k": 1.0,
@@ -189,8 +342,8 @@
               },
               "specific": {
                 "hit_at_1": 1.0,
-                "latency_ms_p50": 0.982,
-                "latency_ms_p95": 1.808,
+                "latency_ms_p50": 1.014,
+                "latency_ms_p95": 1.22,
                 "mrr": 1.0,
                 "queries": 4,
                 "recall_at_k": 1.0,
@@ -255,7 +408,7 @@
           },
           "verified_wins": true
         },
-        "verdict": "TIDAK ADA DI POHON: no supersession marker column; older verified claim stays live by construction",
+        "verdict": "TIDAK ADA DI POHON: no supersession marker column, so the older verified claim stays live by construction",
         "writer": "remember"
       },
       "status": "OK"
@@ -281,6 +434,6 @@
   "harness": "honcho-pi bench",
   "measured_constant_DB_PATH": "/home/farizi/Documents/project/honcho-pi/bench/db/bench.db",
   "measured_module": "/home/farizi/Documents/project/honcho-pi/src/omp_memory/db.py",
-  "module_md5": "7f050730a1ca4eb0c93c958752fbd61f",
-  "python": "3.12.3"
+  "module_md5": "4590f61d3073b38bf45fc4e80e2d0749",
+  "python": "3.10.21"
 }

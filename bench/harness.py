@@ -102,44 +102,56 @@ def _ratio(num, den):
 # --- A. dedup ---------------------------------------------------------------
 
 def group_dedup(mod, api):
-    """Count rows stored when one fact is written six ways.
+    """Count rows stored when one fact is written six ways, per write mode.
 
-    Measures whether the write path collapses restatements: units_for_one_fact==1
-    means casing, whitespace, source and project drift are all absorbed.
-    dedup_ratio = distinct ids / variants written. Both shipped write paths are
-    measured because they disagree by design: upsert_record keys on
-    type+content+source+project, remember keys on normalised content alone.
-    A path that is absent or takes no such signature is reported, not simulated.
+    Measures whether a write path collapses restatements of one fact:
+    units_for_one_fact==1 means casing, whitespace, source and project drift are
+    all absorbed. dedup_ratio = rows stored / variants written (lower is better;
+    1.0 means nothing merged). Modes are measured separately because they differ
+    by design: upsert_record keys on type+content+source+project, remember keys
+    on normalised content, and remember(upsert=True) additionally merges a
+    near-duplicate that clears the similarity and number guards. A mode whose
+    writer or parameter is absent is reported as such, never simulated.
     """
     if mod is None:
         raise Unmeasurable("module not importable")
     variants = dataset.variants()
-    result = {"variants_written": len(variants), "paths": {}}
+    result = {"variants_written": len(variants), "modes": {}}
 
-    for path, fn_name in (("upsert_record", api.get("upsert_record")),
-                          ("remember", api.get("remember"))):
-        if fn_name is None:
-            result["paths"][path] = {"status": "API TIDAK ADA",
-                                     "looked_for": path}
+    modes = (("upsert_record", "upsert_record", {}),
+             ("remember", "remember", {}),
+             ("remember_upsert", "remember", {"upsert": True}))
+    for label, fn_name, extra in modes:
+        writer = api.get(fn_name) if fn_name else None
+        if writer is None:
+            result["modes"][label] = {"status": "API TIDAK ADA", "looked_for": fn_name}
             continue
         conn = fresh_conn(mod)
         try:
-            ids, applied = _write_variants(conn, getattr(mod, fn_name), variants)
+            try:
+                ids, applied, actions = _write_variants(
+                    conn, getattr(mod, fn_name), variants, extra)
+            except TypeError as exc:
+                result["modes"][label] = {
+                    "status": "API TIDAK ADA",
+                    "looked_for": "%s(%s)" % (fn_name, ", ".join(extra) or ""),
+                    "reason": "writer rejects the signature: %s" % exc}
+                continue
             total = conn.execute("SELECT COUNT(*) FROM records").fetchone()[0]
             cols = _columns(conn)
-            result["paths"][path] = {
+            result["modes"][label] = {
                 "status": "OK",
                 "ids": ids,
                 "applied_sequence": applied,
+                "actions": actions,
                 "distinct_ids_returned": len(set(ids)),
                 "units_for_one_fact": total,
                 "dedup_ratio": _ratio(total, len(variants)),
-                # Provenance accumulation only exists where the schema has it.
-                "source_values": (conn.execute(
-                    "SELECT DISTINCT source FROM records").fetchall()
-                    and [r[0] for r in conn.execute("SELECT DISTINCT source FROM records")]),
+                "source_values": [r[0] for r in conn.execute(
+                    "SELECT DISTINCT source FROM records")],
+                # Provenance accumulation exists only where the column exists.
                 "project_provenance": (
-                    [r[0] for r in conn.execute("SELECT project_ids FROM records")]
+                    [r[0] for r in conn.execute("SELECT project_ids FROM records ORDER BY 1")]
                     if "project_ids" in cols else None),
                 "stored_content": [r[0] for r in conn.execute(
                     "SELECT content FROM records ORDER BY content")],
@@ -148,11 +160,11 @@ def group_dedup(mod, api):
             conn.close()
 
     result["ceiling"] = (
-        "5 of the 6 variants differ only in casing, whitespace or provenance, so a "
-        "content-normalising path reaches units_for_one_fact=1 for them. The "
-        "paraphrase variant ('relay backlog kept for 30 days') shares no wording "
-        "and stays a separate row on any lexical identity; collapsing it needs a "
-        "similarity layer, which is measured separately."
+        "5 of the 6 variants differ only in casing, whitespace or provenance, so "
+        "the floor for a content-normalising path is 2 rows: those 5 collapse to "
+        "one and the wording-disjoint paraphrase stays its own row unless a "
+        "similarity guard merges it. dedup_ratio 1.0 = nothing merged, 0.3333 = "
+        "the expected floor for this 6-variant set."
     )
     return result
 
@@ -161,19 +173,22 @@ def _columns(conn):
     return [r[1] for r in conn.execute("PRAGMA table_info(records)").fetchall()]
 
 
-def _write_variants(conn, write, variants):
-    """Write each variant through the shipped writer; return (ids, applied flags).
+def _write_variants(conn, write, variants, extra=None):
+    """Write each variant through the shipped writer; return (ids, applied, actions).
 
-    Checks the writer's keyword signature with inspect instead of guessing, so a
-    renamed or dropped parameter is reported as an API mismatch rather than
-    producing a distorted row count.
+    The writer's keyword signature is inspected rather than assumed, so a renamed
+    or dropped parameter surfaces as an API mismatch instead of silently
+    distorting the row count. `extra` carries mode-specific flags (upsert=True)
+    and is rejected loudly when the writer does not accept it.
     """
     import inspect
-    params = inspect.signature(write).parameters
-    accepted = set(params)
-    ids, applied = [], []
+    accepted = set(inspect.signature(write).parameters)
+    for key in (extra or {}):
+        if key not in accepted:
+            raise TypeError("%s() has no parameter %r" % (write.__name__, key))
+    ids, applied, actions = [], [], []
     for label, content, source, project in variants:
-        kwargs = {}
+        kwargs = dict(extra or {})
         if "rtype" in accepted:
             kwargs["rtype"] = "FACT"
         if "verified" in accepted:
@@ -188,10 +203,13 @@ def _write_variants(conn, write, variants):
         if isinstance(ret, dict):
             ids.append(ret.get("id") or ret.get("record_id"))
             applied.append({"variant": label, "applied": ret.get("applied")})
+            actions.append({"variant": label, "action": ret.get("action"),
+                            "reason": ret.get("reason"), "advisory": ret.get("advisory")})
         else:
             ids.append(ret)
             applied.append({"variant": label, "applied": None})
-    return ids, applied
+            actions.append({"variant": label, "action": None})
+    return ids, applied, actions
 
 
 def _distinct(conn, column):
@@ -380,10 +398,13 @@ def group_staleness(mod, api):
                                   "valid_until", "replaced_by"],
                "marker_columns_found": marker}
 
+        out["verdict"] = _staleness_verdict(marker)
         writer = api.get("remember") or api.get("upsert_record")
         if writer is None:
             out["writer"] = "API TIDAK ADA"
             out["write_reason"] = "no write API found (looked for remember, upsert_record)"
+            out["ranking"] = None
+            out["ranking_reason"] = "not measured: cannot write the two conflicting claims"
             return out
         out["writer"] = writer
         write = getattr(mod, writer)
@@ -415,14 +436,17 @@ def group_staleness(mod, api):
                 "verified_wins": bool(old_id in order and
                                       (new_id not in order or order.index(old_id) < order.index(new_id))),
             }
-        if not marker:
-            out["verdict"] = "TIDAK ADA DI POHON: no supersession marker column; " \
-                             "older verified claim stays live by construction"
-        else:
-            out["verdict"] = "marker present: %s" % ",".join(marker)
         return out
     finally:
         conn.close()
+
+
+def _staleness_verdict(marker):
+    """One-line statement of whether any supersession surface exists at all."""
+    if not marker:
+        return ("TIDAK ADA DI POHON: no supersession marker column, so the older "
+                "verified claim stays live by construction")
+    return "marker present: %s" % ",".join(marker)
 
 
 # --- E. integrity -----------------------------------------------------------
@@ -528,13 +552,16 @@ def summarize(report, stream=sys.stderr):
                          % (scale, kind, res["recall_at_k"], res["hit_at_1"],
                             res["mrr"], res["win_rate"], res["latency_ms_p95"]))
     a = (report["groups"].get("A_dedup", {}).get("data") or {})
-    for path, block in (a.get("paths") or {}).items():
+    for mode, block in (a.get("modes") or {}).items():
         if block.get("status") == "OK":
-            stream.write("  A %-14s units=%s ratio=%s\n"
-                         % (path, block["units_for_one_fact"], block["dedup_ratio"]))
+            merged = [x["variant"] for x in (block.get("applied_sequence") or [])
+                      if x.get("applied") == "updated"]
+            stream.write("  A %-16s rows=%s ratio=%s merged=%s\n"
+                         % (mode, block["units_for_one_fact"], block["dedup_ratio"],
+                            ",".join(merged) or "-"))
         else:
-            stream.write("  A %-14s %s (%s)\n"
-                         % (path, block.get("status"), block.get("looked_for")))
+            stream.write("  A %-16s %s (%s)\n"
+                         % (mode, block.get("status"), block.get("looked_for")))
     c = report["groups"].get("C_token", {}).get("data")
     if c:
         stream.write("  C compact/full=%s (%s -> %s chars, %s rows)\n"
