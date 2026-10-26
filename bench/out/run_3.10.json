@@ -303,8 +303,8 @@
             "results": {
               "paraphrase": {
                 "hit_at_1": 1.0,
-                "latency_ms_p50": 0.223,
-                "latency_ms_p95": 0.227,
+                "latency_ms_p50": 0.218,
+                "latency_ms_p95": 0.222,
                 "mrr": 1.0,
                 "queries": 4,
                 "recall_at_k": 1.0,
@@ -313,8 +313,8 @@
               },
               "specific": {
                 "hit_at_1": 1.0,
-                "latency_ms_p50": 0.249,
-                "latency_ms_p95": 0.254,
+                "latency_ms_p50": 0.245,
+                "latency_ms_p95": 0.248,
                 "mrr": 1.0,
                 "queries": 4,
                 "recall_at_k": 1.0,
@@ -334,8 +334,8 @@
             "results": {
               "paraphrase": {
                 "hit_at_1": 1.0,
-                "latency_ms_p50": 0.342,
-                "latency_ms_p95": 0.355,
+                "latency_ms_p50": 0.34,
+                "latency_ms_p95": 0.354,
                 "mrr": 1.0,
                 "queries": 4,
                 "recall_at_k": 1.0,
@@ -344,8 +344,8 @@
               },
               "specific": {
                 "hit_at_1": 1.0,
-                "latency_ms_p50": 0.43,
-                "latency_ms_p95": 0.45,
+                "latency_ms_p50": 0.427,
+                "latency_ms_p95": 0.449,
                 "mrr": 1.0,
                 "queries": 4,
                 "recall_at_k": 1.0,
@@ -436,6 +436,6 @@
   "harness": "honcho-pi bench",
   "measured_constant_DB_PATH": "/home/farizi/Documents/project/honcho-pi/bench/db/bench.db",
   "measured_module": "/home/farizi/Documents/project/honcho-pi/src/omp_memory/db.py",
-  "module_md5": "9f95e0ddcc7e806a7b9f6446de27fbe1",
+  "module_md5": "e2382e6e50d24bab0287e7255dde8d1f",
   "python": "3.10.21"
 }
