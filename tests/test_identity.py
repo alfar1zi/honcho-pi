@@ -68,9 +68,15 @@ def test_provenance_unions_on_merge(conn):
     a = memory_db.remember(conn, "FACT", "one fact", source="s1", project_id="p1")
     memory_db.remember(conn, "FACT", "one fact", source="s2", project_id="p2")
     rec = memory_db.get_record(conn, a["id"])
-    assert rec["source"] == "s1"
-    assert rec["project_ids"], "merged projects are recorded as provenance"
-    assert "p2" in rec["project_ids"] or rec["project_id"] == "p2"
+    assert rec["source"] == "s1,s2", "a second source is provenance, not a rewrite"
+    assert rec["project_ids"] == "p1,p2"
+
+
+def test_repeated_source_does_not_duplicate(conn):
+    rid = memory_db.remember(conn, "FACT", "two writes", source="s1")["id"]
+    memory_db.remember(conn, "FACT", "two writes", source="s1")
+    memory_db.remember(conn, "FACT", "two writes", source="s1")
+    assert memory_db.get_record(conn, rid)["source"] == "s1"
 
 
 def test_content_id_is_stable_across_rtypes(conn):
@@ -133,3 +139,13 @@ def test_vector_upsert_contract_is_unchanged(conn):
     assert a != b
     same = memory_db.upsert_record(conn, "FACT", "same lesson", session_id="s", project_id="p1")
     assert same == a
+
+
+def test_every_exported_name_resolves():
+    """__all__ drives star-imports; a stale entry is a silent API break."""
+    import omp_memory
+    missing = [n for n in omp_memory.__all__ if not hasattr(omp_memory, n)]
+    assert not missing, f"__all__ names not defined: {missing}"
+    for name in ("content_id", "identity_text", "normalize_content", "remember",
+                 "similarity", "decide", "find_similar", "StreamingContextScrubber"):
+        assert name in omp_memory.__all__, f"{name} missing from __all__"
