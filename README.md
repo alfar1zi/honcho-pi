@@ -34,7 +34,7 @@ m.recall(conn, "install dependencies", limit=2)
 #   "score": 0.81875, "heat": 0.475, "snippet": "install dependencies with UV, not pip"}]
 ```
 
-Both calls ran against an empty temporary database, and the output above is what they printed.
+All three calls ran against an empty temporary database, and the output above is what they printed.
 
 ## Contents
 
@@ -160,7 +160,7 @@ predecessor through `parent_id`, so a recap can walk back across a compression.
 
 ## Recall
 
-`recall()` gathers between `limit * 4` and 20 candidates, scores each one, and returns the top `limit`:
+`recall()` scores at least 20 candidates (or `limit * 4` when that is larger, or `pool`) and returns the top `limit`:
 
 ```
 score = 0.60 * lexical + 0.10 * confidence + 0.25 * heat + 0.05 * type_prior
