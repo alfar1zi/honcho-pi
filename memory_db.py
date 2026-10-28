@@ -19,6 +19,7 @@ so identical content with same source+project produces same ID (no duplicates).
 import sqlite3
 import json
 import hashlib
+import re
 import os
 import sys
 import shutil
@@ -135,38 +136,75 @@ def call_gate_leave(key: tuple, ok: bool) -> None:
         else:
             state["stuck"] += 1
 
+def quarantine_db(db_path: str) -> str:
+    """Move a corrupt database aside instead of destroying it.
 
-def connect(db_path: str = DB_PATH) -> sqlite3.Connection:
-    ensure_dirs()
-    conn = sqlite3.connect(db_path, timeout=BUSY_TIMEOUT_MS / 1000.0)
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("SELECT 1").fetchone()
-        return conn
-    except sqlite3.DatabaseError:
+    Never deletes: a damaged-but-present DB may still be partially readable and
+    is the only forensic evidence of what went wrong. Files land next to the
+    original so a human can inspect them.
+    """
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    moved = []
+    for suffix in ("", "-wal", "-shm"):
+        src = db_path + suffix
+        if not os.path.exists(src):
+            continue
+        dst = f"{db_path}.corrupt.{ts}{suffix}"
         try:
-            conn.close()
-        except Exception:
-            pass
-        try:
-            os.remove(db_path)
-            for ext in ("-wal", "-shm"):
-                p = db_path + ext
-                if os.path.exists(p):
-                    os.remove(p)
+            os.replace(src, dst)
+            moved.append(dst)
         except OSError:
             pass
-        conn = sqlite3.connect(db_path, timeout=BUSY_TIMEOUT_MS / 1000.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+    return moved[0] if moved else ""
+
+
+def _open(db_path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path, timeout=BUSY_TIMEOUT_MS / 1000.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("SELECT 1").fetchone()
+    return conn
+
+
+def connect(db_path: str = DB_PATH) -> sqlite3.Connection:
+    """Open the memory DB, quarantining (never deleting) an unreadable file.
+
+    Recovery order:
+      1. open as-is
+      2. on DatabaseError: quarantine the corrupt file, restore newest
+         backup that passes integrity_check
+      3. no usable backup: quarantine and start a fresh DB at the same path
+    The corrupt file is always preserved on disk.
+    """
+    ensure_dirs()
+    try:
+        return _open(db_path)
+    except sqlite3.DatabaseError:
+        try:
+            os.replace(db_path, f"{db_path}.quarantine")
+        except OSError:
+            pass
+
+    quarantined = quarantine_db(db_path)
+    if quarantined:
+        sys.stderr.write(
+            f"[honcho] corrupt database quarantined at {quarantined}; "
+            "attempting restore from backup\n"
+        )
+
+    if repair_from_backup(db_path):
+        try:
+            conn = _open(db_path)
+            sys.stderr.write("[honcho] restored from newest verified backup\n")
+            return conn
+        except sqlite3.DatabaseError:
+            pass
+
+    sys.stderr.write("[honcho] no usable backup; starting a fresh database\n")
+    return _open(db_path)
 
 
 def integrity_check(conn: sqlite3.Connection) -> bool:
@@ -265,41 +303,57 @@ def _create_schema(conn: sqlite3.Connection):
     CREATE INDEX IF NOT EXISTS idx_sessions_profile   ON sessions(profile);
     CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON pre_compress_checkpoints(session_id);
     CREATE INDEX IF NOT EXISTS idx_reinforcement_record ON reinforcement(record_id);
+    CREATE INDEX IF NOT EXISTS idx_records_updated    ON records(updated_at);
+
+    CREATE TRIGGER IF NOT EXISTS records_ai AFTER INSERT ON records BEGIN
+        INSERT INTO records_fts(id, content, tags) VALUES (new.id, new.content, new.tags);
+    END;
+    CREATE TRIGGER IF NOT EXISTS records_ad AFTER DELETE ON records BEGIN
+        DELETE FROM records_fts WHERE id = old.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS records_au AFTER UPDATE OF content, tags ON records BEGIN
+        DELETE FROM records_fts WHERE id = old.id;
+        INSERT INTO records_fts(id, content, tags) VALUES (new.id, new.content, new.tags);
+    END;
     """)
 
-
 def init_db(conn: sqlite3.Connection, db_path: str = DB_PATH, auto_repair: bool = True):
-    try:
-        ok = quick_check(conn)
-    except sqlite3.DatabaseError:
-        ok = False
-    if not ok:
-        try:
-            ok = integrity_check(conn)
-        except sqlite3.DatabaseError:
-            ok = False
+    """Create schema, repairing through quarantine + backup restore.
+
+    Returns the (possibly replaced) connection. A corrupt database is never
+    deleted: it is quarantined so nothing is silently lost.
+    """
+    ok = _healthy(conn)
     if not ok and auto_repair:
         try:
             conn.close()
-            if repair_from_backup(db_path):
-                conn = connect(db_path)
-                ok = quick_check(conn)
-            else:
-                ok = False
         except sqlite3.DatabaseError:
-            ok = False
+            pass
+        # connect() performs quarantine + backup restore; never deletes.
+        conn = connect(db_path)
+        ok = _healthy(conn)
     if not ok:
         try:
             conn.close()
-            os.remove(db_path)
-            for ext in ("-wal", "-shm"):
-                p = db_path + ext
-                if os.path.exists(p):
-                    os.remove(p)
-            conn = connect(db_path)
-        except (OSError, sqlite3.DatabaseError):
+        except sqlite3.DatabaseError:
             pass
+        quarantined = quarantine_db(db_path)
+        if quarantined:
+            sys.stderr.write(f"[honcho] quarantined unreadable db at {quarantined}\n")
+        conn = _open(db_path)
     _create_schema(conn)
+    return conn
+
+
+def _healthy(conn: sqlite3.Connection) -> bool:
+    try:
+        return quick_check(conn)
+    except sqlite3.DatabaseError:
+        return False
+
+
+
+_REOBSERVE_BOOST = 0.02
 
 
 def upsert_record(conn: sqlite3.Connection, rtype: str, content: str, evidence: str = "",
@@ -319,18 +373,24 @@ def upsert_record(conn: sqlite3.Connection, rtype: str, content: str, evidence: 
 
     if existing:
         record_id = existing["id"]
-        conn.execute(
-            "UPDATE records SET updated_at=?, evidence=? WHERE id=?",
-            (now_iso(), evidence if evidence else None, record_id)
-        )
+        # Re-observation raises confidence slightly and refreshes evidence;
+        # it must never lower what was already established.
+        conn.execute("""
+            UPDATE records
+               SET updated_at=?,
+                   evidence=CASE WHEN ?<>'' THEN ? ELSE evidence END,
+                   verified=CASE WHEN ?=1 THEN 1 ELSE verified END,
+                   confidence=MIN(1.0, MAX(confidence, ?) + ?)
+             WHERE id=?
+        """, (now_iso(), evidence, evidence, 1 if verified else 0,
+              confidence, _REOBSERVE_BOOST, record_id))
     else:
         conn.execute("""
             INSERT INTO records (id,type,content,evidence,verified,confidence,source,tags,created_at,updated_at,session_id,project_id,parent_id)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (record_id, rtype, content, evidence, 1 if verified else 0, confidence, source, tags, now_iso(), now_iso(), project_key, project_key, parent_id))
+        """, (record_id, rtype, content, evidence, 1 if verified else 0, confidence,
+              source, tags, now_iso(), now_iso(), session_id, project_key, parent_id))
 
-    conn.execute("DELETE FROM records_fts WHERE id=?", (record_id,))
-    conn.execute("INSERT INTO records_fts(id, content, tags) VALUES (?,?,?)", (record_id, content, tags))
     conn.commit()
 
     try:
@@ -341,31 +401,106 @@ def upsert_record(conn: sqlite3.Connection, rtype: str, content: str, evidence: 
     return record_id
 
 
-def search(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = None,
-           project_id: str = None, verified_only: bool = False, min_confidence: float = 0.0):
-    sql = """
-        SELECT r.id, r.type, r.content, r.evidence, r.verified, r.confidence, r.source, r.tags,
-               r.created_at, r.updated_at, r.session_id, r.project_id, r.parent_id,
-               bm25(records_fts) AS rank
-        FROM records_fts
-        JOIN records r ON r.id = records_fts.id
-        WHERE records_fts MATCH ?
+_STOPWORDS = {
+    "the", "and", "for", "with", "that", "this", "from", "are", "was", "were",
+    "yang", "dan", "untuk", "dari", "dengan", "pada", "itu", "ini", "atau",
+    "adalah", "tidak", "bisa", "akan", "juga", "kalau", "saat", "agar", "apa",
+}
+
+
+def _fts_query(query: str) -> str:
+    """Turn arbitrary user text into a safe, selective FTS5 MATCH expression.
+
+    Guards two failure modes:
+      1. Raw input breaks MATCH on FTS5 operator characters.
+      2. Weak tokens ("md", "max") match nearly every row and drown the real
+         hit, because bm25 cannot discriminate when confidence is uniform.
+    Tokens under 3 chars, stopwords and pure numbers are dropped; if that
+    empties the set, the original tokens are kept as a fallback.
     """
-    params = [query]
-    if rtype:
-        sql += " AND r.type = ?"
-        params.append(rtype)
-    if project_id:
-        sql += " AND r.project_id = ?"
-        params.append(project_id)
-    if verified_only:
-        sql += " AND r.verified = 1"
-    if min_confidence > 0:
-        sql += " AND r.confidence >= ?"
-        params.append(min_confidence)
-    sql += " ORDER BY r.confidence DESC, r.updated_at DESC LIMIT ?"
-    params.append(limit)
-    return [dict(row) for row in conn.execute(sql, params)]
+    raw = [t for t in re.split(r"[^\w]+", query, flags=re.UNICODE) if t]
+    useful = [t for t in raw
+              if len(t) >= 3 and t.lower() not in _STOPWORDS and not t.isdigit()]
+    tokens = useful or raw
+    if not tokens:
+        return ""
+    return " OR ".join(f'"{t}"' for t in tokens)
+
+
+def search(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = None,
+           project_id: str = None, verified_only: bool = False, min_confidence: float = 0.0,
+           min_score: float = 0.0):
+    """Ranked recall.
+
+    Final score blends lexical relevance (bm25, normalised) with stored
+    confidence, so a well-reinforced rule outranks a lexical near-miss.
+    Falls back to LIKE when the FTS expression yields nothing, which keeps
+    recall working for punctuation-only or single-character queries.
+    """
+    match = _fts_query(query)
+    rows = []
+    if match:
+        sql = """
+            SELECT r.id, r.type, r.content, r.evidence, r.verified, r.confidence, r.source,
+                   r.tags, r.created_at, r.updated_at, r.session_id, r.project_id, r.parent_id,
+                   bm25(records_fts) AS rank
+            FROM records_fts
+            JOIN records r ON r.id = records_fts.id
+            WHERE records_fts MATCH ?
+        """
+        params: list = [match]
+        if rtype:
+            sql += " AND r.type = ?"
+            params.append(rtype)
+        if project_id:
+            sql += " AND (r.project_id = ? OR r.project_id = '')"
+            params.append(project_id)
+        if verified_only:
+            sql += " AND r.verified = 1"
+        if min_confidence > 0:
+            sql += " AND r.confidence >= ?"
+            params.append(min_confidence)
+        sql += " LIMIT ?"
+        params.append(max(limit * 4, limit))
+        try:
+            rows = [dict(row) for row in conn.execute(sql, params)]
+        except sqlite3.OperationalError:
+            rows = []
+
+    if not rows:
+        sql = """SELECT r.id, r.type, r.content, r.evidence, r.verified, r.confidence, r.source,
+                        r.tags, r.created_at, r.updated_at, r.session_id, r.project_id, r.parent_id,
+                        0.0 AS rank
+                   FROM records r
+                  WHERE r.content LIKE ? ESCAPE '\\'"""
+        params = [f"%{query.replace('%', '\\%').replace('_', '\\_')}%"]
+        if rtype:
+            sql += " AND r.type = ?"
+            params.append(rtype)
+        if project_id:
+            sql += " AND (r.project_id = ? OR r.project_id = '')"
+            params.append(project_id)
+        if verified_only:
+            sql += " AND r.verified = 1"
+        if min_confidence > 0:
+            sql += " AND r.confidence >= ?"
+            params.append(min_confidence)
+        sql += " LIMIT ?"
+        params.append(max(limit * 4, limit))
+        rows = [dict(row) for row in conn.execute(sql, params)]
+
+    # Relevance must dominate: a corpus with uniform confidence (0.92 across
+    # most rows) would otherwise outvote bm25 and surface unrelated records.
+    for r in rows:
+        # bm25() is negative in SQLite; larger magnitude means a better match.
+        raw_rank = abs(float(r.get("rank") or 0.0))
+        lexical = raw_rank / (1.0 + raw_rank) if raw_rank else 0.0
+        r["score"] = round(0.85 * lexical + 0.15 * float(r["confidence"]), 4)
+
+    rows.sort(key=lambda r: (r["score"], r["confidence"], r["updated_at"]), reverse=True)
+    if min_score > 0:
+        rows = [r for r in rows if r["score"] >= min_score]
+    return rows[:limit]
 
 
 def get_record(conn: sqlite3.Connection, record_id: str):
@@ -391,7 +526,14 @@ def list_records(conn: sqlite3.Connection, rtype: str = None, project_id: str = 
     return [dict(row) for row in conn.execute(sql, params)]
 
 
-def reinforce(conn: sqlite3.Connection, record_id: str, signal: str, delta: float = 0.1, source: str = "") -> float:
+def reinforce(conn: sqlite3.Connection, record_id: str, signal: str, delta: float = None,
+              source: str = "") -> float:
+    """Apply a feedback signal and return the new confidence.
+
+    Confidence is clamped to [0,1]. No per-call backup: rewriting the whole DB
+    on every reinforcement was the main source of write amplification and
+    lock contention under concurrent sessions.
+    """
     if signal not in VALID_SIGNALS:
         raise ValueError(f"invalid signal: {signal}")
 
@@ -399,8 +541,8 @@ def reinforce(conn: sqlite3.Connection, record_id: str, signal: str, delta: floa
     if not rec:
         raise ValueError(f"record not found: {record_id}")
 
-    actual_delta = VALID_SIGNAL_DELTAS.get(signal, delta)
-    new_conf = min(1.0, max(0.0, rec["confidence"] + actual_delta))
+    actual_delta = _VALID_SIGNAL_DELTAS.get(signal, delta if delta is not None else 0.0)
+    new_conf = min(1.0, max(0.0, float(rec["confidence"]) + actual_delta))
 
     conn.execute("UPDATE records SET confidence=?, updated_at=? WHERE id=?",
                  (new_conf, now_iso(), record_id))
@@ -408,14 +550,49 @@ def reinforce(conn: sqlite3.Connection, record_id: str, signal: str, delta: floa
         INSERT INTO reinforcement (record_id, signal, delta, source, ts)
         VALUES (?, ?, ?, ?, ?)
     """, (record_id, signal, actual_delta, source, now_iso()))
-
     conn.commit()
-    try:
-        backup_db(DB_PATH)
-    except Exception:
-        pass
-
     return new_conf
+
+
+def _parse_iso(value: str) -> datetime:
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except (ValueError, AttributeError):
+        return datetime.now(timezone.utc)
+
+
+def apply_decay(conn: sqlite3.Connection, half_life_days: float = 30.0,
+                floor: float = 0.15, now: datetime = None) -> int:
+    """Age unverified memories toward `floor` on a half-life curve.
+
+    This is what makes memory *learn* rather than accumulate: a claim never
+    re-observed loses confidence until it stops outranking verified knowledge.
+    Verified records and RULE/CORRECTION rows are exempt.
+
+    Decay is derived from `updated_at`, so repeated runs on the same day are
+    stable rather than compounding.
+    """
+    now = now or datetime.now(timezone.utc)
+    rows = conn.execute(
+        "SELECT id, confidence, updated_at FROM records "
+        "WHERE verified=0 AND type NOT IN ('RULE','CORRECTION') AND confidence > ?",
+        (floor,),
+    ).fetchall()
+    changed = 0
+    for r in rows:
+        last = _parse_iso(r["updated_at"])
+        age_days = max(0.0, (now - last).total_seconds() / 86400.0)
+        if age_days < 1.0:
+            continue
+        factor = 0.5 ** (age_days / max(half_life_days, 0.001))
+        new_conf = floor + (float(r["confidence"]) - floor) * factor
+        if new_conf < float(r["confidence"]) - 1e-4:
+            conn.execute("UPDATE records SET confidence=? WHERE id=?", (new_conf, r["id"]))
+            changed += 1
+    if changed:
+        conn.commit()
+    return changed
 
 
 def start_session(conn: sqlite3.Connection, session_id: str, project_id: str = "",
