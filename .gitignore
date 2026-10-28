@@ -1,0 +1,49 @@
+# omp-memory - Git ignore file
+
+# Data files - user-specific data should not be committed
+*.db
+*.db-wal
+*.db-shm
+*.jsonl
+*.log
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Editor/IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+
+# User-specific memory data
+memory_summary.md
+sessions/
+backups/
