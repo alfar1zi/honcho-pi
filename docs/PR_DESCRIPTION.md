@@ -11,6 +11,8 @@
   via `recall()` combining lexical match, confidence, heat, and type priors.
 - Markdown mirror and benchmark harness: Deterministic export via `export_markdown()`, push-free local sync via
   `sync_mirror()`, and write-path dedup measurement across Python 3.10, 3.12, and 3.13.
+- Cross-platform: `chmod` failures no longer abort a backup or a repair, git output is decoded as UTF-8, JSONL logs
+  keep LF endings, and the README quick setup targets pipx on Windows, macOS, and Linux.
 
 ## Commits
 | Commit | What it does |
@@ -38,7 +40,7 @@
 
 ## Measured, not claimed
 - Measured module MD5 for `src/omp_memory/db.py` is `e2382e6e50d24bab0287e7255dde8d1f` across all interpreter runs.
-- The test suite passes 163 tests on Python 3.12 (`python3.12 -m pytest -q`).
+- The test suite passes 165 tests on Python 3.12 (`python3.12 -m pytest -q`).
 - Group B retrieval harness scores 1.0 across all metrics (R@5 = 1.0, hit@1 = 1.0, MRR = 1.0) on every arm, proving
   sub-millisecond latency without regressions but NOT proving that reranking outperforms baseline.
 
