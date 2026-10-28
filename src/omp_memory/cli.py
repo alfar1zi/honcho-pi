@@ -78,7 +78,8 @@ def _project_id() -> str:
     try:
         remote = subprocess.run(
             ["git", "remote", "get-url", "origin"],
-            capture_output=True, text=True, timeout=5, check=False,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=5, check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -87,7 +88,8 @@ def _project_id() -> str:
     try:
         top = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=5, check=False,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=5, check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -181,7 +183,7 @@ def _append_jsonl(session: str, project: str, args, content: str) -> None:
         "tags": args.tags,
         "parent_id": args.parent_id,
     }
-    with path.open("a", encoding="utf-8") as fh:
+    with path.open("a", encoding="utf-8", newline="\n") as fh:
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
@@ -192,7 +194,7 @@ def _audit(action: str, detail: str, session: str, project: str) -> None:
         f"action={action} session={session} project={project} detail={detail}\n"
     )
     try:
-        with log.open("a", encoding="utf-8") as fh:
+        with log.open("a", encoding="utf-8", newline="\n") as fh:
             fh.write(line)
     except OSError:
         pass
