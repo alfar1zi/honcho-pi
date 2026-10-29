@@ -33,6 +33,8 @@
 | `28eb61a` | Runs CI on Python 3.10 instead of 3.9. |
 | `01d21ee` | Keeps backups and git output working on Windows. |
 | `c07624a` | Adds a cross-platform pipx quick setup for agents. |
+| `0e11616` | Ports the MCP server onto the new API so any MCP agent can use the memory. |
+| `c87f5ba` | Wraps an overlong tool description line for the clean code gate. |
 
 ## What a reviewer should check
 - Does `remember()` still union source and project provenance on a merge? See `tests/test_identity.py`.
@@ -42,10 +44,14 @@
 - Does `apply_decay()` remain idempotent when called repeatedly for the same timestamp? See `tests/test_heat.py`.
 - Does `recall()` break score ties in favor of verified records? See `tests/test_recall.py`.
 - Does `sync_mirror()` report clean and skip committing when the working tree is unchanged? See `tests/test_mirror.py`.
+- Does the MCP server keep working end to end: handshake, remember, recall, reinforce, forget, batch? See
+  `tests/test_mcp.py`.
+- Does per-user token isolation keep one user's database out of another's path? See `tests/test_mcp.py`.
 
 ## Measured, not claimed
 - Measured module MD5 for `src/omp_memory/db.py` is `e2382e6e50d24bab0287e7255dde8d1f` across all interpreter runs.
-- The test suite passes 165 tests on Python 3.12 (`python3.12 -m pytest -q`).
+- The test suite passes 176 tests on Python 3.12 (`python3.12 -m pytest -q`), including 11 end-to-end MCP
+  tests that spawn a real stdio server.
 - Group B retrieval harness scores 1.0 across all metrics (R@5 = 1.0, hit@1 = 1.0, MRR = 1.0) on every arm, proving
   sub-millisecond latency without regressions but NOT proving that reranking outperforms baseline.
 

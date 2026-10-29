@@ -48,6 +48,7 @@ All three calls ran against an empty temporary database, and the output above is
 - [Reliability](#reliability)
 - [Configuration](#configuration)
 - [Agent integration](#agent-integration)
+- [MCP server](#mcp-server)
 - [Development](#development)
 - [Limits](#limits)
 - [License](#license)
@@ -317,10 +318,48 @@ class MyMemory(MemoryProvider):
 `sanitize_context` and `StreamingContextScrubber` remove that fence from anything that leaves the agent, including a
 fence split across streaming deltas.
 
+## MCP server
+
+`MemoryProvider` needs code inside the agent. For any agent that speaks Model Context Protocol, run the server
+instead; it is one process per session over stdio, and it exposes the same five operations as tools.
+
+```bash
+omp-memory-mcp                                  # stdio, MCP default
+python3 -m omp_memory.mcp                       # same, without the console script
+HONCHO_TRANSPORT=http HONCHO_PORT=8765 \
+  HONCHO_TOKENS=t1,t2 omp-memory-mcp            # self-hosted, one database per token
+```
+
+```json
+{
+  "mcpServers": {
+    "mem": {
+      "command": "omp-memory-mcp",
+      "env": {"OMP_MEMORY_DB": "/home/me/.local/share/omp-memory/memory.db"}
+    }
+  }
+}
+```
+
+| Tool | What it does |
+| --- | --- |
+| `recall` | Ranked search before acting: lexical match, confidence, heat, type prior. |
+| `remember` | Persist a fact, decision or correction; reports `inserted` vs `updated`. |
+| `reinforce` | `success`, `failure`, `correction`, `reinforce` or `decay` after observing reality. |
+| `forget` | Delete a wrong record, after writing it to `forgotten_graveyard`. |
+| `stats` | Counts by type, plus verified totals. |
+
+`remember` refuses content that matches a known secret pattern (API keys, bearer tokens, private keys) rather than
+storing it. `recall` accepts `type`, `project`, `verified_only` and `min_confidence`; the filtered path uses plain
+`search()` ranking, everything else goes through the `recall()` reranker.
+
+Environment: `OMP_MEMORY_DB` (exact path, wins over everything), `HONCHO_HOME` (data root), `HONCHO_MAX_RECALL`
+(default 8), `HONCHO_EXTRA_TOOLS` (directories of optional `local_*`/`adapter_*` tool modules).
+
 ## Development
 
 ```bash
-python -m pytest          # 163 tests, no network, no shared state
+python -m pytest          # 176 tests, no network, no shared state
 bash bin/clean-code.sh    # secrets, eval, markers, em dashes, line length
 python bench/verify.py    # PASS/FAIL over the benchmark harness
 ```

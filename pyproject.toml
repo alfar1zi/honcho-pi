@@ -27,6 +27,7 @@ dev = ["pytest>=8"]
 
 [project.scripts]
 omp-memory = "omp_memory.cli:main"
+omp-memory-mcp = "omp_memory.mcp:main"
 
 [project.urls]
 Homepage = "https://github.com/alfar1zi/honcho-pi"
