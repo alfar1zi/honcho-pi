@@ -49,7 +49,8 @@
 - Does per-user token isolation keep one user's database out of another's path? See `tests/test_mcp.py`.
 
 ## Measured, not claimed
-- Measured module MD5 for `src/omp_memory/db.py` is `e2382e6e50d24bab0287e7255dde8d1f` across all interpreter runs.
+- Measured module MD5 for `src/omp_memory/db.py` is `aebfd966bdabfcd7811be3cf74c946e8` at `01d21ee`
+  (`e2382e6e...` was the pre-Windows-fix tree).
 - The test suite passes 176 tests on Python 3.12 (`python3.12 -m pytest -q`), including 11 end-to-end MCP
   tests that spawn a real stdio server.
 - Group B retrieval harness scores 1.0 across all metrics (R@5 = 1.0, hit@1 = 1.0, MRR = 1.0) on every arm, proving
@@ -59,4 +60,4 @@
 - No automatic push: `sync_mirror()` only commits to a dedicated local git repository and does not push upstream.
 - No labeled dataset: benchmark tests use synthetic corpora without human relevance labels, so accuracy is unproven.
 - Fixed policy weights: heat components and rerank weights use fixed policy constants rather than fitted parameters.
-- Pytest not installed on 3.10 and 3.13: verification on 3.10 and 3.13 uses py_compile, imports, and harness runs.
+- No coverage gate: the suite asserts behaviour but reports no line coverage number.
