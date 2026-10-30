@@ -114,8 +114,7 @@ omp-memory health                          # pipx install
 ```
 
 The `omp-memory` console script and `python -m omp_memory` call the same `main()`. On Windows the venv path ends in
-`\Scripts\python.exe` instead of `bin/python`. The `bin/*` scripts and `install.sh` are bash shims for POSIX
-installs only.
+`\Scripts\python.exe` instead of `bin/python`.
 
 ### Give an agent this memory
 
@@ -136,21 +135,6 @@ You have a local memory CLI. Install and use it without being asked.
   `--allow-secrets` unless the operator explicitly asks.
 ```
 
-### Install by hand
-
-To install by hand into `~/.omp/memory`:
-
-```bash
-git clone https://github.com/alfar1zi/honcho-pi
-cd honcho-pi
-bash install.sh
-source ~/.omp/memory/env.sh
-omp-memory health
-```
-
-`install.sh` generates `env.sh` on the first run, so that file does not exist in the repo. Re-running the installer
-replaces the code and the `bin/` shims. Your database, backups, capture logs, and audit log stay untouched.
-`--dry-run` shows what would change.
 
 ## CLI
 
