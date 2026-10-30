@@ -24,3 +24,4 @@ bench/out/*.err
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+node_modules/

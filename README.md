@@ -49,6 +49,7 @@ All three calls ran against an empty temporary database, and the output above is
 - [Configuration](#configuration)
 - [Agent integration](#agent-integration)
 - [MCP server](#mcp-server)
+- [Self-update](#self-update)
 - [Development](#development)
 - [Limits](#limits)
 - [License](#license)
@@ -67,21 +68,30 @@ assumption next week. Three failures follow from that:
 
 ## Install
 
-Requires Python 3.10+ with the standard `sqlite3` module.
+One command, no clone, no `cd`, works the same on Linux, macOS, and Windows. The installer needs Python 3.10+ and
+Node 18+ on PATH; everything else it downloads. The database defaults to `~/.omp/memory/memory.db`; set
+`OMP_MEMORY_DB` to move it.
 
 ```bash
-# as an agent skill
-npx skills add alfar1zi/honcho-pi
-
-# or as a python package
-pip install git+https://github.com/alfar1zi/honcho-pi
+npx honcho-pi@latest setup
 ```
 
-### Quick setup
+`npx honcho-pi@latest setup` clones the repo to a temp directory, pins it to the newest commit, creates a virtualenv
+in the install directory, pip installs the package, and runs `omp-memory health` as a smoke test. The system
+Python is never touched. On Windows the install lands under `%APPDATA%\omp-memory` and the CLI under
+`venv\Scripts\omp-memory.exe`; on Linux and macOS it is `~/.omp/memory/venv/bin/omp-memory`.
 
-One command, no clone, no `cd`. `pipx` installs the CLI into its own environment, so it works the same on Linux,
-macOS, and Windows and never trips the "externally managed environment" block that plain `pip` hits on Debian and
-Ubuntu. The database defaults to `~/.omp/memory/memory.db`; set `OMP_MEMORY_DB` to move it.
+Upgrade later without cloning anything:
+
+```bash
+npx honcho-pi@latest update     # reinstalls at the newest commit; keeps the database
+npx honcho-pi@latest status     # compares the installed commit with the newest
+```
+
+### Alternatives
+
+`pipx` installs the CLI into its own environment, so it works the same on Linux, macOS, and Windows and never trips
+the "externally managed environment" block that plain `pip` hits on Debian and Ubuntu:
 
 ```bash
 pipx install "git+https://github.com/alfar1zi/honcho-pi"
@@ -107,11 +117,16 @@ The `omp-memory` console script and `python -m omp_memory` call the same `main()
 `\Scripts\python.exe` instead of `bin/python`. The `bin/*` scripts and `install.sh` are bash shims for POSIX
 installs only.
 
-Paste this block into an agent to make it use the memory:
+### Give an agent this memory
+
+Paste this block into an agent to make it set up and use the memory:
 
 ```text
-You have a local memory CLI. Use it without being asked.
-- `omp-memory` is on PATH after a pipx install; `python -m omp_memory` is the same program if the shim is missing.
+You have a local memory CLI. Install and use it without being asked.
+- Install with: npx honcho-pi@latest setup. Upgrade with: npx honcho-pi@latest update.
+- If Node or Python 3.10+ is missing, say which one and stop; do not install system packages yourself.
+- The `omp-memory` console script lives at ~/.omp/memory/venv/bin/omp-memory on Linux and macOS, and
+  %APPDATA%\omp-memory\venv\Scripts\omp-memory.exe on Windows. Use `python -m omp_memory` if the shim is missing.
 - Before a non-trivial task: `omp-memory search "<keywords>"`, and `recap --session <id>` when you have one.
 - When a task ends: `omp-memory capture --task ... --outcome ... --evidence ...`. Add `--verified` only if you
   observed the result, not if you assumed it.
@@ -120,6 +135,8 @@ You have a local memory CLI. Use it without being asked.
 - Never capture secrets, credentials, or personal data. The CLI refuses secret-looking input; do not pass
   `--allow-secrets` unless the operator explicitly asks.
 ```
+
+### Install by hand
 
 To install by hand into `~/.omp/memory`:
 
@@ -355,6 +372,17 @@ storing it. `recall` accepts `type`, `project`, `verified_only` and `min_confide
 
 Environment: `OMP_MEMORY_DB` (exact path, wins over everything), `HONCHO_HOME` (data root), `HONCHO_MAX_RECALL`
 (default 8), `HONCHO_EXTRA_TOOLS` (directories of optional `local_*`/`adapter_*` tool modules).
+
+## Self-update
+
+The install directory keeps a marker file, `install.json`, with the commit it was installed from. `npx
+honcho-pi@latest update` compares that commit with the newest on the repository, and when they differ it rebuilds
+the virtualenv at the newest commit. The database, backups, capture logs, and audit log live in the same install
+directory and survive every update. `npx honcho-pi@latest status` shows both commits and prints the update command
+when one exists.
+
+There is no background daemon and no scheduled job; updates happen when the command is run. An agent that opens a
+session can run `npx honcho-pi@latest status` and apply the update itself when the output says one is available.
 
 ## Development
 

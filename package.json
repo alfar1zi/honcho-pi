@@ -1,0 +1,10 @@
+{
+  "name": "honcho-pi-npx",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "honcho-pi": "packages/honcho-pi/bin/honcho-pi.js"
+  },
+  "description": "npx entry point for the honcho-pi installer; the real package is in packages/honcho-pi."
+}
