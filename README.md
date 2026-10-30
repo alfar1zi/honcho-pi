@@ -290,7 +290,7 @@ It commits locally and stops. It never pushes.
 | `OMP_MEMORY_BACKUP_DIR` | `~/.omp/memory/backups` | snapshot directory, read at import |
 | `OMP_MEMORY_MAX_BACKUPS` | `10` | snapshots kept, read at import |
 | `OMP_MEMORY_BUSY_TIMEOUT_MS` | `30000` | SQLite lock wait, read at import |
-| `OMP_MEMORY_HOME` | `~/.omp/memory` | install target for `install.sh`, exported in `env.sh` |
+| `OMP_MEMORY_HOME` | `~/.omp/memory` | install target of the npx setup command |
 
 ## Agent integration
 
