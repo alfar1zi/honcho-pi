@@ -66,7 +66,7 @@ assumption next week. Three failures follow from that:
 3. **Memory that corrupts.** A raw copy of a live database can capture a half-written state. Some repair tools delete
    the file when it fails to open. honcho-pi snapshots with `VACUUM INTO` and never deletes a database it cannot open.
 
-## Install
+## Quick setup
 
 One command, no clone, no `cd`, works the same on Linux, macOS, and Windows. The installer needs Python 3.10+ and
 Node 18+ on PATH; everything else it downloads. The database defaults to `~/.omp/memory/memory.db`; set
