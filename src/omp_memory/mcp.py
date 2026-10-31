@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from . import db
+from .context import _neutralize_fence
 
 SERVER_NAME = "honcho"
 SERVER_VERSION = "2.0.0"
@@ -77,24 +78,51 @@ def resolve_db_path(user: str = "") -> Path:
         return Path(explicit).expanduser()
     return home / "memory.db"
 
-
-_lock = threading.Lock()
-_conns: Dict[str, Any] = {}
+_writer_lock = threading.RLock()
+_local = threading.local()
 
 
 def get_conn(user: str = ""):
-    path = resolve_db_path(user)
-    key = str(path)
-    with _lock:
-        conn = _conns.get(key)
-        if conn is not None:
-            return conn
-        path.parent.mkdir(parents=True, exist_ok=True)
+    """Open one sqlite connection per calling thread.
+
+    sqlite3 connections are not thread-safe by default: sharing one across the
+    ThreadingHTTPServer worker threads made the second request fail with
+    ProgrammingError, and the failure was permanent for the process. Each
+    thread opens its own connection; WAL plus the busy timeout lets them
+    coexist. init_db() runs under the writer lock so concurrent first touches
+    cannot race the migration.
+    """
+    conns = getattr(_local, "conns", None)
+    if conns is None:
+        conns = _local.conns = {}
+    key = str(resolve_db_path(user))
+    conn = conns.get(key)
+    if conn is not None:
+        return conn
+    path = Path(key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _writer_lock:
         conn = db.connect(key)
         # init_db() returns None in this API; it migrates in place.
         db.init_db(conn, key)
-        _conns[key] = conn
-        return conn
+    conns[key] = conn
+    return conn
+
+
+def with_conn(user: str = "", fn=None):
+    """Run a tool body under the single-writer lock and return its result.
+
+    Write work (remember/reinforce/forget) is serialised so concurrent HTTP
+    callers cannot interleave the read-modify-write of a merge. Read work also
+    takes the lock: it is cheaper than teaching every tool which statements
+    need it, and recall under load is not the bottleneck.
+    """
+    def run(body):
+        with _writer_lock:
+            return body(get_conn(user))
+    if fn is not None:
+        return run(fn)
+    return run
 
 
 # --------------------------------------------------------------------------
@@ -107,124 +135,137 @@ def _clip(text: str, limit: int = MAX_CONTENT) -> str:
 
 
 def tool_recall(args: Dict[str, Any], user: str = "") -> str:
-    conn = get_conn(user)
-    query = str(args.get("query") or "").strip()
-    if not query:
-        return "recall: query is required"
-    limit = int(args.get("limit") or MAX_RECALL_DEFAULT)
-    limit = max(1, min(limit, 50))
-    rtype = args.get("type")
-    project = args.get("project")
-    verified_only = bool(args.get("verified_only"))
-    min_confidence = float(args.get("min_confidence") or 0.0)
-    # recall() reranks (lexical + confidence + heat + type prior) but takes no
-    # confidence filters; search() takes the filters but ranks lexically only.
-    # Filtered queries are precision queries, so plain search is the right rank
-    # there; everything else goes through the reranker.
-    if verified_only or min_confidence > 0:
-        rows = db.search(
-            conn, query, limit=limit, rtype=rtype, project_id=project,
-            verified_only=verified_only, min_confidence=min_confidence,
-        )
-    else:
+    def body(conn):
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return "recall: query is required"
+        limit = int(args.get("limit") or MAX_RECALL_DEFAULT)
+        limit = max(1, min(limit, 50))
+        rtype = args.get("type")
+        project = args.get("project")
+        verified_only = bool(args.get("verified_only"))
+        min_confidence = float(args.get("min_confidence") or 0.0)
+        # recall() reranks and takes the same confidence filters, so every
+        # query path keeps the same ranking instead of silently downgrading
+        # filtered queries to plain lexical order.
         rows = db.recall(conn, query, limit=limit, full=True,
-                         rtype=rtype, project_id=project)
-    if not rows:
-        return f"No memory matched: {query!r}"
-    out = [f"Recalled {len(rows)} memory record(s) for {query!r}:"]
-    for r in rows:
-        flag = "verified" if r["verified"] else "unverified"
-        out.append(
-            f"- [{r['type']}] {_clip(r['content'], 500)}\n"
-            f"  id={r['id']} confidence={float(r['confidence']):.2f} {flag}"
-            + (f" evidence={_clip(r['evidence'], 200)}" if r["evidence"] else "")
-        )
-    return "\n".join(out)
+                         rtype=rtype, project_id=project,
+                         verified_only=verified_only,
+                         min_confidence=min_confidence)
+        if not rows:
+            return f"No memory matched: {query!r}"
+        out = [f"Recalled {len(rows)} memory record(s) for {query!r}:"]
+        for r in rows:
+            flag = "verified" if r["verified"] else "unverified"
+            out.append(
+                f"- [{r['type']}] {_clip(r['content'], 500)}\n"
+                f"  id={r['id']} confidence={float(r['confidence']):.2f} {flag}"
+                + (f" evidence={_clip(r['evidence'], 200)}" if r["evidence"] else "")
+            )
+        return "\n".join(out)
+    return with_conn(user, body)
 
 
 def tool_remember(args: Dict[str, Any], user: str = "") -> str:
-    conn = get_conn(user)
-    content = str(args.get("content") or "").strip()
-    if not content:
-        return "remember: content is required"
-    rtype = str(args.get("type") or "FACT").upper()
-    if rtype not in db.VALID_TYPES:
-        return f"remember: invalid type {rtype}; use one of {sorted(db.VALID_TYPES)}"
-    leaked = _scan_secret(content + " " + str(args.get("evidence") or ""))
-    if leaked:
-        return f"remember: refused, possible secret detected ({leaked})"
-    result = db.remember(
-        conn,
-        rtype=rtype,
-        content=_clip(content),
-        evidence=_clip(str(args.get("evidence") or "")),
-        verified=1 if args.get("verified") else 0,
-        confidence=float(args.get("confidence") if args.get("confidence") is not None else 0.6),
-        source=str(args.get("source") or "agent"),
-        tags=str(args.get("tags") or ""),
-        session_id=str(args.get("session") or ""),
-        project_id=str(args.get("project") or ""),
-    )
-    rid = result["id"]
-    rec = db.get_record(conn, rid) or {}
-    out = (
-        f"Stored {rtype} id={rid} confidence={float(rec.get('confidence', 0)):.2f} "
-        f"verified={'yes' if rec.get('verified') else 'no'} ({result['applied']})"
-    )
-    # Near-duplicates were reported, not merged; the caller should read this.
-    if result.get("advisory"):
-        out += f"\n{result['advisory']}"
-    return out
+    def body(conn):
+        content = _neutralize_fence(str(args.get("content") or "").strip())
+        if not content:
+            return "remember: content is required"
+        rtype = str(args.get("type") or "FACT").upper()
+        if rtype not in db.VALID_TYPES:
+            return f"remember: invalid type {rtype}; use one of {sorted(db.VALID_TYPES)}"
+        leaked = _scan_secret(content + " " + str(args.get("evidence") or ""))
+        if leaked:
+            return f"remember: refused, possible secret detected ({leaked})"
+        result = db.remember(
+            conn,
+            rtype=rtype,
+            content=_clip(content),
+            evidence=_clip(str(args.get("evidence") or "")),
+            verified=1 if args.get("verified") else 0,
+            confidence=float(args.get("confidence") if args.get("confidence") is not None else 0.6),
+            source=str(args.get("source") or "agent"),
+            tags=str(args.get("tags") or ""),
+            session_id=str(args.get("session") or ""),
+            project_id=str(args.get("project") or ""),
+        )
+        rid = result["id"]
+        rec = db.get_record(conn, rid) or {}
+        out = (
+            f"Stored {rtype} id={rid} confidence={float(rec.get('confidence', 0)):.2f} "
+            f"verified={'yes' if rec.get('verified') else 'no'} ({result['applied']})"
+        )
+        # Near-duplicates were reported, not merged; the caller should read this.
+        if result.get("advisory"):
+            out += f"\n{result['advisory']}"
+        return out
+    return with_conn(user, body)
 
 
 def tool_reinforce(args: Dict[str, Any], user: str = "") -> str:
-    conn = get_conn(user)
-    rid = str(args.get("id") or "").strip()
-    signal = str(args.get("signal") or "").strip().lower()
-    if not rid:
-        return "reinforce: id is required"
-    if signal not in db.VALID_SIGNALS:
-        return f"reinforce: invalid signal {signal}; use one of {sorted(db.VALID_SIGNALS)}"
-    try:
-        new_conf = db.reinforce(conn, rid, signal, source=str(args.get("source") or "agent"))
-    except ValueError as exc:
-        return f"reinforce: {exc}"
-    out = f"Reinforced {rid} with {signal} -> confidence {new_conf:.2f}"
-    promo = db.last_promotion()
-    if promo:
-        out += f"\nPromoted to {promo['to_type']} (heat {float(promo['heat']):.2f})"
-    return out
+    def body(conn):
+        rid = str(args.get("id") or "").strip()
+        signal = str(args.get("signal") or "").strip().lower()
+        if not rid:
+            return "reinforce: id is required"
+        if signal not in db.VALID_SIGNALS:
+            return f"reinforce: invalid signal {signal}; use one of {sorted(db.VALID_SIGNALS)}"
+        try:
+            new_conf = db.reinforce(conn, rid, signal, source=str(args.get("source") or "agent"))
+        except ValueError as exc:
+            return f"reinforce: {exc}"
+        out = f"Reinforced {rid} with {signal} -> confidence {new_conf:.2f}"
+        promo = db.last_promotion()
+        if promo:
+            out += f"\nPromoted to {promo['to_type']} (heat {float(promo['heat']):.2f})"
+        return out
+    return with_conn(user, body)
 
 
 def tool_forget(args: Dict[str, Any], user: str = "") -> str:
-    conn = get_conn(user)
-    rid = str(args.get("id") or "").strip()
-    if not rid:
-        return "forget: id is required"
-    rec = db.get_record(conn, rid)
-    if not rec:
-        return f"forget: no record {rid}"
-    # reinforcement rows hold an FK to records; delete children first or the
-    # parent delete fails with FOREIGN KEY constraint failed. The graveyard
-    # row is written before the delete so a crash leaves an audit trail
-    # instead of a silently missing record, matching forget_cold().
-    conn.execute(
-        "INSERT INTO forgotten_graveyard (id, type, content, reason, ts)"
-        " SELECT id, type, content, 'forgotten via MCP', ? FROM records WHERE id=?",
-        (db.now_iso(), rid),
-    )
-    conn.execute("DELETE FROM reinforcement WHERE record_id=?", (rid,))
-    conn.execute("DELETE FROM records WHERE id=?", (rid,))
-    conn.commit()
-    return f"Forgot {rid} ({rec['type']})"
+    def body(conn):
+        rid = str(args.get("id") or "").strip()
+        if not rid:
+            return "forget: id is required"
+        rec = db.get_record(conn, rid)
+        if not rec:
+            return f"forget: no record {rid}"
+        # reinforcement rows hold an FK to records; delete children first or the
+        # parent delete fails with FOREIGN KEY constraint failed. The graveyard
+        # row is written before the delete so a crash leaves an audit trail
+        # instead of a silently missing record, matching forget_cold(). REPLACE
+        # because the same content can be forgotten, re-created and forgotten
+        # again; a plain INSERT would then fail on the PRIMARY KEY.
+        conn.execute(
+            "INSERT OR REPLACE INTO forgotten_graveyard (id, type, content, reason, ts)"
+            " SELECT id, type, content, 'forgotten via MCP', ? FROM records WHERE id=?",
+            (db.now_iso(), rid),
+        )
+        conn.execute("DELETE FROM reinforcement WHERE record_id=?", (rid,))
+        conn.execute("DELETE FROM records WHERE id=?", (rid,))
+        conn.commit()
+        return f"Forgot {rid} ({rec['type']})"
+    return with_conn(user, body)
 
 
 def tool_stats(args: Dict[str, Any], user: str = "") -> str:
-    conn = get_conn(user)
-    s = db.stats(conn)
-    return json.dumps(s, indent=2, sort_keys=True)
+    def body(conn):
+        return json.dumps(db.stats(conn), indent=2, sort_keys=True)
+    return with_conn(user, body)
 
 
+def tool_maintenance(args: Dict[str, Any], user: str = "") -> str:
+    def body(conn):
+        op = str(args.get("op") or "decay").strip().lower()
+        if op == "decay":
+            return json.dumps({"decayed": db.apply_decay(conn)}, indent=2, sort_keys=True)
+        if op == "forget_cold":
+            report = db.forget_cold(conn, apply=bool(args.get("apply")))
+            return json.dumps(report, indent=2, sort_keys=True)
+        if op == "promote":
+            return json.dumps({"promotion": db.promote_hot(conn)}, indent=2, sort_keys=True)
+        return f"maintenance: unknown op {op}; use decay | forget_cold | promote"
+    return with_conn(user, body)
 _SECRET_PATTERNS = [
     (r"sk-[A-Za-z0-9_-]{20,}", "openai-style key"),
     (r"ghp_[A-Za-z0-9]{20,}", "github token"),
@@ -314,6 +355,19 @@ TOOLS: List[Dict[str, Any]] = [
         "description": "Counts of stored memory by type, plus verified totals.",
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "maintenance",
+        "description": ("Housekeeping: op=decay ages confidence, op=forget_cold "
+                       "reports (or with apply=true deletes) untouched cold records, "
+                       "op=promote reconsiders promotion of hot INFERENCE/ASSUMPTION."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "op": {"type": "string", "enum": ["decay", "forget_cold", "promote"]},
+                "apply": {"type": "boolean", "description": "forget_cold: actually delete"},
+            },
+        },
+    },
 ]
 
 _HANDLERS: Dict[str, Any] = {
@@ -321,6 +375,7 @@ _HANDLERS: Dict[str, Any] = {
     "remember": tool_remember,
     "reinforce": tool_reinforce,
     "forget": tool_forget,
+    "maintenance": tool_maintenance,
     "stats": tool_stats,
 }
 
@@ -403,11 +458,24 @@ def _error(req_id: Any, code: int, message: str) -> Dict[str, Any]:
     return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
 
 
-def handle_message(msg: Dict[str, Any], user: str = "") -> Optional[Dict[str, Any]]:
+def handle_message(msg: Any, user: str = "") -> Optional[Dict[str, Any]]:
     """Handle one JSON-RPC message. Returns None for notifications."""
+    if not isinstance(msg, dict):
+        return _error(None, -32600, "invalid request: message must be an object")
+    try:
+        return _handle_message(msg, user)
+    except Exception:  # noqa: BLE001 - one bad message must not kill the loop
+        traceback.print_exc(file=sys.stderr)
+        req_id = msg.get("id") if isinstance(msg, dict) else None
+        if req_id is None:
+            return None
+        return _error(req_id, -32603, "internal error handling message")
+
+
+def _handle_message(msg: Dict[str, Any], user: str = "") -> Optional[Dict[str, Any]]:
     method = msg.get("method")
     req_id = msg.get("id")
-    params = msg.get("params") or {}
+    params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
 
     if method == "initialize":
         return _result(req_id, {
