@@ -67,15 +67,15 @@ FORGET_FLOOR_SLACK = 0.01
 FORGET_MIN_AGE_DAYS = 180
 FORGET_WINDOW_DAYS = 365
 PRE_COMPRESS_CHECKPOINT_API_VERSION = 2
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
-# Recall reranking weights and candidate pooling parameters.
-# Lexical is dominant (0.60) because recall is primarily an inquiry of relevance.
-# Heat is moderate (0.25) so stale yet relevant records do not sink while breaking
-# ties among equally relevant facts.
+# Recall reranking weights. Lexical is dominant (0.70) because recall is
+# primarily an inquiry of relevance. Heat is moderate (0.25) so stale yet
+# relevant records do not sink while breaking ties among equally relevant
+# facts; confidence is already inside heat, so it gets no second term.
 # Type prior is small (0.05) so trusted kinds (RULE, FACT) outrank INFERENCE
 # without overriding topical relevance.
-RECALL_WEIGHTS = {"lexical": 0.60, "confidence": 0.10, "heat": 0.25, "type_prior": 0.05}
+RECALL_WEIGHTS = {"lexical": 0.70, "heat": 0.25, "type_prior": 0.05}
 TYPE_PRIOR = {
     "RULE": 1.0,
     "FACT": 1.0,
@@ -371,7 +371,7 @@ def _create_schema(conn: sqlite3.Connection):
         last_decay_at TEXT NOT NULL DEFAULT ''
     );
     CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(
-        id, content, evidence, tags
+        id, content, evidence, tags, tokenize="porter unicode61"
     );
     CREATE TABLE IF NOT EXISTS sessions (
         id            TEXT PRIMARY KEY,
@@ -531,8 +531,27 @@ def _migrate(conn: sqlite3.Connection):
         cols = [r[1] for r in conn.execute("PRAGMA table_info(records)").fetchall()]
         if "last_decay_at" not in cols:
             conn.execute("ALTER TABLE records ADD COLUMN last_decay_at TEXT NOT NULL DEFAULT ''")
-        conn.execute("DELETE FROM schema_version")
         conn.execute("INSERT INTO schema_version(version) VALUES (5)")
+        conn.commit()
+
+    if version < 6:
+        # v6: the default FTS tokenizer indexes exact word forms only, so a
+        # query for "deplo" or "deploying" misses a record that says "deploy".
+        # porter unicode61 stems both sides and still supports prefix queries
+        # ("deplo*"). The index is rebuilt from records, so existing rows keep
+        # their ids and every recorded word stays searchable.
+        conn.execute("DROP TABLE records_fts")
+        conn.execute(
+            "CREATE VIRTUAL TABLE records_fts USING fts5("
+            "id, content, evidence, tags, tokenize='porter unicode61')"
+        )
+        conn.execute(
+            "INSERT INTO records_fts(id, content, evidence, tags)"
+            " SELECT id, content, evidence, tags FROM records"
+        )
+        _create_fts_triggers(conn)
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version(version) VALUES (6)")
         conn.commit()
 
 
@@ -749,16 +768,18 @@ def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str =
     if existing:
         conn.execute(
             "UPDATE records SET content=?, evidence=?, verified=?, confidence=?,"
-            " tags=?, session_id=?, parent_id=?, source=?, project_ids=?, updated_at=?"
+            " tags=?, session_id=?, parent_id=?, source=?, project_id=?,"
+            " project_ids=?, updated_at=?"
             " WHERE id=?",
             (_richer_spelling(existing["content"], norm),
              evidence or existing["evidence"],
              max(1 if verified else 0, existing["verified"]),
-             confidence,
+             max(confidence, existing["confidence"]),
              tags or existing["tags"],
              session_id or existing["session_id"],
              parent_id or existing["parent_id"],
              _merge_provenance(existing["source"], source),
+             _merge_provenance(existing["project_id"], project_id),
              _merge_provenance(existing["project_ids"], project_id),
              now_iso(),
              record_id)
@@ -776,23 +797,27 @@ def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str =
 
 
 def _fts_query(query: str) -> str:
-    """Neutralise FTS5 operator characters by quoting each whitespace token.
+    """Turn free text into a safe FTS5 MATCH expression.
 
     A bare MATCH string is a query language: quotes, *, -, NEAR( and boolean
-    keywords either raise or silently change meaning. Quoting every token keeps
-    the original AND-of-terms behaviour for ordinary input and makes operator
-    input inert.
+    keywords either raise or silently change meaning. Each word is re-derived
+    from the tokenizer's own alphabet, so operator characters are dropped
+    rather than escaped, and punctuation-only input collapses to no query.
+    The last word carries a prefix marker: typing "deplo" should still find
+    "deploy" mid-word, which is how an unfinished thought is typed.
     """
-    tokens = query.split()
-    if not tokens:
-        return '""'
-    return " ".join('"' + t.replace('"', '""') + '"' for t in tokens)
+    words = _tokens(query)
+    if not words:
+        return ""
+    quoted = ['"' + w + '"' for w in words[:-1]]
+    quoted.append('"' + words[-1] + '"*')
+    return " ".join(quoted)
 
 
 def search(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = None,
            project_id: str = None, verified_only: bool = False, min_confidence: float = 0.0,
            pool: int = None):
-    if not query or not query.strip():
+    if not query or not _fts_query(query):
         return []
     sql = """
         SELECT r.id, r.type, r.content, r.evidence, r.verified, r.confidence, r.source, r.tags,
@@ -830,28 +855,58 @@ def search(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = N
     return rows
 
 
+BM25_CEILING = 10.0
+
+
+def _absolute_lexical(candidates: list) -> dict:
+    """bm25 rank on a fixed [0, 1] scale, keyed by record id.
+
+    bm25 is negative (more relevant = more negative) and unbounded, so its
+    raw value means nothing across queries, and normalising by the best
+    rank in the pool makes every pool's top hit 1.0 regardless of how well
+    it actually matched. A fixed ceiling instead: lexical = 1 + rank /
+    CEILING, so a perfect match is 1.0, a rank at -CEILING is 0.0, and a
+    hit at lexical 0.9 is as strong in one query as in another. Tiny
+    corpora produce tiny bm25 magnitudes, so everything clamps near 1.0
+    there; that is the honest reading (all hits are near-perfect matches)
+    and the spread reappears as the corpus grows.
+    """
+    return {
+        c["id"]: round(min(1.0, max(0.0, 1.0 + c["rank"] / BM25_CEILING)), 6)
+        for c in candidates
+    }
+
+
 def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = False,
-           pool: int = None, rtype: str = None, project_id: str = None, now=None) -> list:
-    """Rerank candidate memories combining lexical match, confidence, heat and type prior."""
+           pool: int = None, rtype: str = None, project_id: str = None, now=None,
+           verified_only: bool = False, min_confidence: float = 0.0) -> list:
+    """Rerank candidate memories combining lexical match, heat and type prior.
+
+    Confidence enters once, through heat (which already weights it 0.45); a
+    second direct term would count the same value twice and let a high
+    confidence outrank a better lexical match. lexical comes back on an
+    absolute [0, 1] scale (bm25 normalised by a fixed ceiling) so a score is
+    comparable across queries instead of only within one result pool.
+    """
     if not query or not query.strip():
         return []
     pool_size = max(pool or 0, limit * RECALL_POOL_FACTOR, RECALL_POOL_MIN)
     candidates = search(conn, query, limit=pool_size, pool=pool_size,
-                        rtype=rtype, project_id=project_id)
+                        rtype=rtype, project_id=project_id,
+                        verified_only=verified_only, min_confidence=min_confidence)
     if not candidates:
         return []
+    lexicals = _absolute_lexical(candidates)
 
     scored = []
     for cand in candidates:
         signals = _record_signals(conn, cand["id"])
         parts = heat_parts(cand, signals, now=now)
         heat = parts["heat"]
-        lexical = cand.get("lexical", 1.0)
-        confidence = float(cand.get("confidence") or 0.0)
+        lexical = lexicals[cand["id"]]
         prior = TYPE_PRIOR.get(cand.get("type"), 0.0)
         score = round(
             RECALL_WEIGHTS["lexical"] * lexical
-            + RECALL_WEIGHTS["confidence"] * confidence
             + RECALL_WEIGHTS["heat"] * heat
             + RECALL_WEIGHTS["type_prior"] * prior,
             6,
@@ -1073,7 +1128,9 @@ def forget_cold(conn: sqlite3.Connection, apply: bool = False, now=None,
     decision, not a side effect.
 
     On apply the graveyard row is written before the delete, so a crash between
-    the two leaves an audit trail rather than a silently missing record.
+    the two leaves an audit trail rather than a silently missing record. Only a
+    success signal inside the window protects a record: failure and decay lower
+    confidence and must not keep a discredited record alive.
     """
     now = now or datetime.now(timezone.utc)
     cutoff = (now - timedelta(days=min_age_days)).isoformat()
@@ -1087,7 +1144,7 @@ def forget_cold(conn: sqlite3.Connection, apply: bool = False, now=None,
 
     candidates = []
     for row in rows:
-        sql = "SELECT COUNT(*) FROM reinforcement WHERE record_id=?"
+        sql = "SELECT COUNT(*) FROM reinforcement WHERE record_id=? AND signal='success'"
         params = [row["id"]]
         if window_cutoff:
             sql += " AND ts >= ?"
@@ -1162,6 +1219,10 @@ def reinforce(conn: sqlite3.Connection, record_id: str, signal: str,
     An explicit delta overrides the canonical one. Promotion runs only for a
     success signal, and its outcome is reported through last_promotion() so the
     caller can say what happened without re-reading the row.
+
+    Negative signals (failure, decay) do not touch updated_at: a record a
+    session just discredited must stay eligible for forgetting, not be
+    refreshed by the very signal that lowered it.
     """
     if signal not in VALID_SIGNALS:
         raise ValueError(f"invalid signal: {signal}")
@@ -1173,8 +1234,12 @@ def reinforce(conn: sqlite3.Connection, record_id: str, signal: str,
     actual_delta = float(delta) if delta is not None else SIGNAL_DELTAS[signal]
     new_conf = min(1.0, max(0.0, rec["confidence"] + actual_delta))
 
-    conn.execute("UPDATE records SET confidence=?, updated_at=? WHERE id=?",
-                 (new_conf, now_iso(), record_id))
+    if actual_delta >= 0:
+        conn.execute("UPDATE records SET confidence=?, updated_at=? WHERE id=?",
+                     (new_conf, now_iso(), record_id))
+    else:
+        conn.execute("UPDATE records SET confidence=? WHERE id=?",
+                     (new_conf, record_id))
     conn.execute("""
         INSERT INTO reinforcement (record_id, signal, delta, source, ts)
         VALUES (?, ?, ?, ?, ?)

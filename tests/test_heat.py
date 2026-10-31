@@ -144,18 +144,22 @@ def test_forget_requires_every_condition(conn):
     fresh = _cold_record(conn, "fresh survivor", days=5)
     reinforced = _cold_record(conn, "reinforced survivor")
     memory_db.reinforce(conn, reinforced, "decay")
-    _age(conn, reinforced, 400)  # old record, but the signal is inside the window
+    _age(conn, reinforced, 400)  # old record, and decay is not a survival signal
+
+    protected = _cold_record(conn, "success survivor")
+    memory_db.reinforce(conn, protected, "success")
+    _age(conn, protected, 400)  # old record, but the success is inside the window
 
     report = memory_db.forget_cold(conn, apply=True)
     remaining = {r["id"] for r in conn.execute("SELECT id FROM records")}
     assert cold not in remaining
-    for keeper in (fresh, reinforced,
+    for keeper in (fresh, protected,
                    memory_db.content_id("verified survivor"),
                    memory_db.content_id("rule survivor"),
                    memory_db.content_id("correction survivor"),
                    memory_db.content_id("confident survivor")):
         assert keeper in remaining, f"{keeper} should have survived"
-    assert report["forgotten"] == 1
+    assert report["forgotten"] == 2
 
 
 def test_verified_rule_and_correction_survive_old_low_confidence(conn):

@@ -283,6 +283,20 @@ def cmd_reinforce(args) -> int:
     return 0
 
 
+def cmd_maintenance(args) -> int:
+    conn = _open()
+    try:
+        if args.op == "decay":
+            print(json.dumps({"decayed": db.apply_decay(conn)}, indent=2, sort_keys=True))
+        elif args.op == "forget_cold":
+            print(json.dumps(db.forget_cold(conn, apply=args.apply), indent=2, sort_keys=True))
+        elif args.op == "promote":
+            print(json.dumps({"promotion": db.promote_hot(conn)}, indent=2, sort_keys=True))
+    finally:
+        conn.close()
+    return 0
+
+
 def cmd_promote(args) -> int:
     """Promote verified, confident inferences/facts to RULE records."""
     conn = _open()
@@ -554,6 +568,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("stats", help="record counts by type")
     p.set_defaults(func=cmd_stats)
 
+    p = sub.add_parser("maintenance", help="decay, forget cold records, promote hot ones")
+    p.add_argument("op", choices=["decay", "forget_cold", "promote"])
+    p.add_argument("--apply", action="store_true",
+                   help="forget_cold: actually delete (default report only)")
+    p.set_defaults(func=cmd_maintenance)
     p = sub.add_parser("backup", help="consistent snapshot")
     p.set_defaults(func=cmd_backup)
 
