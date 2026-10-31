@@ -1,8 +1,8 @@
-# honcho-pi
-
 <div align="center">
 
-<img src="assets/banner.png" alt="honcho-pi banner" width="100%" />
+<img src="assets/logo.png" alt="honcho-pi logo" width="280" />
+
+# honcho-pi
 
 ### Evidence-backed local memory for coding agents
 
