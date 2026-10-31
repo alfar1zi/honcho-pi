@@ -2,7 +2,7 @@
 
 <div align="center">
 
-<img src="assets/banner.png" alt="honcho-pi banner" width="800" />
+<img src="assets/banner.png" alt="honcho-pi banner" width="100%" />
 
 ### Evidence-backed local memory for coding agents
 
