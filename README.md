@@ -1,14 +1,43 @@
 # honcho-pi
 
-Local memory for coding agents: one SQLite file that stores what worked, so the next session starts where the last
-one stopped.
+<div align="center">
+
+<img src="assets/banner.png" alt="honcho-pi banner" width="800" />
+
+### Evidence-backed local memory for coding agents
+
+One SQLite file that stores what worked, so the next session starts where the last one stopped.
+
+[Quick setup](#quick-setup) | [MCP server](#mcp-server) | [CLI](#cli) | [How it works](#how-it-works)
+
+</div>
+
+---
+
+**honcho-pi is not a black box.** Every record carries a type (FACT, DECISION, CORRECTION, ...), a confidence
+score, a `verified` flag, and the evidence behind it. A lesson that failed loses ground instead of hardening. A
+note that was never re-checked does not get to masquerade as truth. The whole store is one file you can copy
+with `cp`, inspect with `sqlite3`, and commit to your own backup schedule.
+
+There is no server, no API key, and no embedding model. Nothing leaves the machine.
 
 ```bash
 npx skills add alfar1zi/honcho-pi
 ```
 
-That command installs honcho-pi as an agent skill. There is no server, no API key, and no embedding model. The
-database is one file you can copy with `cp`.
+That command installs honcho-pi as an agent skill. To install the memory itself, see [Quick setup](#quick-setup).
+
+## Why it exists
+
+An agent forgets every lesson at session end. It re-learns the same build command and repeats the same wrong
+assumption next week. Three failures follow from that:
+
+1. **Memory that lies.** A note written once and never re-checked becomes confidently wrong. Each record tracks
+   `verified`, `confidence`, and an append-only signal log, so a lesson that fails loses ground instead of hardening.
+2. **Memory that vanishes.** Compression and context resets erase recent lessons. Capture commits the DB row first,
+   then appends a line to a JSONL file. Checkpoint and restore move a session payload through a compression.
+3. **Memory that corrupts.** A raw copy of a live database can capture a half-written state. Some repair tools delete
+   the file when it fails to open. honcho-pi snapshots with `VACUUM INTO` and never deletes a database it cannot open.
 
 ## What it does
 
@@ -36,36 +65,6 @@ m.recall(conn, "install dependencies", limit=2)
 
 All three calls ran against an empty temporary database, and the output above is what they printed.
 
-## Contents
-
-- [What it does](#what-it-does)
-- [Why it exists](#why-it-exists)
-- [Install](#install)
-- [CLI](#cli)
-- [How it works](#how-it-works)
-- [Recall](#recall)
-- [Mirror](#mirror)
-- [Reliability](#reliability)
-- [Configuration](#configuration)
-- [Agent integration](#agent-integration)
-- [MCP server](#mcp-server)
-- [Self-update](#self-update)
-- [Development](#development)
-- [Limits](#limits)
-- [License](#license)
-
-## Why it exists
-
-An agent forgets every lesson at session end. It re-learns the same build command and repeats the same wrong
-assumption next week. Three failures follow from that:
-
-1. **Memory that lies.** A note written once and never re-checked becomes confidently wrong. Each record tracks
-   `verified`, `confidence`, and an append-only signal log, so a lesson that fails loses ground instead of hardening.
-2. **Memory that vanishes.** Compression and context resets erase recent lessons. Capture commits the DB row first,
-   then appends a line to a JSONL file. Checkpoint and restore move a session payload through a compression.
-3. **Memory that corrupts.** A raw copy of a live database can capture a half-written state. Some repair tools delete
-   the file when it fails to open. honcho-pi snapshots with `VACUUM INTO` and never deletes a database it cannot open.
-
 ## Quick setup
 
 One command, no clone, no `cd`, works the same on Linux, macOS, and Windows. The installer needs Python 3.10+ and
@@ -88,7 +87,7 @@ npx honcho-pi@latest update     # reinstalls at the newest commit; keeps the dat
 npx honcho-pi@latest status     # compares the installed commit with the newest
 ```
 
-### Alternatives
+### Install by hand
 
 `pipx` installs the CLI into its own environment, so it works the same on Linux, macOS, and Windows and never trips
 the "externally managed environment" block that plain `pip` hits on Debian and Ubuntu:
@@ -116,9 +115,21 @@ omp-memory health                          # pipx install
 The `omp-memory` console script and `python -m omp_memory` call the same `main()`. On Windows the venv path ends in
 `\Scripts\python.exe` instead of `bin/python`.
 
-### Give an agent this memory
+### Connect an agent
 
-Paste this block into an agent to make it set up and use the memory:
+**Any MCP client.** The MCP server exposes the memory as five tools over stdio. Add this to the agent's MCP
+configuration:
+
+```json
+{
+  "mcpServers": {
+    "memory": { "command": "omp-memory-mcp" }
+  }
+}
+```
+
+**Any agent that can run shell commands.** Paste this block into the agent's instructions to make it set up and
+use the memory:
 
 ```text
 You have a local memory CLI. Install and use it without being asked.
@@ -135,6 +146,8 @@ You have a local memory CLI. Install and use it without being asked.
   `--allow-secrets` unless the operator explicitly asks.
 ```
 
+**Python code.** `MemoryProvider` is an abstract base class. A subclass must define `name`, `is_available`, and
+`initialize`; see [Agent integration](#agent-integration).
 
 ## CLI
 
@@ -329,17 +342,6 @@ omp-memory-mcp                                  # stdio, MCP default
 python3 -m omp_memory.mcp                       # same, without the console script
 HONCHO_TRANSPORT=http HONCHO_PORT=8765 \
   HONCHO_TOKENS=t1,t2 omp-memory-mcp            # self-hosted, one database per token
-```
-
-```json
-{
-  "mcpServers": {
-    "mem": {
-      "command": "omp-memory-mcp",
-      "env": {"OMP_MEMORY_DB": "/home/me/.local/share/omp-memory/memory.db"}
-    }
-  }
-}
 ```
 
 | Tool | What it does |
