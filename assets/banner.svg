@@ -1,6 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320">
   <rect width="1280" height="320" fill="#f8fafc"/>
-  <image x="30" y="10" width="300" height="300" href="logo.png" preserveAspectRatio="xMidYMid meet"/>
-  <text x="360" y="165" font-family="DejaVu Sans" font-size="96" font-weight="bold" fill="#1e293b">honcho-pi</text>
-  <text x="366" y="230" font-family="DejaVu Sans" font-size="34" fill="#64748b">Evidence-backed local memory for coding agents</text>
+  <image x="490" y="10" width="300" height="280" href="logo.png" preserveAspectRatio="xMidYMid meet"/>
+  <text x="640" y="310" font-family="DejaVu Sans" font-size="56" font-weight="bold" fill="#1e293b" text-anchor="middle">honcho-pi</text>
 </svg>
