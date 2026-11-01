@@ -40,3 +40,6 @@ jobs:
 
       - name: Test
         run: python test_honcho.py -v
+
+      - name: Test multi-agent setup
+        run: python test_agents.py -v
