@@ -306,6 +306,62 @@ _HANDLERS = {
     "stats": tool_stats,
 }
 
+def _load_extensions() -> None:
+    """Merge optional tools from HONCHO_EXTRA_TOOLS directories.
+
+    Some capabilities are inherently harness-specific. A session-transcript
+    reader, for example, only works where the transcript format is known, and
+    those formats are undocumented and change without notice. Shipping one in
+    the package would mean advertising a feature that silently breaks.
+
+    Instead an operator can drop a module into a directory and point
+    HONCHO_EXTRA_TOOLS at it. Each module exposes `TOOLS` (a list of MCP tool
+    definitions) and `call(args, user) -> str`. Failures are reported on stderr
+    and never prevent the core tools from loading.
+    """
+    raw = os.environ.get("HONCHO_EXTRA_TOOLS", "")
+    for entry in [p for p in raw.split(os.pathsep) if p]:
+        d = Path(entry).expanduser()
+        if not d.is_dir():
+            continue
+        if str(d) not in sys.path:
+            sys.path.insert(0, str(d))
+        for mod_path in sorted(d.glob("*.py")):
+            name = mod_path.stem
+            if name.startswith("_"):
+                continue
+            # Only modules that opt in as adapters are loaded; a helper module
+            # dropped in the same directory must not be imported for side effects.
+            if not mod_path.name.startswith("local_") and not mod_path.name.startswith("adapter_"):
+                continue
+            try:
+                import importlib
+                mod = importlib.import_module(name)
+            except Exception as exc:  # noqa: BLE001
+                sys.stderr.write(f"[honcho] extension {name} failed: {exc}\n")
+                continue
+            mod_tools = getattr(mod, "TOOLS", None)
+            call = getattr(mod, "call", None)
+            if not mod_tools or not callable(call):
+                continue
+            for spec in mod_tools:
+                tool_name = spec.get("name")
+                if not tool_name or tool_name in _HANDLERS:
+                    continue
+                TOOLS.append(spec)
+                _HANDLERS[tool_name] = _make_extension_handler(call)
+                sys.stderr.write(f"[honcho] extension tool loaded: {tool_name}\n")
+
+
+def _make_extension_handler(call):
+    def handler(args: Dict[str, Any], user: str = "") -> str:
+        return call(args, user)
+    return handler
+
+
+_load_extensions()
+
+
 INSTRUCTIONS = (
     "honcho memory is available. Before non-trivial work, call `recall` with keywords about "
     "the task; prior decisions and corrections are often more reliable than re-deriving them. "
