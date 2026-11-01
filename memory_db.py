@@ -473,7 +473,8 @@ def search(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = N
                         0.0 AS rank
                    FROM records r
                   WHERE r.content LIKE ? ESCAPE '\\'"""
-        params = [f"%{query.replace('%', '\\%').replace('_', '\\_')}%"]
+        escaped = query.replace("%", "\\%").replace("_", "\\_")
+        params = [f"%{escaped}%"]
         if rtype:
             sql += " AND r.type = ?"
             params.append(rtype)
