@@ -50,6 +50,11 @@ PROTOCOL_VERSION = "2024-11-05"
 MAX_CONTENT = 4000
 MAX_RECALL_DEFAULT = int(os.environ.get("HONCHO_MAX_RECALL", "8"))
 
+# Last recall result per user ("" for single-tenant). Reinforce without an id
+# targets these: the agent that just used a recalled memory does not always
+# know which record it came from, but it does know the recall it acted on.
+_last_recall: Dict[str, List[str]] = {}
+
 
 # --------------------------------------------------------------------------
 # Paths and connection
@@ -154,6 +159,7 @@ def tool_recall(args: Dict[str, Any], user: str = "") -> str:
                          min_confidence=min_confidence)
         if not rows:
             return f"No memory matched: {query!r}"
+        _last_recall[user] = [r["id"] for r in rows]
         out = [f"Recalled {len(rows)} memory record(s) for {query!r}:"]
         for r in rows:
             flag = "verified" if r["verified"] else "unverified"
@@ -162,6 +168,9 @@ def tool_recall(args: Dict[str, Any], user: str = "") -> str:
                 f"  id={r['id']} confidence={float(r['confidence']):.2f} {flag}"
                 + (f" evidence={_clip(r['evidence'], 200)}" if r["evidence"] else "")
             )
+        out.append("Say reinforce {id, signal} after using one of these: success when it "
+                   "held, failure when it did not, correction when the right answer was "
+                   "different. The signal feeds confidence and heat.")
         return "\n".join(out)
     return with_conn(user, body)
 
@@ -205,13 +214,21 @@ def tool_remember(args: Dict[str, Any], user: str = "") -> str:
 def tool_reinforce(args: Dict[str, Any], user: str = "") -> str:
     def body(conn):
         rid = str(args.get("id") or "").strip()
-        signal = str(args.get("signal") or "").strip().lower()
         if not rid:
-            return "reinforce: id is required"
+            # No explicit id: the agent is confirming the recall it just used.
+            ids = _last_recall.get(user) or []
+            if not ids:
+                return "reinforce: id is required (or call recall first)"
+            if len(ids) > 1:
+                return ("reinforce: id is required; the last recall returned multiple "
+                        "records, so name the one you used")
+            rid = ids[0]
+        signal = str(args.get("signal") or "").strip().lower()
         if signal not in db.VALID_SIGNALS:
             return f"reinforce: invalid signal {signal}; use one of {sorted(db.VALID_SIGNALS)}"
         try:
-            new_conf = db.reinforce(conn, rid, signal, source=str(args.get("source") or "agent"))
+            new_conf = db.reinforce(conn, rid, signal,
+                                    source=str(args.get("source") or "recall"))
         except ValueError as exc:
             return f"reinforce: {exc}"
         out = f"Reinforced {rid} with {signal} -> confidence {new_conf:.2f}"
@@ -264,7 +281,14 @@ def tool_maintenance(args: Dict[str, Any], user: str = "") -> str:
             return json.dumps(report, indent=2, sort_keys=True)
         if op == "promote":
             return json.dumps({"promotion": db.promote_hot(conn)}, indent=2, sort_keys=True)
-        return f"maintenance: unknown op {op}; use decay | forget_cold | promote"
+        if op == "capture":
+            # Lazy import: capture reads harness session logs, which are not
+            # the storage layer's concern.
+            from . import capture
+            report = capture.capture_session(
+                db, conn, apply=bool(args.get("apply")))
+            return json.dumps(report, indent=2, sort_keys=True)
+        return f"maintenance: unknown op {op}; use decay | forget_cold | promote | capture"
     return with_conn(user, body)
 _SECRET_PATTERNS = [
     (r"sk-[A-Za-z0-9_-]{20,}", "openai-style key"),
@@ -332,16 +356,18 @@ TOOLS: List[Dict[str, Any]] = [
         "description": (
             "Adjust a memory's confidence after observing reality. signal=success when it "
             "held, failure when it did not, correction when you learned the right answer, "
-            "decay to fade it. This is how memory stays calibrated instead of trusting stale notes."
+            "decay to fade it. This is how memory stays calibrated instead of trusting stale "
+            "notes. Omit id to confirm the single record from your last recall."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "id": {"type": "string"},
+                "id": {"type": "string",
+                       "description": "record id; defaults to the last single-hit recall"},
                 "signal": {"type": "string", "enum": sorted(db.VALID_SIGNALS)},
                 "source": {"type": "string"},
             },
-            "required": ["id", "signal"],
+            "required": ["signal"],
         },
     },
     {
@@ -359,12 +385,16 @@ TOOLS: List[Dict[str, Any]] = [
         "name": "maintenance",
         "description": ("Housekeeping: op=decay ages confidence, op=forget_cold "
                        "reports (or with apply=true deletes) untouched cold records, "
-                       "op=promote reconsiders promotion of hot INFERENCE/ASSUMPTION."),
+                       "op=promote reconsiders promotion of hot INFERENCE/ASSUMPTION, "
+                       "op=capture extracts lessons from the current session log "
+                       "(with apply=true they are written to memory)."),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "op": {"type": "string", "enum": ["decay", "forget_cold", "promote"]},
-                "apply": {"type": "boolean", "description": "forget_cold: actually delete"},
+                "op": {"type": "string",
+                       "enum": ["decay", "forget_cold", "promote", "capture"]},
+                "apply": {"type": "boolean",
+                          "description": "forget_cold: actually delete; capture: write"},
             },
         },
     },
@@ -442,7 +472,8 @@ INSTRUCTIONS = (
     "After learning something durable (a root cause, a convention, a verified fact), call "
     "`remember` with an honest type and evidence. When a recalled memory is proven right or "
     "wrong in this session, call `reinforce` with success/failure so confidence stays "
-    "calibrated. Never store secrets."
+    "calibrated. At the end of a session you may call maintenance {op: capture, apply: true} "
+    "to persist lessons from the transcript as low-confidence candidates. Never store secrets."
 )
 
 
