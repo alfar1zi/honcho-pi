@@ -467,13 +467,18 @@ _load_extensions()
 
 
 INSTRUCTIONS = (
-    "honcho memory is available. Before non-trivial work, call `recall` with keywords about "
-    "the task; prior decisions and corrections are often more reliable than re-deriving them. "
-    "After learning something durable (a root cause, a convention, a verified fact), call "
-    "`remember` with an honest type and evidence. When a recalled memory is proven right or "
-    "wrong in this session, call `reinforce` with success/failure so confidence stays "
-    "calibrated. At the end of a session you may call maintenance {op: capture, apply: true} "
-    "to persist lessons from the transcript as low-confidence candidates. Never store secrets."
+    "honcho memory is your persistent memory across sessions and model switches. "
+    "Three habits, every session, no exceptions. "
+    "(1) Before any non-trivial work, call `recall` with keywords about the task; "
+    "prior decisions and corrections are usually more reliable than re-deriving them. "
+    "(2) After a recalled record proves right or wrong in this session, call `reinforce` "
+    "with success/failure for the id you used, so confidence stays calibrated and hot "
+    "records get promoted while stale ones decay. When you learn something durable "
+    "(a root cause, a convention, a verified fact), call `remember` with an honest type. "
+    "(3) At the end of a session, call maintenance {op: capture, apply: true} to persist "
+    "lessons from the transcript as low-confidence candidates. When you suspect you are "
+    "a continuation after a model switch or context reset, call `handoff` before asking "
+    "the operator anything. Never store secrets."
 )
 
 
