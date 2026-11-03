@@ -62,17 +62,19 @@ def test_rerank_reorders_a_controlled_case(conn):
     # Check manual score formula for every record
     for res in results:
         expected = round(
-            0.60 * res["lexical"]
-            + 0.10 * res["confidence"]
+            0.70 * res["lexical"]
             + 0.25 * res["heat"]
             + 0.05 * res["type_prior"],
             6,
         )
         assert res["score"] == pytest.approx(expected, abs=1e-6)
 
-    # Rec 2 must outrank Rec 1 due to heat, confidence, and type_prior despite lower lexical
+    # Rec 2 must outrank Rec 1: heat (driven by confidence) and type_prior
+    # beat the tiny lexical gap now that confidence is not double-counted.
+    # The padding-heavy FACT stays between them on score.
     assert results[0]["id"] == r2["id"]
-    assert results[1]["id"] == r1["id"]
+    assert results[2]["id"] == r1["id"]
+    assert results[1]["id"] == r3["id"]
 
 
 def test_compact_reports_no_evidence_and_is_smaller_than_full(conn):
@@ -164,7 +166,8 @@ def test_verified_beats_unverified_at_equal_score(conn):
     )
     results = memory_db.recall(conn, "cache invalidation policy", limit=5, full=True, now=now)
     assert len(results) == 2
-    # Both have identical lexical, confidence, heat, and type_prior.
+    # Both have identical lexical, confidence, heat, and type_prior, so the
+    # scores tie and the verified flag breaks it.
     assert results[0]["score"] == results[1]["score"]
     assert results[0]["verified"] == 1
 def test_verified_old_beats_wrong_newer(conn):
@@ -173,7 +176,9 @@ def test_verified_old_beats_wrong_newer(conn):
     rec_old = 0.5 ** (10.0 / 30.0)
     rec_new = 1.0
     conf_new = 0.5
-    conf_old = conf_new + (0.0625 * (rec_new - rec_old)) / 0.2125
+    # conf_old chosen so both records land on the same heat despite the
+    # age gap, and therefore the same total score; verified breaks the tie.
+    conf_old = (0.45 * conf_new + 0.25 * (rec_new - rec_old)) / 0.45
 
     r_old = memory_db.remember(
         conn, rtype="FACT",
