@@ -886,10 +886,37 @@ def _search_after_repairs(conn: sqlite3.Connection, query: str, **kwargs) -> lis
     return rows
 
 
+def _or_query(words: list) -> str:
+    """Build an OR match: any word hitting is enough to surface a candidate."""
+    return " OR ".join('"' + w + '"*' for w in words)
+
+
+def _search_relaxed(conn: sqlite3.Connection, query: str, **kwargs) -> list:
+    """When no record contains every word, rank by best single-word match.
+
+    A four-word natural-language query ("ganti model pindah sesi") usually
+    has no record containing all four, and an AND-only index answers zero
+    even though several records cover the intent well. bm25 already ranks
+    an OR pool by how strongly each record matches its best term, so the
+    top rows are the ones sharing the most/strongest words with the query,
+    not random one-word hits. Runs only after the exact AND and the
+    typo-repaired retry both return nothing.
+    """
+    rows = _search_after_repairs(conn, query, **kwargs)
+    if rows:
+        return rows
+    words = _tokens(query)
+    if len(words) < 2:
+        return []
+    or_expr = _or_query(words)
+    return _search_exact(conn, ">" + or_expr, **kwargs) if or_expr else []
+
+
 def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = None,
                   project_id: str = None, verified_only: bool = False,
                   min_confidence: float = 0.0, pool: int = None):
-    if not query or not _fts_query(query):
+    match = query if query.startswith('>') else _fts_query(query)
+    if not match:
         return []
     sql = """
         SELECT r.id, r.type, r.content, r.evidence, r.verified, r.confidence, r.source, r.tags,
@@ -899,7 +926,7 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
         JOIN records r ON r.id = records_fts.id
         WHERE records_fts MATCH ?
     """
-    params = [_fts_query(query)]
+    params = [match[1:] if match.startswith(">") else match]
     if rtype:
         sql += " AND r.type = ?"
         params.append(rtype)
@@ -930,11 +957,11 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
 def search(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = None,
            project_id: str = None, verified_only: bool = False,
            min_confidence: float = 0.0, pool: int = None):
-    """Search exact first, then retry once with typo-repaired words."""
-    return _search_after_repairs(conn, query, limit=limit, rtype=rtype,
-                                 project_id=project_id,
-                                 verified_only=verified_only,
-                                 min_confidence=min_confidence, pool=pool)
+    """Exact AND first, then typo-repaired, then best single-word match."""
+    return _search_relaxed(conn, query, limit=limit, rtype=rtype,
+                           project_id=project_id,
+                           verified_only=verified_only,
+                           min_confidence=min_confidence, pool=pool)
 
 BM25_CEILING = 10.0
 
