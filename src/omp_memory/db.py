@@ -835,7 +835,7 @@ def _fts_query(query: str) -> str:
 
 
 FUZZY_CUTOFF = 0.75
-
+MIN_REPAIR_LEN = 5
 
 def _vocab(conn: sqlite3.Connection) -> list:
     """Distinct stemmed terms in the index, for typo repair.
@@ -867,6 +867,9 @@ def _repair_typos(conn: sqlite3.Connection, words: list, vocab: list) -> list:
     fixed = []
     for w in words:
         if w in vocab_set or any(t.startswith(w) for t in vocab_set):
+            fixed.append(w)
+            continue
+        if len(w) < MIN_REPAIR_LEN:
             fixed.append(w)
             continue
         close = difflib.get_close_matches(w, vocab, n=1, cutoff=FUZZY_CUTOFF)
