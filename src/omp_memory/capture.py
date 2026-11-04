@@ -159,6 +159,8 @@ def extract_lessons(
         # Custom entries carry file paths
         if t == "custom":
             payload = e.get("custom") or e.get("data") or {}
+            if not isinstance(payload, dict):
+                payload = {}
             for key in ("path", "file_path", "filePath"):
                 p = payload.get(key)
                 if isinstance(p, str) and "/" in p:
