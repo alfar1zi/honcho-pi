@@ -66,12 +66,14 @@ def test_migration_v6_rebuilds_fts_and_preserves_records(tmp_path):
     c = db.connect(path)
     db.init_db(c, path)
     version = c.execute("SELECT version FROM schema_version").fetchone()[0]
-    assert version == db.SCHEMA_VERSION == 6
+    assert version == db.SCHEMA_VERSION == 7
     rows = c.execute(
         "SELECT sql FROM sqlite_master WHERE name = 'records_fts'"
     ).fetchone()
     assert "porter" in rows["sql"]
     assert len(db.search(c, "legacy deployment", limit=5)) == 1
+    vocab = c.execute("SELECT COUNT(*) FROM records_fts_vocab").fetchone()[0]
+    assert vocab > 0
     c.close()
 
 def test_absolute_lexical_is_comparable_across_queries(conn):

@@ -16,6 +16,7 @@ Design constraints (verified by tests/test_memory_db.py):
 
 Record types: FACT / ASSUMPTION / INFERENCE / DECISION / RULE / CORRECTION.
 """
+import difflib
 import sqlite3
 import subprocess
 import re
@@ -67,7 +68,7 @@ FORGET_FLOOR_SLACK = 0.01
 FORGET_MIN_AGE_DAYS = 180
 FORGET_WINDOW_DAYS = 365
 PRE_COMPRESS_CHECKPOINT_API_VERSION = 2
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Recall reranking weights. Lexical is dominant (0.70) because recall is
 # primarily an inquiry of relevance. Heat is moderate (0.25) so stale yet
@@ -373,6 +374,8 @@ def _create_schema(conn: sqlite3.Connection):
     CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(
         id, content, evidence, tags, tokenize="porter unicode61"
     );
+    CREATE VIRTUAL TABLE IF NOT EXISTS records_fts_vocab
+        USING fts5vocab(records_fts, row);
     CREATE TABLE IF NOT EXISTS sessions (
         id            TEXT PRIMARY KEY,
         parent_id     TEXT NOT NULL DEFAULT '',
@@ -540,6 +543,7 @@ def _migrate(conn: sqlite3.Connection):
         # porter unicode61 stems both sides and still supports prefix queries
         # ("deplo*"). The index is rebuilt from records, so existing rows keep
         # their ids and every recorded word stays searchable.
+        conn.execute("DROP TABLE IF EXISTS records_fts_vocab")
         conn.execute("DROP TABLE records_fts")
         conn.execute(
             "CREATE VIRTUAL TABLE records_fts USING fts5("
@@ -549,9 +553,25 @@ def _migrate(conn: sqlite3.Connection):
             "INSERT INTO records_fts(id, content, evidence, tags)"
             " SELECT id, content, evidence, tags FROM records"
         )
+        conn.execute(
+            "CREATE VIRTUAL TABLE records_fts_vocab USING fts5vocab(records_fts, row)"
+        )
         _create_fts_triggers(conn)
         conn.execute("DELETE FROM schema_version")
-        conn.execute("INSERT INTO schema_version(version) VALUES (6)")
+    if version < 7:
+        # v7: typo tolerance. The vocabulary table mirrors the FTS index so a
+        # query word the index has never seen can be repaired to its nearest
+        # term instead of returning nothing. A read-only fts5vocab mirror
+        # needs no maintenance; existing databases create it in place.
+        has_vocab = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='records_fts_vocab'").fetchone() is not None
+        if not has_vocab:
+            conn.execute(
+                "CREATE VIRTUAL TABLE records_fts_vocab USING fts5vocab(records_fts, row)"
+            )
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version(version) VALUES (7)")
         conn.commit()
 
 
@@ -814,9 +834,61 @@ def _fts_query(query: str) -> str:
     return " ".join(quoted)
 
 
-def search(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = None,
-           project_id: str = None, verified_only: bool = False, min_confidence: float = 0.0,
-           pool: int = None):
+FUZZY_CUTOFF = 0.75
+
+
+def _vocab(conn: sqlite3.Connection) -> list:
+    """Distinct stemmed terms in the index, for typo repair.
+
+    fts5vocab is a read-only mirror of the index, so it is always in sync
+    and never needs maintenance. Missing table means an uninitialised or
+    in-memory database; an empty vocabulary makes every repair a no-op.
+    """
+    try:
+        return [r[0] for r in conn.execute(
+            "SELECT term FROM records_fts_vocab ORDER BY term")]
+    except sqlite3.OperationalError:
+        return []
+
+
+def _repair_typos(conn: sqlite3.Connection, words: list, vocab: list) -> list:
+    """Replace words the index has never seen with their nearest term.
+
+    A word is considered known when it, or anything it prefixes, occurs in
+    the index. An unknown word gets the closest vocabulary term above
+    FUZZY_CUTOFF, or stays as-is when nothing is close enough, so a
+    genuinely novel query word is never rewritten into a wrong match.
+    Repairs only run when the exact query returns nothing, which keeps a
+    valid query's ranking untouched.
+    """
+    if not vocab:
+        return words
+    vocab_set = set(vocab)
+    fixed = []
+    for w in words:
+        if w in vocab_set or any(t.startswith(w) for t in vocab_set):
+            fixed.append(w)
+            continue
+        close = difflib.get_close_matches(w, vocab, n=1, cutoff=FUZZY_CUTOFF)
+        fixed.append(close[0] if close else w)
+    return fixed
+
+
+def _search_after_repairs(conn: sqlite3.Connection, query: str, **kwargs) -> list:
+    """Search exact first; on an empty result, retry with repaired words."""
+    rows = _search_exact(conn, query, **kwargs)
+    if rows:
+        return rows
+    vocab = _vocab(conn)
+    words = _repair_typos(conn, _tokens(query), vocab)
+    if words != _tokens(query):
+        rows = _search_exact(conn, " ".join(words), **kwargs)
+    return rows
+
+
+def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = None,
+                  project_id: str = None, verified_only: bool = False,
+                  min_confidence: float = 0.0, pool: int = None):
     if not query or not _fts_query(query):
         return []
     sql = """
@@ -854,6 +926,15 @@ def search(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = N
             r["lexical"] = 1.0 - (r["rank"] - min_rank) / denom
     return rows
 
+
+def search(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = None,
+           project_id: str = None, verified_only: bool = False,
+           min_confidence: float = 0.0, pool: int = None):
+    """Search exact first, then retry once with typo-repaired words."""
+    return _search_after_repairs(conn, query, limit=limit, rtype=rtype,
+                                 project_id=project_id,
+                                 verified_only=verified_only,
+                                 min_confidence=min_confidence, pool=pool)
 
 BM25_CEILING = 10.0
 
