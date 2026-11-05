@@ -128,22 +128,11 @@ configuration:
 }
 ```
 
-**Any agent that can run shell commands.** Paste this block into the agent's instructions to make it set up and
-use the memory:
+**Any agent that can run shell commands.** Paste this one-liner into the agent's instructions; it installs and
+uses the memory on its own:
 
 ```text
-You have a local memory CLI. Install and use it without being asked.
-- Install with: npx honcho-pi@latest setup. Upgrade with: npx honcho-pi@latest update.
-- If Node or Python 3.10+ is missing, say which one and stop; do not install system packages yourself.
-- The `omp-memory` console script lives at ~/.omp/memory/venv/bin/omp-memory on Linux and macOS, and
-  %APPDATA%\omp-memory\venv\Scripts\omp-memory.exe on Windows. Use `python -m omp_memory` if the shim is missing.
-- Before a non-trivial task: `omp-memory search "<keywords>"`, and `recap --session <id>` when you have one.
-- When a task ends: `omp-memory capture --task ... --outcome ... --evidence ...`. Add `--verified` only if you
-  observed the result, not if you assumed it.
-- When reality confirms or contradicts a record: `omp-memory reinforce <record_id> success|failure|correction`.
-- `omp-memory context "<keywords>"` prints a fenced block you can drop into the prompt.
-- Never capture secrets, credentials, or personal data. The CLI refuses secret-looking input; do not pass
-  `--allow-secrets` unless the operator explicitly asks.
+Set up the honcho-pi memory: run `npx honcho-pi@latest setup`, then follow its README.
 ```
 
 **Python code.** `MemoryProvider` is an abstract base class. A subclass must define `name`, `is_available`, and
