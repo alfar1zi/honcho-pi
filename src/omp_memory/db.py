@@ -1338,19 +1338,24 @@ def reinforce(conn: sqlite3.Connection, record_id: str, signal: str,
     if signal not in VALID_SIGNALS:
         raise ValueError(f"invalid signal: {signal}")
 
-    rec = get_record(conn, record_id)
-    if not rec:
+    row = conn.execute("SELECT confidence FROM records WHERE id=?",
+                       (record_id,)).fetchone()
+    if row is None:
         raise ValueError(f"record not found: {record_id}")
 
     actual_delta = float(delta) if delta is not None else SIGNAL_DELTAS[signal]
-    new_conf = min(1.0, max(0.0, rec["confidence"] + actual_delta))
-
+    # Atomic clamp in SQL: concurrent reinforces each read the same base, so a
+    # Python-side read-modify-write loses every signal but the last.
     if actual_delta >= 0:
-        conn.execute("UPDATE records SET confidence=?, updated_at=? WHERE id=?",
-                     (new_conf, now_iso(), record_id))
+        conn.execute(
+            "UPDATE records SET confidence=min(1.0, max(0.0, confidence+?)), updated_at=? WHERE id=?",
+            (actual_delta, now_iso(), record_id))
     else:
-        conn.execute("UPDATE records SET confidence=? WHERE id=?",
-                     (new_conf, record_id))
+        conn.execute(
+            "UPDATE records SET confidence=min(1.0, max(0.0, confidence+?)) WHERE id=?",
+            (actual_delta, record_id))
+    new_conf = conn.execute("SELECT confidence FROM records WHERE id=?",
+                            (record_id,)).fetchone()[0]
     conn.execute("""
         INSERT INTO reinforcement (record_id, signal, delta, source, ts)
         VALUES (?, ?, ?, ?, ?)
