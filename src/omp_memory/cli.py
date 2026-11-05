@@ -495,6 +495,13 @@ def cmd_restore(args) -> int:
 
 # --- parser -----------------------------------------------------------------
 
+
+def cmd_overview(args) -> int:
+    from . import web
+
+    return web.main(["--port", str(args.port)] + (["--no-open"] if args.no_open else []))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="omp-memory",
@@ -587,6 +594,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("scan", help="scan text or stdin for secrets")
     p.add_argument("text", nargs="?", default="")
     p.set_defaults(func=cmd_scan)
+
+    p = sub.add_parser("overview", help="open the interactive graph view in a browser")
+    p.add_argument("--port", type=int, default=4173)
+    p.add_argument("--no-open", action="store_true")
+    p.set_defaults(func=cmd_overview)
 
     p = sub.add_parser("checkpoint", help="snapshot session evidence before compression")
     p.add_argument("--session", required=True)

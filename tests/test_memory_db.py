@@ -337,3 +337,26 @@ def test_restrict_to_owner_is_a_noop_when_chmod_fails(tmp_path, monkeypatch):
 
     monkeypatch.setattr(memory_db.os, "chmod", _boom)
     memory_db._restrict_to_owner(str(target))
+
+
+# --- list_records: full table read for the overview graph -------------------
+
+def test_list_records_returns_all(conn):
+    memory_db.upsert_record(conn, "FACT", "first lesson", session_id="s")
+    memory_db.upsert_record(conn, "RULE", "second lesson", session_id="s")
+    rows = memory_db.list_records(conn)
+    assert len(rows) == 2
+    assert {r["content"] for r in rows} == {"first lesson", "second lesson"}
+
+
+def test_list_records_orders_newest_first(conn):
+    memory_db.upsert_record(conn, "FACT", "old lesson", session_id="s")
+    memory_db.upsert_record(conn, "FACT", "new lesson", session_id="s")
+    rows = memory_db.list_records(conn)
+    assert rows[0]["content"] == "new lesson"
+
+
+def test_list_records_respects_limit(conn):
+    for i in range(5):
+        memory_db.upsert_record(conn, "FACT", f"lesson {i}", session_id="s")
+    assert len(memory_db.list_records(conn, limit=3)) == 3

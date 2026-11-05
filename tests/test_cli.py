@@ -367,3 +367,13 @@ def test_capture_shim_round_trip(env):
     )
     assert r.returncode == 0, r.stderr
     assert "captured" in r.stdout
+
+
+def test_overview_parser_registered():
+    from omp_memory.cli import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(["overview", "--port", "4999", "--no-open"])
+    assert args.command == "overview"
+    assert args.port == 4999
+    assert args.no_open is True
