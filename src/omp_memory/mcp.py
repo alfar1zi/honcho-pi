@@ -54,6 +54,7 @@ MAX_RECALL_DEFAULT = int(os.environ.get("HONCHO_MAX_RECALL", "8"))
 # targets these: the agent that just used a recalled memory does not always
 # know which record it came from, but it does know the recall it acted on.
 _last_recall: Dict[str, List[str]] = {}
+_recalled_users: set = set()
 
 
 # --------------------------------------------------------------------------
@@ -137,6 +138,35 @@ def with_conn(user: str = "", fn=None):
 def _clip(text: str, limit: int = MAX_CONTENT) -> str:
     text = (text or "").strip()
     return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+_MEM_TOOLS = {"recall", "remember", "reinforce", "forget", "stats", "handoff", "maintenance", "capture"}
+
+
+def _auto_recall_block(user: str, tool_name: str, args: Dict[str, Any]) -> str:
+    """Run one recall for the session's first mem tool call, return its text."""
+    query = " ".join(
+        str(v) for v in [tool_name] + list(args.values()) if v
+    ).strip()[:200]
+    try:
+        conn = get_conn(user)
+        try:
+            rows = db.recall(conn, query, limit=4, full=True)
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - injection must never break the tool
+        return ""
+    if not rows:
+        return ""
+    _recalled_users.add(user)
+    out = ["[Auto-recall] matching memories for this session's first call:"]
+    for r in rows:
+        out.append(
+            f"- [{r['type']}] {_clip(r['content'], 300)} "
+            f"(id={r['id']} conf={float(r['confidence']):.2f})"
+        )
+    out.append("Use mcp__mem_recall for more, reinforce after relying on one.")
+    return "\n".join(out) + "\n\n"
 
 
 def tool_recall(args: Dict[str, Any], user: str = "") -> str:
@@ -538,6 +568,10 @@ def _handle_message(msg: Dict[str, Any], user: str = "") -> Optional[Dict[str, A
             return _error(req_id, -32602, f"unknown tool: {name}")
         try:
             text = handler(args, user)
+            if name not in _MEM_TOOLS and user not in _recalled_users:
+                block = _auto_recall_block(user, name, args)
+                if block:
+                    text = block + text
             return _result(req_id, {"content": [{"type": "text", "text": text}]})
         except Exception as exc:  # noqa: BLE001 - surface, never crash the server
             traceback.print_exc(file=sys.stderr)
