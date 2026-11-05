@@ -123,6 +123,10 @@ def _tokens(text: str) -> set:
     return {w for w in re.split(r"[^a-z0-9]+", text.lower()) if len(w) > 4}
 
 
+def _tokens(text: str) -> set:
+    return {w for w in re.split(r"[^a-z0-9]+", text.lower()) if len(w) > 4}
+
+
 def _jaccard(a: set, b: set) -> float:
     if not a or not b:
         return 0.0
@@ -130,16 +134,52 @@ def _jaccard(a: set, b: set) -> float:
     return inter / (len(a) + len(b) - inter)
 
 
+def _tfidf_vectors(docs: list[str]) -> list[dict]:
+    """TF-IDF weight vectors, one dict per doc. Term weight = tf * idf."""
+    n = len(docs)
+    df: dict[str, int] = {}
+    tokenized = []
+    for doc in docs:
+        toks = [w for w in re.split(r"[^a-z0-9]+", doc.lower()) if len(w) > 4]
+        tokenized.append(toks)
+        for w in set(toks):
+            df[w] = df.get(w, 0) + 1
+    vecs = []
+    for toks in tokenized:
+        tf: dict[str, int] = {}
+        for w in toks:
+            tf[w] = tf.get(w, 0) + 1
+        vecs.append(
+            {
+                w: (1 + math.log(c)) * math.log((n + 1) / (df[w] + 1)) + 1e-9
+                for w, c in tf.items()
+            }
+        )
+    return vecs
+
+
+def _cosine(a: dict, b: dict) -> float:
+    if not a or not b:
+        return 0.0
+    common = set(a) & set(b)
+    dot = sum(a[w] * b[w] for w in common)
+    na = math.sqrt(sum(v * v for v in a.values()))
+    nb = math.sqrt(sum(v * v for v in b.values()))
+    if na == 0 or nb == 0:
+        return 0.0
+    return dot / (na * nb)
+
+
 def _similarity_edges(rows: list) -> list:
-    token_sets = [_tokens(r["content"]) for r in rows]
+    vecs = _tfidf_vectors([r["content"] for r in rows])
     edges = []
     seen = set()
-    for i, tokens in enumerate(token_sets):
+    for i, vec in enumerate(vecs):
         scored = []
-        for j, other in enumerate(token_sets):
+        for j, other in enumerate(vecs):
             if i == j:
                 continue
-            sim = _jaccard(tokens, other)
+            sim = _cosine(vec, other)
             if sim >= 0.22:
                 scored.append((j, sim))
         scored.sort(key=lambda p: -p[1])
