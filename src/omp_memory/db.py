@@ -783,6 +783,11 @@ def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str =
 
     decision = decide(conn, norm, rtype=rtype, limit=limit, upsert=upsert)
     record_id = decision["id"]
+    # The merge re-reads the row inside BEGIN IMMEDIATE: decide() is read-only
+    # and safe outside, but the merge itself is read-modify-write, and two
+    # processes merging different provenance into one row lose the loser's
+    # source when both read the same base.
+    conn.execute("BEGIN IMMEDIATE")
     existing = get_record(conn, record_id)
 
     if existing:
