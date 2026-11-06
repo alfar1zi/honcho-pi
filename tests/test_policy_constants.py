@@ -9,7 +9,8 @@ def test_every_policy_constant_is_exported():
     policy_constants = [
         "HEAT_WEIGHTS",
         "HEAT_HALF_LIFE_DAYS",
-        "DECAY_HALF_LIFE_DAYS",
+        "DECAY_POWER_TAU_DAYS",
+        "DECAY_POWER_BETA",
         "PROMOTABLE_TYPES",
         "FORGET_MIN_AGE_DAYS",
         "FORGET_WINDOW_DAYS",

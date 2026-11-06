@@ -229,6 +229,19 @@ def test_apply_decay_is_idempotent_for_the_same_instant(conn):
     assert memory_db.get_record(conn, rid)["confidence"] == pytest.approx(after_first)
 
 
+def test_apply_decay_power_law_tail(conn):
+    """Power-law decay keeps a long tail: 400-day-old record stays above floor."""
+    rid = memory_db.remember(conn, "FACT", "old but not forgotten",
+                             confidence=0.9)["id"]
+    _age(conn, rid, 400)
+    memory_db.apply_decay(conn)
+    conf = memory_db.get_record(conn, rid)["confidence"]
+    # retention = (1 + 400/10)^-0.5 ~ 0.156; target = 0.15 + 0.75*0.156 ~ 0.267
+    assert memory_db.DECAY_FLOOR < conf < 0.9
+    assert conf > memory_db.DECAY_FLOOR + 0.05, (
+        "power law must not collapse to the floor at 400 days")
+
+
 def test_migration_v4_is_idempotent(conn, db_path):
     c2 = memory_db.connect(str(db_path))
     try:

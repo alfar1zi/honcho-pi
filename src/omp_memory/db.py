@@ -63,7 +63,12 @@ HEAT_HALF_LIFE_DAYS = 30.0
 PROMOTE_HEAT = 0.80
 PROMOTABLE_TYPES = ("INFERENCE", "ASSUMPTION")
 DECAY_FLOOR = 0.15
-DECAY_HALF_LIFE_DAYS = 30.0
+# Power-law forgetting: retention = (1 + d/tau)**-beta, normalized so the
+# 30-day point matches the old exponential half-life. Empirical forgetting
+# curves follow a power law (Wixted & Ebbesen 1991; Murre & Dros 2015):
+# fast early drop, long tail for genuinely important old records.
+DECAY_POWER_TAU_DAYS = 10.0
+DECAY_POWER_BETA = 0.5
 FORGET_FLOOR_SLACK = 0.01
 FORGET_MIN_AGE_DAYS = 180
 FORGET_WINDOW_DAYS = 365
@@ -1315,9 +1320,11 @@ def apply_decay(conn: sqlite3.Connection, now=None, floor: float = DECAY_FLOOR) 
             continue
         anchor = max(anchors)
         age_days = max(0.0, (now - anchor).total_seconds() / 86400.0)
-        factor = 0.5 ** (age_days / DECAY_HALF_LIFE_DAYS)
+        factor = (1.0 + age_days / DECAY_POWER_TAU_DAYS) ** -DECAY_POWER_BETA
         base = max(floor, float(row["confidence"]))
         target = floor + (base - floor) * factor
+        if factor < 0.05:
+            target = floor
         value = round(min(float(row["confidence"]), target), 6)
         if value < float(row["confidence"]):
             conn.execute("UPDATE records SET confidence=?, last_decay_at=? WHERE id=?",
