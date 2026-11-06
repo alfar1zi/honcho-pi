@@ -360,3 +360,24 @@ def test_list_records_respects_limit(conn):
     for i in range(5):
         memory_db.upsert_record(conn, "FACT", f"lesson {i}", session_id="s")
     assert len(memory_db.list_records(conn, limit=3)) == 3
+
+
+def test_schema_prior_coherent_record_starts_higher(conn):
+    """Tse et al. 2007: agreement with trusted memory raises the prior."""
+    trusted = memory_db.remember(conn, "FACT", "deploy uses docker compose",
+                                 confidence=0.9, source="seed")["id"]
+    conn.execute("UPDATE records SET verified=1 WHERE id=?", (trusted,))
+    conn.commit()
+    out = memory_db.remember(conn, "FACT", "deploy uses docker compose files",
+                             confidence=0.5, source="agent")
+    assert out["applied"] == "inserted"
+    new_conf = memory_db.get_record(conn, out["id"])["confidence"]
+    assert new_conf > 0.5, "coherent-with-schema record must start above the caller's prior"
+    assert new_conf <= 0.5 + memory_db.SCHEMA_PRIOR_WEIGHT + 1e-9
+
+
+def test_schema_prior_contradictory_starts_lower(conn):
+    """A record nothing trusted agrees with keeps the caller's prior."""
+    out = memory_db.remember(conn, "FACT", "zebra migration crosses kenya",
+                             confidence=0.5, source="agent")
+    assert memory_db.get_record(conn, out["id"])["confidence"] == 0.5

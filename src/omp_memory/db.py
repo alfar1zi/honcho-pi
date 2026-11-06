@@ -69,6 +69,10 @@ DECAY_FLOOR = 0.15
 # fast early drop, long tail for genuinely important old records.
 DECAY_POWER_TAU_DAYS = 10.0
 DECAY_POWER_BETA = 0.5
+# Schema-consistent prior (Tse et al. 2007): a new record that agrees with
+# what high-confidence memory already holds starts closer to that memory's
+# confidence; a contradictory one starts lower and must earn verification.
+SCHEMA_PRIOR_WEIGHT = 0.2
 FORGET_FLOOR_SLACK = 0.01
 FORGET_MIN_AGE_DAYS = 180
 FORGET_WINDOW_DAYS = 365
@@ -707,6 +711,7 @@ def find_similar(conn: sqlite3.Connection, content: str, limit: int = 5,
             "id": row["id"],
             "type": row["type"],
             "content": row["content"],
+            "confidence": row["confidence"],
             "score": score,
             "same_numbers": _numeric_tokens(row["content"]) == _numeric_tokens(norm),
         })
@@ -764,6 +769,25 @@ def decide(conn: sqlite3.Connection, content: str, rtype: str = "FACT", limit: i
     return {"action": "create", "id": own, "reason": "novel", "similar": [], "advisory": ""}
 
 
+def _schema_prior(confidence: float, similar: list) -> float:
+    """Bias a new record's initial confidence by schema coherence.
+
+    Coherence is the best (score * existing confidence) among similar records
+    that are themselves well-trusted (confidence >= 0.7). Agreement raises the
+    prior, contradiction lowers it, never past the caller's own value by more
+    than SCHEMA_PRIOR_WEIGHT: the caller's confidence is the base, the schema
+    is the nudge (Tse et al. 2007 rapid consolidation; Bartlett 1932 guard:
+    a prior never overrides an existing verified record, it only biases the
+    new one).
+    """
+    coherence = 0.5
+    for cand in similar:
+        if cand.get("confidence", 0.0) < 0.7:
+            continue
+        coherence = max(coherence, cand["score"] * cand["confidence"])
+    return min(1.0, max(0.0, confidence + SCHEMA_PRIOR_WEIGHT * (coherence - 0.5)))
+
+
 def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str = "",
              verified: int = 0, confidence: float = 0.5, source: str = "",
              tags: str = "", session_id: str = "", project_id: str = "",
@@ -816,7 +840,8 @@ def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str =
         )
         applied = "updated"
     else:
-        _insert_identity(conn, record_id, rtype, norm, evidence, verified, confidence,
+        prior = _schema_prior(confidence, decision["similar"])
+        _insert_identity(conn, record_id, rtype, norm, evidence, verified, prior,
                          source, tags, session_id, project_id, parent_id)
         applied = "inserted"
 

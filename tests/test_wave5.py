@@ -211,3 +211,98 @@ def test_maintenance_unknown_op_lists_capture(tmp_path):
         assert "capture" in out
     finally:
         srv.close()
+
+
+# --- failure matcher precision (audit: keyword matching captured doc text) ---
+
+def test_read_result_mentioning_error_is_not_a_failure(session_dir):
+    """A read of a file whose text contains 'error' is content, not an outcome.
+
+    The old keyword matcher turned every SKILL.md read that mentioned an
+    error into a bogus 'Observed failure' INFERENCE; the live store held
+    16 such rows, all of them false positives.
+    """
+    entries = [
+        {"type": "message", "timestamp": "2026-11-18T08:00:00.000Z",
+         "message": {"role": "toolResult", "toolName": "read",
+                     "content": "Traceback (most recent call last): ValueError: x"}},
+    ]
+    _write_session(session_dir, "a.jsonl", entries)
+    p = session_dir / "a.jsonl"
+    cands = capture.extract_lessons(capture._read_entries(p), p)
+    assert [c for c in cands if "Observed failure" in c["content"]] == []
+
+
+def test_bash_failure_lines_still_captured(session_dir):
+    """Genuine execution failures still produce one failure candidate."""
+    entries = [
+        {"type": "message", "timestamp": "2026-11-18T08:00:00.000Z",
+         "message": {"role": "toolResult", "toolName": "bash",
+                     "content": "pytest exited with code 1"}},
+    ]
+    _write_session(session_dir, "a.jsonl", entries)
+    p = session_dir / "a.jsonl"
+    cands = capture.extract_lessons(capture._read_entries(p), p)
+    fails = [c for c in cands if "Observed failure" in c["content"]]
+    assert len(fails) == 1
+
+
+def test_passing_report_is_not_a_failure(session_dir):
+    """'failed: 0' in a passing report must not match; counts must be nonzero."""
+    entries = [
+        {"type": "message", "timestamp": "2026-11-18T08:00:00.000Z",
+         "message": {"role": "toolResult", "toolName": "bash",
+                     "content": '{"passed": 10, "failed": 0, "status": "ok"}'}},
+    ]
+    _write_session(session_dir, "a.jsonl", entries)
+    p = session_dir / "a.jsonl"
+    cands = capture.extract_lessons(capture._read_entries(p), p)
+    assert [c for c in cands if "Observed failure" in c["content"]] == []
+
+
+def test_lesson_is_the_message_line_not_the_traceback(session_dir):
+    """Distillation keeps the exception line, drops traceback boilerplate."""
+    body = ("Traceback (most recent call last):\n"
+            '  File "<stdin>", line 16, in <module>\n'
+            "ValueError: min() iterable argument is empty\n"
+            "Command exited with code 1")
+    entries = [
+        {"type": "message", "timestamp": "2026-11-18T08:00:00.000Z",
+         "message": {"role": "toolResult", "toolName": "bash", "content": body}},
+    ]
+    _write_session(session_dir, "a.jsonl", entries)
+    p = session_dir / "a.jsonl"
+    cands = capture.extract_lessons(capture._read_entries(p), p)
+    fails = [c for c in cands if "Observed failure" in c["content"]]
+    assert len(fails) == 1
+    assert "ValueError: min() iterable argument is empty" in fails[0]["content"]
+    assert "Traceback" not in fails[0]["content"]
+
+
+# --- secret scanning in the auto-capture pipeline ---------------------------
+
+def test_capture_never_stores_secret_looking_tool_output(session_dir):
+    """Tool output with a key in it is dropped, not written to memory.
+
+    The remember path scans content before storing; auto-capture read raw
+    toolResult bodies and would persist a token from a traceback or env dump.
+    """
+    entries = [
+        {"type": "message", "timestamp": "2026-11-18T08:00:00.000Z",
+         "message": {"role": "toolResult", "toolName": "bash",
+                     "content": "Traceback... auth failed: sk-abcdefghijklmnop1234"}},
+    ]
+    _write_session(session_dir, "a.jsonl", entries)
+    p = session_dir / "a.jsonl"
+    cands = capture.extract_lessons(capture._read_entries(p), p)
+    assert cands == []
+    for c in cands:
+        assert "sk-abcdefghijklmnop1234" not in c["content"]
+
+
+def test_scan_text_shared_by_cli_and_capture():
+    """One pattern table: cli import and capture module agree."""
+    from omp_memory import cli
+    assert cli.scan_text is capture.scan_text
+    findings = capture.scan_text("password=hunter22")
+    assert findings and findings[0][0] == "assignment"

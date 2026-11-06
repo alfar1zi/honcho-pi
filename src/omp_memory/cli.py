@@ -17,14 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import db
+from .capture import scan_text
 from .context import build_memory_context_block
-
-SECRET_PATTERNS = [
-    ("api_key", r"sk-[A-Za-z0-9_\-]{8,}"),
-    ("api_key", r"(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{8,}"),
-    ("private_key", r"-----BEGIN [A-Z ]+PRIVATE KEY-----"),
-    ("assignment", r"(?i)(?:password|passwd|secret|api_key|apikey|token|credential)\s*[=:]\s*\S{6,}"),
-]
 
 DEFAULT_MIN_FREE_MB = 100
 
@@ -44,21 +38,8 @@ def _open():
 
 
 # --- secret scanning ---------------------------------------------------------
-
-def scan_text(text: str) -> list:
-    """Return [(kind, matched_fragment)] for secret-looking input.
-
-    Patterns are evaluated in Python so the caller does not shell out to grep
-    with the payload as an argument (which leaks it to the process table).
-    """
-    import re
-
-    findings = []
-    for kind, pattern in SECRET_PATTERNS:
-        match = re.search(pattern, text)
-        if match:
-            findings.append((kind, match.group(0)[:24]))
-    return findings
+# Patterns and scan_text live in capture.py so the auto-capture pipeline and
+# this CLI guard share one definition.
 
 
 def cmd_scan(args) -> int:

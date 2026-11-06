@@ -33,9 +33,21 @@ __all__ = ["extract_lessons", "capture_session", "sessions_dir"]
 # Paths
 # ---------------------------------------------------------------------------
 
-_SESSION_PATTERNS = [
-    re.compile(r"\b(error|traceback|failed|exception|exit code [12]|not found|malformed)\b", re.I),
-]
+_FAILURE_RE = re.compile(
+    r"(exited with code [1-9]"
+    r"|exit code [1-9]"
+    r"|traceback \(most recent call last\)"
+    r"|\b\w+(?:Error|Exception)\b\s*:"
+    r"|\bHTTP (?:Error \d{3}|\d{3})"
+    r"|\b\d{3} (?:Not Found|Internal Server Error|Bad Gateway|Service Unavailable)"
+    r"|\"failed\":\s*[1-9]"
+    r"|\b[1-9][0-9]* failed\b"
+    r"|\berror:)"
+    , re.I
+)
+# Tools whose output is content, not an outcome: reading a file that mentions
+# an error is not a failure. Only execution tools can fail.
+_READ_TOOLS = {"read", "grep", "glob", "view", "search"}
 _CONTENT_SKIP = re.compile(
     r"^\[(?:HANDOFF|System note)\]|\brecalled memory context\b", re.I
 )
@@ -49,6 +61,26 @@ MAX_FAILURES_STORED = 8
 MAX_FILES_STORED = 30
 MAX_FAIL_REPORTED = 8
 MAX_FILE_REPORTED = 30
+
+
+# Secret-shape patterns, shared by the CLI capture guard and the auto-capture
+# pipeline. Patterns run in Python so the payload never reaches a shell.
+SECRET_PATTERNS = [
+    ("api_key", r"sk-[A-Za-z0-9_\-]{8,}"),
+    ("api_key", r"(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{8,}"),
+    ("private_key", r"-----BEGIN [A-Z ]+PRIVATE KEY-----"),
+    ("assignment", r"(?i)(?:password|passwd|secret|api_key|apikey|token|credential)\s*[=:]\s*\S{6,}"),
+]
+
+
+def scan_text(text: str) -> list:
+    """Return [(kind, matched_fragment)] for secret-looking input."""
+    findings = []
+    for kind, pattern in SECRET_PATTERNS:
+        match = re.search(pattern, text or "")
+        if match:
+            findings.append((kind, match.group(0)[:24]))
+    return findings
 
 
 def _agent_dir() -> Path:
@@ -116,6 +148,24 @@ def _clip(s: str, n: int) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+def _failure_line(raw: str) -> str:
+    """Distil a toolResult body into the one line that says what failed.
+
+    A traceback is five lines of boilerplate around one message; a test
+    summary is one FAIL: line. The shortest line carrying an error-shaped
+    signal is usually the message, not the frames around it.
+    """
+    lines = [ln.strip() for ln in raw.split("\n") if ln.strip()]
+    hits = [ln for ln in lines if _FAILURE_RE.search(ln)]
+    if not hits:
+        return raw
+    priority = sorted(hits, key=lambda ln: (
+        0 if re.search(r"(Error|Exception|FAIL)\s*:", ln) else 1,
+        len(ln),
+    ))
+    return priority[0]
+
+
 def extract_lessons(
     entries: list[dict],
     session_path: Path | None = None,
@@ -148,9 +198,8 @@ def extract_lessons(
             elif role == "toolResult":
                 name = str(msg.get("toolName") or "")
                 body = _text_of(msg)
-                low = body.lower()
-                if any(pat.search(low) for pat in _SESSION_PATTERNS):
-                    failures.append(f"{name}: {_clip(body, 200)}")
+                if name not in _READ_TOOLS and _FAILURE_RE.search(body):
+                    failures.append(f"{name}: {_clip(_failure_line(body), 200)}")
                 # track file tool calls
                 if name in ("bash", "shell"):
                     for word in _TOKEN_RE.findall(body):
@@ -177,18 +226,11 @@ def extract_lessons(
 
     # Failure patterns → INFERENCE (what went wrong, with confidence floor)
     for failure in failures[:max_failures]:
-        # Derive a lesson: "X failed" is evidence about X
-        # Strip tool name prefix if it looks like a title
-        lesson = failure
-        if ":" in failure:
-            _, rest = failure.split(":", 1)
-            lesson = rest.strip()
-        if len(lesson) < 4:
-            lesson = failure
+        lesson = _failure_line(failure)
         candidates.append({
             "rtype": CAPTURE_DEFAULT_TYPE,
             "content": f"Observed failure: {lesson}",
-            "evidence": failure,
+            "evidence": _clip(failure, 200),
             "confidence": CAPTURE_DEFAULT_CONFIDENCE,
             "source": "auto-capture",
             "session_id": session_id,
@@ -233,7 +275,16 @@ def extract_lessons(
                 "tags": "decision,auto-capture",
             })
 
-    return candidates
+    # Never persist a candidate whose content or evidence carries a secret:
+    # toolResult bodies can contain env dumps, tokens in tracebacks, etc.
+    # The mcp remember path scans; auto-capture must not bypass it.
+    kept = []
+    for cand in candidates:
+        leaked = scan_text(cand["content"] + " " + str(cand.get("evidence") or ""))
+        if leaked:
+            continue
+        kept.append(cand)
+    return kept
 
 
 def capture_session(
