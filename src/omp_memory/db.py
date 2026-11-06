@@ -73,6 +73,12 @@ DECAY_POWER_BETA = 0.5
 # what high-confidence memory already holds starts closer to that memory's
 # confidence; a contradictory one starts lower and must earn verification.
 SCHEMA_PRIOR_WEIGHT = 0.2
+# Spacing effect (Cepeda et al. 2006/2008): a repeat right after the last one
+# is nearly worthless; the same repeat after a gap is what consolidates.
+# The horizon is DECAY_POWER_TAU_DAYS: reinforcing on the scale of the
+# retention curve is what keeps a record on it.
+SPACING_MIN_GAP_HOURS = 1.0
+SPACING_FULL_GAP_HOURS = 24.0
 FORGET_FLOOR_SLACK = 0.01
 FORGET_MIN_AGE_DAYS = 180
 FORGET_WINDOW_DAYS = 365
@@ -1360,6 +1366,33 @@ def apply_decay(conn: sqlite3.Connection, now=None, floor: float = DECAY_FLOOR) 
     return moved
 
 
+def _spacing_factor(conn: sqlite3.Connection, record_id: str) -> float:
+    """Scale a reinforcement by the gap since the last one (Cepeda 2006).
+
+    Inside SPACING_MIN_GAP_HOURS the repeat is massed and worth ~nothing;
+    at SPACING_FULL_GAP_HOURS the gap is full strength; linear between.
+    Explicit deltas bypass this: the caller has already decided the size.
+    """
+    row = conn.execute(
+        "SELECT ts FROM reinforcement WHERE record_id=? AND signal IN"
+        " ('success','reinforce') ORDER BY ts DESC LIMIT 1", (record_id,)).fetchone()
+    if row is None:
+        return 1.0
+    try:
+        last = _parse_ts(row[0])
+    except Exception:
+        return 1.0
+    if last is None:
+        return 1.0
+    gap_h = (datetime.now(timezone.utc) - last).total_seconds() / 3600.0
+    if gap_h <= SPACING_MIN_GAP_HOURS:
+        return 0.1
+    if gap_h >= SPACING_FULL_GAP_HOURS:
+        return 1.0
+    t = (gap_h - SPACING_MIN_GAP_HOURS) / (SPACING_FULL_GAP_HOURS - SPACING_MIN_GAP_HOURS)
+    return round(0.1 + 0.9 * t, 4)
+
+
 def reinforce(conn: sqlite3.Connection, record_id: str, signal: str,
               delta: float = None, source: str = "") -> float:
     """Apply a reinforcement signal, then reconsider promotion on success.
@@ -1381,6 +1414,8 @@ def reinforce(conn: sqlite3.Connection, record_id: str, signal: str,
         raise ValueError(f"record not found: {record_id}")
 
     actual_delta = float(delta) if delta is not None else SIGNAL_DELTAS[signal]
+    if delta is None and signal in ("success", "reinforce"):
+        actual_delta *= _spacing_factor(conn, record_id)
     # Atomic clamp in SQL: concurrent reinforces each read the same base, so a
     # Python-side read-modify-write loses every signal but the last.
     if actual_delta >= 0:

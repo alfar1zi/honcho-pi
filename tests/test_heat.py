@@ -85,6 +85,7 @@ def test_promotion_does_not_fire_on_same_source_twice(conn):
 def test_promotion_fires_on_two_distinct_sources(conn):
     rid = memory_db.remember(conn, "INFERENCE", "index rebuild needs free disk")["id"]
     memory_db.reinforce(conn, rid, "success", source="runbook")
+    _backdate_last_reinforcement(conn, rid, 25)
     memory_db.reinforce(conn, rid, "success", source="incident-4471")
     rec = memory_db.get_record(conn, rid)
     assert rec["type"] == "FACT"
@@ -95,6 +96,7 @@ def test_promotion_fires_on_two_distinct_sources(conn):
 def test_promotion_log_records_the_evidence(conn):
     rid = memory_db.remember(conn, "ASSUMPTION", "p99 stays under 200ms")["id"]
     memory_db.reinforce(conn, rid, "success", source="loadtest")
+    _backdate_last_reinforcement(conn, rid, 25)
     memory_db.reinforce(conn, rid, "success", source="prod-week-12")
     row = conn.execute("SELECT * FROM promotion_log WHERE record_id=?", (rid,)).fetchone()
     assert row["from_type"] == "ASSUMPTION"
@@ -114,9 +116,10 @@ def test_promotion_only_touches_inference_and_assumption(conn):
 
 def test_promotion_reported_per_thread(conn):
     rid = memory_db.remember(conn, "INFERENCE", "shards rebalance at 70 percent")["id"]
-    memory_db.reinforce(conn, rid, "success", source="a")
+    memory_db.reinforce(conn, rid, "success", delta=0.1, source="a")
     assert memory_db.last_promotion() is None
-    memory_db.reinforce(conn, rid, "success", source="b")
+    _backdate_last_reinforcement(conn, rid, 25)
+    memory_db.reinforce(conn, rid, "success", delta=0.1, source="b")
     reported = memory_db.last_promotion()
     assert reported and reported["record_id"] == rid
 
@@ -126,6 +129,22 @@ def test_promote_hot_without_candidates_does_not_commit_changes(conn):
     result = memory_db.promote_hot(conn, rid)
     assert result is None or result.get("record_id") == rid and result.get("promoted") is False
     assert memory_db.get_record(conn, rid)["type"] == "INFERENCE"
+
+
+def _backdate_last_reinforcement(conn, rid, hours):
+    """Move the record's latest reinforcement into the past.
+
+    The spacing effect scales a massed repeat to near zero, so a test that
+    needs the full default delta backdates the last reinforcement past the
+    spacing horizon first.
+    """
+    from datetime import datetime, timedelta, timezone
+    past = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    conn.execute(
+        "UPDATE reinforcement SET ts=? WHERE id="
+        "(SELECT id FROM reinforcement WHERE record_id=? ORDER BY ts DESC LIMIT 1)",
+        (past, rid))
+    conn.commit()
 
 
 def _cold_record(conn, content, *, rtype="FACT", verified=0, confidence=0.15, days=401):
@@ -252,3 +271,19 @@ def test_migration_v4_is_idempotent(conn, db_path):
         assert c2.execute("SELECT version FROM schema_version").fetchone()[0] == memory_db.SCHEMA_VERSION
     finally:
         c2.close()
+
+
+def test_spaced_reinforcement_is_worth_more_than_massed(conn):
+    """Cepeda 2006: a repeat after a gap consolidates; a massed repeat barely moves."""
+    spaced = memory_db.remember(conn, "FACT", "spaced fact alpha", confidence=0.5)["id"]
+    memory_db.reinforce(conn, spaced, "success")
+    _backdate_last_reinforcement(conn, spaced, 25)
+    spaced_conf = memory_db.reinforce(conn, spaced, "success")
+
+    massed = memory_db.remember(conn, "FACT", "massed fact beta", confidence=0.5)["id"]
+    memory_db.reinforce(conn, massed, "success")
+    massed_conf = memory_db.reinforce(conn, massed, "success")
+
+    assert spaced_conf == pytest.approx(0.7)
+    assert massed_conf < spaced_conf
+    assert massed_conf == pytest.approx(0.61)
