@@ -434,6 +434,24 @@ def cmd_backup(args) -> int:
         print("backup failed: database missing or unreadable", file=sys.stderr)
         return 1
     print(f"backup: {path}")
+
+
+def cmd_mirror(args) -> int:
+    out_dir = Path(args.dir).expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    conn = _open()
+    try:
+        exported = db.export_markdown(conn, out_dir)
+    finally:
+        conn.close()
+    synced = db.sync_mirror(out_dir, message=args.message, init=args.init)
+    parts = [f"written={len(exported['written'])}", f"removed={len(exported['removed'])}",
+             f"unchanged={len(exported['unchanged'])}"]
+    if synced.get("committed"):
+        parts.append(f"committed={synced['sha'][:12]}")
+    else:
+        parts.append(f"git={synced.get('reason', 'clean')}")
+    print("mirror: " + ", ".join(parts))
     return 0
 
 
@@ -585,6 +603,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("repair", help="restore from newest usable backup")
     p.set_defaults(func=cmd_repair)
+    p = sub.add_parser("mirror", help="export records to markdown and commit to a git mirror")
+    p.add_argument("dir", help="mirror directory (created if missing)")
+    p.add_argument("-m", "--message", default=None, help="git commit message")
+    p.add_argument("--init", action="store_true",
+                   help="git init the directory when it is not a repository yet")
+    p.set_defaults(func=cmd_mirror)
 
     p = sub.add_parser("disk", help="check free space")
     p.add_argument("min_free_mb", type=int, nargs="?", default=DEFAULT_MIN_FREE_MB)
