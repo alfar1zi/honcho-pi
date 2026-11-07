@@ -287,3 +287,12 @@ def test_spaced_reinforcement_is_worth_more_than_massed(conn):
     assert spaced_conf == pytest.approx(0.7)
     assert massed_conf < spaced_conf
     assert massed_conf == pytest.approx(0.61)
+
+
+def test_heat_recency_matches_decay_curve(conn):
+    """Park et al. 2023 recency term, but on the decay curve: one timescale."""
+    rid = memory_db.remember(conn, "FACT", "recency curve fact")["id"]
+    _age(conn, rid, 30)
+    parts = memory_db.heat_parts(memory_db.get_record(conn, rid), [])
+    # (1 + 30/10)^-0.5 = 0.5, same 30-day midpoint as the decay curve
+    assert parts["recency"] == pytest.approx(0.5, abs=1e-4)

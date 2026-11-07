@@ -8,7 +8,8 @@ def test_every_policy_constant_is_exported():
     """Every promotion, decay, and forget policy constant must be exported in __all__."""
     policy_constants = [
         "HEAT_WEIGHTS",
-        "HEAT_HALF_LIFE_DAYS",
+        "HEAT_DECAY_POWER_TAU_DAYS",
+        "HEAT_DECAY_POWER_BETA",
         "DECAY_POWER_TAU_DAYS",
         "DECAY_POWER_BETA",
         "SCHEMA_PRIOR_WEIGHT",

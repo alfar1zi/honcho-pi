@@ -173,7 +173,7 @@ def test_verified_beats_unverified_at_equal_score(conn):
 def test_verified_old_beats_wrong_newer(conn):
     """Two candidates with identical final score: older verified beats newer unverified."""
     now = datetime.now(timezone.utc)
-    rec_old = 0.5 ** (10.0 / 30.0)
+    rec_old = (1.0 + 10.0 / 10.0) ** -0.5  # heat recency rides the decay curve
     rec_new = 1.0
     conf_new = 0.5
     # conf_old chosen so both records land on the same heat despite the

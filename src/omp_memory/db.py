@@ -59,7 +59,6 @@ SIGNAL_DELTAS = {
 # per record; fixed weights keep heat decomposable and comparable across
 # sessions. They sum to 1.0 so heat stays inside [0, 1].
 HEAT_WEIGHTS = {"confidence": 0.45, "recency": 0.25, "reinforcement": 0.30}
-HEAT_HALF_LIFE_DAYS = 30.0
 PROMOTE_HEAT = 0.80
 PROMOTABLE_TYPES = ("INFERENCE", "ASSUMPTION")
 DECAY_FLOOR = 0.15
@@ -73,6 +72,10 @@ DECAY_POWER_BETA = 0.5
 # what high-confidence memory already holds starts closer to that memory's
 # confidence; a contradictory one starts lower and must earn verification.
 SCHEMA_PRIOR_WEIGHT = 0.2
+
+# Heat recency rides the same power law as decay (see heat_parts).
+HEAT_DECAY_POWER_TAU_DAYS = DECAY_POWER_TAU_DAYS
+HEAT_DECAY_POWER_BETA = DECAY_POWER_BETA
 # Spacing effect (Cepeda et al. 2006/2008): a repeat right after the last one
 # is nearly worthless; the same repeat after a gap is what consolidates.
 # The horizon is DECAY_POWER_TAU_DAYS: reinforcing on the scale of the
@@ -1181,7 +1184,11 @@ def heat_parts(row: dict, signals: list, now=None) -> dict:
     signals = signals or []
     updated = _parse_ts(row.get("updated_at"))
     age_days = max(0.0, (now - updated).total_seconds() / 86400.0) if updated else 0.0
-    recency = 0.5 ** (age_days / HEAT_HALF_LIFE_DAYS)
+    # Park et al. 2023 use an exponential recency term with hourly halving;
+    # here recency follows the same power law as decay so the two curves
+    # agree: heat should not say a record is warm on a different timescale
+    # than the one apply_decay cools it on.
+    recency = (1.0 + age_days / HEAT_DECAY_POWER_TAU_DAYS) ** -HEAT_DECAY_POWER_BETA
 
     successes = [s for s in signals if s.get("signal") == "success"]
     sources = []
