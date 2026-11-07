@@ -82,6 +82,14 @@ HEAT_DECAY_POWER_BETA = DECAY_POWER_BETA
 # retention curve is what keeps a record on it.
 SPACING_MIN_GAP_HOURS = 1.0
 SPACING_FULL_GAP_HOURS = 24.0
+# Retrieval-induced forgetting (Anderson, Bjork & Bjork 1994; Murayama et
+# al. 2014): retrieving some memories actively inhibits competing ones. A
+# CORRECTION that supersedes an older record, or a retrieval that picks a
+# winner out of a cluster of similar records, penalizes the loser by
+# RIF_PENALTY. The penalty is ordinary confidence afterwards: inhibition
+# wears off, and the record can still recover through reinforcement.
+RIF_PENALTY = 0.15
+RIF_MIN_CONFIDENCE = 0.7
 FORGET_FLOOR_SLACK = 0.01
 FORGET_MIN_AGE_DAYS = 180
 FORGET_WINDOW_DAYS = 365
@@ -797,6 +805,40 @@ def _schema_prior(confidence: float, similar: list) -> float:
     return min(1.0, max(0.0, confidence + SCHEMA_PRIOR_WEIGHT * (coherence - 0.5)))
 
 
+def _rif_supersede(conn, record_id: str, rtype: str, norm: str,
+                   similar: list) -> list:
+    """Penalize records this write supersedes (Anderson et al. 1994).
+
+    Only a CORRECTION does it, and only when the loser is well-trusted:
+    a low-confidence loser is already on its way out, and inhibiting it
+    buys nothing. The loser keeps its decay curve and can recover through
+    reinforcement, which is what makes RIF inhibition rather than
+    deletion.
+    """
+    if rtype != "CORRECTION":
+        return []
+    # decide() scoped its similarity search to the incoming type, so a
+    # CORRECTION never saw the FACT it supersedes. RIF must look across types.
+    similar = find_similar(conn, norm, limit=5, threshold=SIMILAR_THRESHOLD)
+    penalized = []
+    for cand in similar:
+        if cand["id"] == record_id:
+            continue
+        conf = float(cand.get("confidence") or 0.0)
+        if conf < RIF_MIN_CONFIDENCE:
+            continue
+        new_conf = round(max(0.0, conf - RIF_PENALTY), 6)
+        conn.execute("UPDATE records SET confidence=? WHERE id=?",
+                     (new_conf, cand["id"]))
+        conn.execute(
+            "INSERT INTO reinforcement (record_id, signal, delta, source, ts)"
+            " VALUES (?, 'failure', ?, 'rif', ?)",
+            (cand["id"], -RIF_PENALTY, now_iso()))
+        penalized.append({"id": cand["id"], "from": conf, "to": new_conf})
+    conn.commit()
+    return penalized
+
+
 def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str = "",
              verified: int = 0, confidence: float = 0.5, source: str = "",
              tags: str = "", session_id: str = "", project_id: str = "",
@@ -855,7 +897,10 @@ def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str =
         applied = "inserted"
 
     conn.commit()
+    rif_applied = _rif_supersede(conn, record_id, rtype, norm,
+                                 decision["similar"])
     return {"id": record_id, "type": rtype, "shape": norm, "applied": applied,
+            "rif": rif_applied,
             "action": decision["action"], "reason": decision["reason"],
             "similar": decision["similar"], "advisory": decision["advisory"]}
 

@@ -15,6 +15,8 @@ def test_every_policy_constant_is_exported():
         "SCHEMA_PRIOR_WEIGHT",
         "SPACING_MIN_GAP_HOURS",
         "SPACING_FULL_GAP_HOURS",
+        "RIF_PENALTY",
+        "RIF_MIN_CONFIDENCE",
         "PROMOTABLE_TYPES",
         "FORGET_MIN_AGE_DAYS",
         "FORGET_WINDOW_DAYS",

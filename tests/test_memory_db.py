@@ -381,3 +381,31 @@ def test_schema_prior_contradictory_starts_lower(conn):
     out = memory_db.remember(conn, "FACT", "zebra migration crosses kenya",
                              confidence=0.5, source="agent")
     assert memory_db.get_record(conn, out["id"])["confidence"] == 0.5
+
+
+def test_rif_correction_penalizes_superseded_record(conn):
+    """Anderson et al. 1994: a correction inhibits the record it supersedes."""
+    old = memory_db.remember(conn, "FACT", "deploy runs on kubernetes",
+                             confidence=0.9, source="seed")
+    correction = memory_db.remember(conn, "CORRECTION",
+                                    "deploy runs on nomad, not kubernetes",
+                                    confidence=0.8, source="agent")
+    rif = correction["rif"]
+    assert len(rif) == 1
+    assert rif[0]["id"] == old["id"]
+    assert rif[0]["to"] == pytest.approx(0.75)
+    assert memory_db.get_record(conn, old["id"])["confidence"] == pytest.approx(0.75)
+    # the penalty is logged as an ordinary failure signal
+    n = conn.execute("SELECT count(*) FROM reinforcement WHERE record_id=?"
+                     " AND source='rif'", (old["id"],)).fetchone()[0]
+    assert n == 1
+
+
+def test_rif_ignores_low_confidence_losers(conn):
+    """A loser already near the floor gains nothing from extra inhibition."""
+    memory_db.remember(conn, "FACT", "deploy runs on kubernetes",
+                       confidence=0.4, source="seed")
+    correction = memory_db.remember(conn, "CORRECTION",
+                                    "deploy runs on nomad, not kubernetes",
+                                    confidence=0.8, source="agent")
+    assert correction["rif"] == []
