@@ -409,3 +409,85 @@ def test_rif_ignores_low_confidence_losers(conn):
                                     "deploy runs on nomad, not kubernetes",
                                     confidence=0.8, source="agent")
     assert correction["rif"] == []
+
+
+def test_log_retrieval_records_zero_delta(conn):
+    """Roediger & Karpicke 2006: recall is a learning event, not a confirmation."""
+    rid = memory_db.remember(conn, "FACT", "retrieved fact", confidence=0.5)["id"]
+    before = memory_db.get_record(conn, rid)["confidence"]
+    assert memory_db.log_retrieval(conn, [rid]) == 1
+    row = conn.execute("SELECT signal, delta, source FROM reinforcement"
+                       " WHERE record_id=?", (rid,)).fetchone()
+    assert row["signal"] == "retrieval" and row["delta"] == 0.0
+    assert row["source"] == "recall"
+    assert memory_db.get_record(conn, rid)["confidence"] == before
+
+
+def test_consolidation_rewards_repeated_retrieval(conn):
+    """Three retrievals in a week with no verdict earn a small gain."""
+    rid = memory_db.remember(conn, "FACT", "hot retrieval fact",
+                             confidence=0.5, verified=0)["id"]
+    for _ in range(3):
+        memory_db.log_retrieval(conn, [rid])
+    out = memory_db.consolidate(conn)
+    assert len(out) == 1 and out[0]["id"] == rid
+    assert memory_db.get_record(conn, rid)["confidence"] == pytest.approx(0.55)
+
+
+def test_consolidation_skips_recently_judged_records(conn):
+    """A success or failure in the window means the record was judged, not just used."""
+    rid = memory_db.remember(conn, "FACT", "judged retrieval fact",
+                             confidence=0.5, verified=0)["id"]
+    for _ in range(3):
+        memory_db.log_retrieval(conn, [rid])
+    memory_db.reinforce(conn, rid, "success", source="check")
+    assert memory_db.consolidate(conn) == []
+
+
+def test_consolidation_needs_three_retrievals(conn):
+    rid = memory_db.remember(conn, "FACT", "cold retrieval fact",
+                             confidence=0.5, verified=0)["id"]
+    memory_db.log_retrieval(conn, [rid])
+    memory_db.log_retrieval(conn, [rid])
+    assert memory_db.consolidate(conn) == []
+
+
+def test_v8_migration_preserves_reinforcement_rows(tmp_path):
+    """A v7 database upgrades in place; existing signals stay intact."""
+    import sqlite3
+    from datetime import datetime, timedelta, timezone
+    path = str(tmp_path / "v7.db")
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE schema_version (version INTEGER)")
+    conn.execute("INSERT INTO schema_version VALUES (7)")
+    conn.execute("""CREATE TABLE records (
+        id TEXT PRIMARY KEY, type TEXT NOT NULL, content TEXT NOT NULL,
+        evidence TEXT NOT NULL DEFAULT '', verified INTEGER NOT NULL DEFAULT 0,
+        confidence REAL NOT NULL DEFAULT 0.5, source TEXT NOT NULL DEFAULT '',
+        tags TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL, session_id TEXT NOT NULL DEFAULT '',
+        project_id TEXT NOT NULL DEFAULT '', parent_id TEXT NOT NULL DEFAULT '',
+        project_ids TEXT NOT NULL DEFAULT '', last_decay_at TEXT NOT NULL DEFAULT '')""")
+    rid = "abc123"
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "INSERT INTO records (id, type, content, confidence, created_at, updated_at)"
+        " VALUES (?, 'FACT', 'fact one', 0.5, ?, ?)", (rid, now, now))
+    conn.execute("""CREATE TABLE reinforcement (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, record_id TEXT NOT NULL,
+        signal TEXT NOT NULL CHECK (signal IN ('success','failure','correction','reinforce','decay')),
+        delta REAL NOT NULL DEFAULT 0.1, source TEXT NOT NULL DEFAULT '', ts TEXT NOT NULL,
+        FOREIGN KEY (record_id) REFERENCES records(id))""")
+    conn.execute("INSERT INTO reinforcement (record_id, signal, delta, source, ts)"
+                 " VALUES (?, 'success', 0.1, 'seed', ?)", (rid, now))
+    conn.commit()
+    conn.close()
+
+    conn = memory_db.connect(path)
+    memory_db.init_db(conn)
+    assert memory_db._current_schema_version(conn) == memory_db.SCHEMA_VERSION
+    row = conn.execute("SELECT signal, delta, source FROM reinforcement"
+                       " WHERE record_id=?", (rid,)).fetchone()
+    assert row["signal"] == "success" and row["delta"] == 0.1
+    # new signal works after the migration
+    assert memory_db.log_retrieval(conn, [rid]) == 1

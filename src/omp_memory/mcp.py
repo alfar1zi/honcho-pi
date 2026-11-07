@@ -190,6 +190,10 @@ def tool_recall(args: Dict[str, Any], user: str = "") -> str:
         if not rows:
             return f"No memory matched: {query!r}"
         _last_recall[user] = [r["id"] for r in rows]
+        # Retrieval practice: the act of recalling is itself a learning
+        # event. Logged as a zero-delta signal so it starts the spacing
+        # clock and feeds consolidation without moving confidence.
+        db.log_retrieval(conn, _last_recall[user])
         out = [f"Recalled {len(rows)} memory record(s) for {query!r}:"]
         for r in rows:
             flag = "verified" if r["verified"] else "unverified"
@@ -305,7 +309,9 @@ def tool_maintenance(args: Dict[str, Any], user: str = "") -> str:
     def body(conn):
         op = str(args.get("op") or "decay").strip().lower()
         if op == "decay":
-            return json.dumps({"decayed": db.apply_decay(conn)}, indent=2, sort_keys=True)
+            report = {"decayed": db.apply_decay(conn),
+                      "consolidated": db.consolidate(conn)}
+            return json.dumps(report, indent=2, sort_keys=True)
         if op == "forget_cold":
             report = db.forget_cold(conn, apply=bool(args.get("apply")))
             return json.dumps(report, indent=2, sort_keys=True)

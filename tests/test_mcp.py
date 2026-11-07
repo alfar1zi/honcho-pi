@@ -6,6 +6,7 @@ the server from becoming an inert file again.
 """
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -205,3 +206,17 @@ def test_resolve_db_path_per_user(tmp_path, monkeypatch):
     b = mcp.resolve_db_path("token-b")
     assert a != b and a != shared
     assert a.parent.parent.name == "users"
+
+
+def test_recall_logs_retrieval(server):
+    """Roediger & Karpicke 2006: recall is a learning event, logged with delta 0."""
+    stored = server.call("remember", {"content": "cache eviction uses lru"})
+    rid = re.search(r"id=([0-9a-f]+)", stored).group(1)
+    server.call("recall", {"query": "cache eviction"})
+    import sqlite3
+    conn = sqlite3.connect(server.db_path)
+    n = conn.execute(
+        "SELECT count(*) FROM reinforcement WHERE record_id=? AND signal='retrieval'",
+        (rid,)).fetchone()[0]
+    conn.close()
+    assert n == 1

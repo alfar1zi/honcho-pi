@@ -90,11 +90,21 @@ SPACING_FULL_GAP_HOURS = 24.0
 # wears off, and the record can still recover through reinforcement.
 RIF_PENALTY = 0.15
 RIF_MIN_CONFIDENCE = 0.7
+# Retrieval practice (Roediger & Karpicke 2006): a successful retrieval is
+# itself a learning event and beats restudying. Every recall that returns a
+# record logs a zero-delta 'retrieval' signal; it moves nothing by itself
+# but starts the spacing clock and feeds the consolidation pass. There,
+# a record retrieved three or more times in the last week without a
+# success signal earns CONSOLIDATE_GAIN: repeated retrieval without
+# contradiction is evidence of stability.
+RETRIEVAL_WINDOW_DAYS = 7
+RETRIEVALS_FOR_CONSOLIDATION = 3
+CONSOLIDATE_GAIN = 0.05
 FORGET_FLOOR_SLACK = 0.01
 FORGET_MIN_AGE_DAYS = 180
 FORGET_WINDOW_DAYS = 365
 PRE_COMPRESS_CHECKPOINT_API_VERSION = 2
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Recall reranking weights. Lexical is dominant (0.70) because recall is
 # primarily an inquiry of relevance. Heat is moderate (0.25) so stale yet
@@ -433,7 +443,7 @@ def _create_schema(conn: sqlite3.Connection):
     CREATE TABLE IF NOT EXISTS reinforcement (
         id            INTEGER PRIMARY KEY AUTOINCREMENT,
         record_id     TEXT NOT NULL,
-        signal        TEXT NOT NULL CHECK (signal IN ('success','failure','correction','reinforce','decay')),
+        signal        TEXT NOT NULL CHECK (signal IN ('success','failure','correction','reinforce','decay','retrieval')),
         delta         REAL NOT NULL DEFAULT 0.1,
         source        TEXT NOT NULL DEFAULT '',
         ts            TEXT NOT NULL,
@@ -598,6 +608,34 @@ def _migrate(conn: sqlite3.Connection):
             )
         conn.execute("DELETE FROM schema_version")
         conn.execute("INSERT INTO schema_version(version) VALUES (7)")
+        conn.commit()
+
+    if version < 8:
+        # v8: retrieval practice (Roediger & Karpicke 2006). The signal CHECK
+        # gains 'retrieval', logged by recall with delta 0. SQLite cannot
+        # ALTER a CHECK, so the table is rebuilt and rows carried over.
+        conn.execute("PRAGMA foreign_keys=off")
+        conn.execute("BEGIN")
+        conn.execute("ALTER TABLE reinforcement RENAME TO reinforcement_old")
+        conn.execute(
+            """CREATE TABLE reinforcement (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                record_id TEXT NOT NULL,
+                signal TEXT NOT NULL CHECK (signal IN
+                    ('success','failure','correction','reinforce','decay','retrieval')),
+                delta REAL NOT NULL DEFAULT 0.1,
+                source TEXT NOT NULL DEFAULT '',
+                ts TEXT NOT NULL,
+                FOREIGN KEY (record_id) REFERENCES records(id)
+            )""")
+        conn.execute(
+            "INSERT INTO reinforcement (id, record_id, signal, delta, source, ts)"
+            " SELECT id, record_id, signal, delta, source, ts FROM reinforcement_old")
+        conn.execute("DROP TABLE reinforcement_old")
+        conn.execute("PRAGMA foreign_keys=on")
+        conn.execute("COMMIT")
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version(version) VALUES (8)")
         conn.commit()
 
 
@@ -837,6 +875,63 @@ def _rif_supersede(conn, record_id: str, rtype: str, norm: str,
         penalized.append({"id": cand["id"], "from": conf, "to": new_conf})
     conn.commit()
     return penalized
+
+
+def log_retrieval(conn, record_ids: list) -> int:
+    """Log one zero-delta retrieval signal per record (Roediger & Karpicke 2006).
+
+    A retrieval is a learning event, not a confirmation: delta 0 moves no
+    confidence, but it starts the spacing clock and counts toward
+    consolidation.
+    """
+    n = 0
+    for rid in record_ids:
+        cur = conn.execute(
+            "INSERT INTO reinforcement (record_id, signal, delta, source, ts)"
+            " VALUES (?, 'retrieval', 0.0, 'recall', ?)", (rid, now_iso()))
+        n += cur.rowcount
+    conn.commit()
+    return n
+
+
+def consolidate(conn, now=None) -> list:
+    """Reward repeated retrieval with a small confidence gain.
+
+    Roediger & Karpicke 2006: retrieval practice consolidates. A record
+    pulled back three or more times in the last week with no success or
+    failure attached is being used without contradiction; it earns
+    CONSOLIDATE_GAIN once per pass. Records already verified stay put.
+    """
+    now = now or datetime.now(timezone.utc)
+    cutoff = (now - timedelta(days=RETRIEVAL_WINDOW_DAYS)).isoformat()
+    rows = conn.execute(
+        """
+        SELECT r.id, r.confidence,
+               (SELECT count(*) FROM reinforcement x
+                 WHERE x.record_id = r.id AND x.signal = 'retrieval'
+                   AND x.ts >= ?) AS retrievals,
+               (SELECT count(*) FROM reinforcement x
+                 WHERE x.record_id = r.id AND x.signal = 'success'
+                   AND x.ts >= ?) AS successes,
+               (SELECT count(*) FROM reinforcement x
+                 WHERE x.record_id = r.id AND x.signal = 'failure'
+                   AND x.ts >= ?) AS failures
+        FROM records r
+        WHERE r.verified = 0
+        """, (cutoff, cutoff, cutoff)).fetchall()
+    consolidated = []
+    for row in rows:
+        if row["retrievals"] < RETRIEVALS_FOR_CONSOLIDATION:
+            continue
+        if row["successes"] or row["failures"]:
+            continue
+        conf = min(1.0, float(row["confidence"] or 0.0) + CONSOLIDATE_GAIN)
+        conn.execute("UPDATE records SET confidence=?, updated_at=? WHERE id=?",
+                     (conf, now.isoformat(), row["id"]))
+        consolidated.append({"id": row["id"], "from": row["confidence"],
+                             "to": conf})
+    conn.commit()
+    return consolidated
 
 
 def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str = "",
