@@ -1,6 +1,7 @@
 @import "tailwindcss";
 
-:root {
+:root,
+:root[data-theme="dark"] {
   --bg: #0d1117;
   --surface: #161b22;
   --surface-2: #1c2129;
@@ -10,6 +11,22 @@
   --accent: #7c3aed;
   --accent-2: #06b6d4;
   --edge: #38404c;
+  --grid: #30363d;
+  --mask: rgba(13, 17, 23, 0.8);
+}
+
+:root[data-theme="light"] {
+  --bg: #f8fafc;
+  --surface: #ffffff;
+  --surface-2: #f1f5f9;
+  --border: #e2e8f0;
+  --text: #1e293b;
+  --text-muted: #64748b;
+  --accent: #7c3aed;
+  --accent-2: #0891b2;
+  --edge: #cbd5e1;
+  --grid: #e2e8f0;
+  --mask: rgba(248, 250, 252, 0.8);
 }
 
 html, body, #root {
@@ -19,4 +36,29 @@ html, body, #root {
   color: var(--text);
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   overflow: hidden;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+mark {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.react-flow__controls {
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.react-flow__controls button {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+.react-flow__controls button:hover {
+  background: var(--surface-2);
+}
+.react-flow__controls button svg {
+  fill: var(--text);
 }
