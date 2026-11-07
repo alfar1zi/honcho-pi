@@ -66,7 +66,7 @@ def test_migration_v6_rebuilds_fts_and_preserves_records(tmp_path):
     c = db.connect(path)
     db.init_db(c, path)
     version = c.execute("SELECT version FROM schema_version").fetchone()[0]
-    assert version == db.SCHEMA_VERSION == 7
+    assert version == db.SCHEMA_VERSION == 8
     rows = c.execute(
         "SELECT sql FROM sqlite_master WHERE name = 'records_fts'"
     ).fetchone()

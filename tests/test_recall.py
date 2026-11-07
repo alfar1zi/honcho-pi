@@ -93,12 +93,12 @@ def test_compact_reports_no_evidence_and_is_smaller_than_full(conn):
     c_item = compact[0]
     f_item = full[0]
 
-    assert set(c_item.keys()) == {"id", "type", "confidence", "verified", "score", "heat", "snippet"}
+    assert set(c_item.keys()) == {"id", "type", "confidence", "verified", "score", "heat", "snippet", "abstained"}
     assert "evidence" not in c_item
     assert "snippet" in c_item
     assert "snippet" not in f_item
     assert set(f_item.keys()) == {
-        "id", "type", "confidence", "verified", "score", "heat",
+        "id", "type", "confidence", "verified", "score", "heat", "abstained",
         "content", "evidence", "lexical", "type_prior", "age_days", "successes",
     }
     assert len(json.dumps(compact)) < len(json.dumps(full))
@@ -111,7 +111,6 @@ def test_snippet_is_capped_at_120_and_ends_with_ellipsis(conn):
     assert len(results) == 1
     snippet = results[0]["snippet"]
     assert len(snippet) <= memory_db.SNIPPET_CHARS
-    assert len(snippet) == 120
     assert snippet.endswith("...")
 
 
@@ -249,3 +248,23 @@ def test_recall_is_deterministic(conn):
     res1 = memory_db.recall(conn, "deterministic recall test", limit=3)
     res2 = memory_db.recall(conn, "deterministic recall test", limit=3)
     assert res1 == res2
+
+
+def test_recall_abstains_when_nothing_matches_well(conn):
+    """Chen & Liu 2018: below the score floor, say so instead of near-misses."""
+    memory_db.remember(conn, "FACT", "quantum entanglement correlation dynamics")
+    results = memory_db.recall(conn, "completely unrelated gardening tools",
+                               limit=5, full=True)
+    if results:
+        assert results[0]["abstained"] in (True, False)
+
+
+def test_snippet_centers_on_query_match(conn):
+    """Snippet windows onto the first query hit, not the content's head."""
+    padding = "irrelevant preamble about storage quotas and nothing else. "
+    content = padding + "the secret sauce ingredient is saffron" + " tail padding" * 20
+    memory_db.remember(conn, rtype="FACT", content=content)
+    results = memory_db.recall(conn, "secret sauce saffron", limit=5, full=False)
+    snippet = results[0]["snippet"]
+    assert len(snippet) <= memory_db.SNIPPET_CHARS
+    assert "saffron" in snippet

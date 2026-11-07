@@ -100,6 +100,11 @@ RIF_MIN_CONFIDENCE = 0.7
 RETRIEVAL_WINDOW_DAYS = 7
 RETRIEVALS_FOR_CONSOLIDATION = 3
 CONSOLIDATE_GAIN = 0.05
+# Abstention (Chen & Liu 2018, "Recall Is Not What You Need"): a reranked
+# score below this floor means nothing in the pool actually answers the
+# query; the caller gets abstained=True instead of a confident-looking
+# list of near-misses.
+ABSTAIN_SCORE = 0.5
 FORGET_FLOOR_SLACK = 0.01
 FORGET_MIN_AGE_DAYS = 180
 FORGET_WINDOW_DAYS = 365
@@ -1222,6 +1227,7 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
 
     scored.sort(key=_sort_key)
     top = scored[:limit]
+    abstained = bool(top) and top[0][5] < ABSTAIN_SCORE
 
     out = []
     if full:
@@ -1233,6 +1239,7 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
                 "verified": c["verified"],
                 "score": score,
                 "heat": heat,
+                "abstained": abstained,
                 "content": c.get("content", ""),
                 "evidence": c.get("evidence", ""),
                 "lexical": lexical,
@@ -1242,11 +1249,6 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
             })
     else:
         for c, parts, heat, lexical, prior, score in top:
-            norm = normalize_content(c.get("content") or "")
-            if len(norm) > SNIPPET_CHARS:
-                snippet = norm[:SNIPPET_CHARS - 3] + "..."
-            else:
-                snippet = norm
             out.append({
                 "id": c["id"],
                 "type": c["type"],
@@ -1254,9 +1256,37 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
                 "verified": c["verified"],
                 "score": score,
                 "heat": heat,
-                "snippet": snippet,
+                "abstained": abstained,
+                "snippet": _snippet(c.get("content") or "", query),
             })
     return out
+
+
+def _snippet(content: str, query: str, width: int = SNIPPET_CHARS) -> str:
+    """A window onto the first query-term match, not the content's head.
+
+    FTS5's snippet() needs the original MATCH expression, which the rerank
+    path no longer has; a local scan over the normalized query terms gives
+    the same effect. No match, or content shorter than the window, falls
+    back to the head.
+    """
+    norm = normalize_content(content)
+    if len(norm) <= width:
+        return norm
+    terms = [w for w in normalize_content(query).split() if len(w) >= 4]
+    low = norm.lower()
+    pos = -1
+    for term in terms:
+        pos = low.find(term)
+        if pos >= 0:
+            break
+    if pos < 0:
+        return norm[: width - 3] + "..."
+    start = max(0, pos - 30)
+    end = min(len(norm), start + width - 6)
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(norm) else ""
+    return prefix + norm[start:end] + suffix
 
 
 def get_record(conn: sqlite3.Connection, record_id: str):
