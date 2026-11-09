@@ -5,6 +5,7 @@ Promotion is the only path that changes a record's type, and it needs evidence
 from two independent sources, never a timestamp. Forgetting is gated on four
 independent conditions and always leaves an audit row behind.
 """
+import math
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -51,10 +52,25 @@ def test_reinforcement_term_is_saturating():
     row = {"id": "x", "type": "FACT", "confidence": 0.0, "updated_at": _stamp(0)}
     few = memory_db.heat_parts(row, [{"signal": "success", "source": "a"}],
                                datetime.now(timezone.utc))
-    assert few["reinforcement"] == pytest.approx(0.25)  # 0.5*0.5 + 0.5*0
+    # 0.5*(1-exp(-1/2)) + 0.5*0, smooth instead of a step at n=2
+    assert few["reinforcement"] == pytest.approx(0.5 * (1 - math.exp(-1 / 1.25)), abs=1e-6)
     many = memory_db.heat_parts(row, [{"signal": "success", "source": "a"}] * 6,
                                 datetime.now(timezone.utc))
-    assert many["reinforcement"] == pytest.approx(0.5)
+    # saturates toward but never reaches the 0.5 cap
+    assert many["reinforcement"] == pytest.approx(0.5 * (1 - math.exp(-6 / 1.25)), abs=1e-6)
+    assert many["reinforcement"] < 0.5
+
+
+def test_reinforcement_term_saturates_smoothly():
+    row = {"id": "x", "type": "FACT", "confidence": 0.0, "updated_at": _stamp(0)}
+    one = memory_db.heat_parts(row, [{"signal": "success", "source": "a"}],
+                               datetime.now(timezone.utc))["reinforcement"]
+    two = memory_db.heat_parts(row, [{"signal": "success", "source": "a"}] * 2,
+                               datetime.now(timezone.utc))["reinforcement"]
+    # no flat step between n=2 and n=3: each extra success adds less
+    three = memory_db.heat_parts(row, [{"signal": "success", "source": "a"}] * 3,
+                                 datetime.now(timezone.utc))["reinforcement"]
+    assert 0 < one < two < three < 0.5
 
 
 def test_heat_rises_after_success_and_falls_after_decay(conn):

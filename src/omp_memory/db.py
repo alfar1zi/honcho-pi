@@ -17,6 +17,7 @@ Design constraints (verified by tests/test_memory_db.py):
 Record types: FACT / ASSUMPTION / INFERENCE / DECISION / RULE / CORRECTION.
 """
 import difflib
+import math
 import sqlite3
 import subprocess
 import re
@@ -1367,8 +1368,13 @@ def heat_parts(row: dict, signals: list, now=None) -> dict:
         if name and name not in sources:
             sources.append(name)
     net_delta = sum(float(s.get("delta") or 0.0) for s in signals)
-    reinforcement = (0.5 * min(1.0, len(successes) / 2.0)
-                     + 0.5 * min(1.0, max(0.0, net_delta) / 0.2))
+    # Smooth saturating maps instead of hard steps: each additional success
+    # and each extra confidence delta still raises the term, but with
+    # diminishing returns (Park et al. 2023 normalize each score to [0, 1]
+    # before weighting; a step at n=2 or delta=0.2 makes the weight behave
+    # as a threshold, not a weight).
+    reinforcement = (0.5 * (1.0 - math.exp(-len(successes) / 1.25))
+                     + 0.5 * (1.0 - math.exp(-max(0.0, net_delta) / 0.1)))
 
     confidence = min(1.0, max(0.0, float(row.get("confidence") or 0.0)))
     heat = (HEAT_WEIGHTS["confidence"] * confidence
