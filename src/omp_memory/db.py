@@ -109,6 +109,12 @@ ABSTAIN_SCORE = 0.5
 FORGET_FLOOR_SLACK = 0.01
 FORGET_MIN_AGE_DAYS = 180
 FORGET_WINDOW_DAYS = 365
+# Offline consolidation (sleep-time compute, Lin et al. 2025): the pass runs
+# decay, consolidation, pruning and eviction together, and evicts only when a
+# project exceeds the budget. Budget is per project_id; unscoped records live
+# under the empty-string project and are never evicted.
+SLEEP_EVICT_BUDGET = 500
+SLEEP_PRUNE_SIMILARITY = 0.80
 PRE_COMPRESS_CHECKPOINT_API_VERSION = 2
 SCHEMA_VERSION = 8
 
@@ -938,6 +944,98 @@ def consolidate(conn, now=None) -> list:
                              "to": conf})
     conn.commit()
     return consolidated
+
+
+def sleep_pass(conn, now=None, budget: int = SLEEP_EVICT_BUDGET,
+               prune_similarity: float = SLEEP_PRUNE_SIMILARITY,
+               apply: bool = True) -> dict:
+    """One offline consolidation cycle over the whole store (wake/sleep split).
+
+    Lin et al. 2025: memory systems improve when maintenance happens between
+    queries, not inside them. This pass is exactly that: decay ages
+    confidence, consolidation rewards retrieved records, near-duplicate rows
+    collapse into their keepers, and projects over budget evict their
+    lowest-value rows (RMM-style value = confidence x recency). Unscoped
+    records and verified/RULE/CORRECTION rows are never evicted.
+
+    apply=False only reports: deleting memory is a decision, not a side
+    effect.
+    """
+    now = now or datetime.now(timezone.utc)
+    decayed = apply_decay(conn, now=now)
+    consolidated = consolidate(conn, now=now)
+    report = {"decayed": decayed, "consolidated": consolidated,
+              "merged": [], "evicted": [], "apply": bool(apply)}
+
+    # Prune: near-duplicate unverified rows collapse into the older keeper.
+    rows = [dict(r) for r in conn.execute(
+        "SELECT id, content, created_at FROM records WHERE verified=0"
+        " ORDER BY created_at")]
+    for i, row in enumerate(rows):
+        already_merged = {r["merged"] for r in report["merged"]}
+        keepers = {r["keeper"] for r in report["merged"]}
+        if row["id"] not in already_merged | keepers and \
+                not _record_gone(conn, row["id"]):
+            for other in rows[i + 1:]:
+                if _record_gone(conn, other["id"]):
+                    continue
+                if similarity(row["content"], other["content"]) >= prune_similarity:
+                    if apply:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO forgotten_graveyard"
+                            " (id, type, content, reason, ts) VALUES (?,?,?,?,?)",
+                            (other["id"], "DUPLICATE",
+                             (other["content"] or "")[:200],
+                             f"sleep: near-duplicate of {row['id']}",
+                             now.isoformat()))
+                        conn.execute("DELETE FROM reinforcement WHERE record_id=?",
+                                     (other["id"],))
+                        conn.execute("DELETE FROM records WHERE id=?", (other["id"],))
+                    report["merged"].append({"keeper": row["id"],
+                                             "merged": other["id"]})
+
+    # Evict: per project, rows beyond budget leave lowest-value first.
+    counts = conn.execute(
+        "SELECT project_id, count(*) AS n FROM records"
+        " WHERE verified=0 GROUP BY project_id").fetchall()
+    for proj in counts:
+        pid = proj["project_id"] or ""
+        n = proj["n"]
+        if n <= budget or pid == "":
+            continue
+        over = n - budget
+        rows = [dict(r) for r in conn.execute(
+            "SELECT id, confidence, updated_at FROM records WHERE project_id=?"
+            " AND verified=0", (pid,))]
+        for row in rows:
+            age = 0.0
+            ts = _parse_ts(row["updated_at"])
+            if ts:
+                age = max(0.0, (now - ts).total_seconds() / 86400.0)
+            row["value"] = float(row["confidence"] or 0.0) * (
+                (1.0 + age / DECAY_POWER_TAU_DAYS) ** -DECAY_POWER_BETA)
+        rows.sort(key=lambda r: r["value"])
+        for row in rows[:over]:
+            if apply:
+                conn.execute(
+                    "INSERT OR REPLACE INTO forgotten_graveyard"
+                    " (id, type, content, reason, ts) VALUES (?,?,?,?,?)",
+                    (row["id"], "EVICTED", "",
+                     f"sleep: project '{pid}' over budget ({n} > {budget}),"
+                     f" value {row['value']:.4f}", now.isoformat()))
+                conn.execute("DELETE FROM reinforcement WHERE record_id=?",
+                             (row["id"],))
+                conn.execute("DELETE FROM records WHERE id=?", (row["id"],))
+            report["evicted"].append({"id": row["id"], "project": pid,
+                                      "value": round(row["value"], 6)})
+    if apply and (report["merged"] or report["evicted"]):
+        conn.commit()
+    return report
+
+
+def _record_gone(conn, record_id: str) -> bool:
+    return conn.execute("SELECT 1 FROM records WHERE id=?",
+                        (record_id,)).fetchone() is None
 
 
 def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str = "",
