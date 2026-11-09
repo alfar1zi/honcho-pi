@@ -17,6 +17,8 @@ Design constraints (verified by tests/test_memory_db.py):
 Record types: FACT / ASSUMPTION / INFERENCE / DECISION / RULE / CORRECTION.
 """
 import sqlite3
+import re
+import unicodedata
 import json
 import hashlib
 import os
@@ -40,7 +42,7 @@ SIGNAL_DELTAS = {
     "decay": -0.05,
 }
 PRE_COMPRESS_CHECKPOINT_API_VERSION = 2
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _profile_context = threading.local()
 
@@ -87,6 +89,57 @@ def db_path_of(conn: sqlite3.Connection) -> str:
 def record_id_for(rtype: str, content: str, source: str, project_id: str) -> str:
     """Content-addressed id; identical inputs always yield the same id."""
     return sha(f"{rtype}:{content}:{source or ''}:{project_id or ''}")
+
+
+# --- identity ----------------------------------------------------------------
+
+# Token pattern for lexical scoring: words, not punctuation, not underscores.
+_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
+_WS_RE = re.compile(r"\s+")
+
+
+def normalize_content(content: str) -> str:
+    """Stored form: NFKC, runs of whitespace collapsed to one space, stripped.
+
+    Normalising on write means one fact has one spelling in the database, so a
+    tab, a trailing newline or fullwidth digits cannot create a second row.
+    """
+    return _WS_RE.sub(" ", unicodedata.normalize("NFKC", content or "")).strip()
+
+
+def identity_text(content: str) -> str:
+    """Comparison form only; the stored text keeps its original casing."""
+    return normalize_content(content).casefold()
+
+
+def content_id(content: str) -> str:
+    """Id is the normalised, case-folded content. Type and provenance excluded:
+    the same statement from another source or project is the same record."""
+    return sha(identity_text(content))
+
+
+def _uppercase_count(text: str) -> int:
+    return sum(1 for ch in text if ch.isupper())
+
+
+def _richer_spelling(stored: str, incoming: str) -> str:
+    """Prefer the spelling with more capitalisation, ties keep what is stored.
+
+    Comparing by row means the result does not depend on write order for the
+    two-way case and never flaps between two writes of the same surface.
+    """
+    if _uppercase_count(incoming) > _uppercase_count(stored):
+        return incoming
+    return stored
+
+
+def _merge_provenance(stored: str, incoming: str) -> str:
+    """Comma-joined, order-preserving, deduplicated."""
+    seen = [p for p in (stored or "").split(",") if p]
+    for p in (incoming or "").split(","):
+        if p and p not in seen:
+            seen.append(p)
+    return ",".join(seen)
 
 
 # --- backups -----------------------------------------------------------------
@@ -229,7 +282,8 @@ def _create_schema(conn: sqlite3.Connection):
         updated_at  TEXT NOT NULL,
         session_id  TEXT NOT NULL DEFAULT '',
         project_id  TEXT NOT NULL DEFAULT '',
-        parent_id   TEXT NOT NULL DEFAULT ''
+        parent_id   TEXT NOT NULL DEFAULT '',
+        project_ids TEXT NOT NULL DEFAULT ''
     );
     CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(
         id, content, evidence, tags
@@ -346,6 +400,17 @@ def _migrate(conn: sqlite3.Connection):
         conn.execute("INSERT INTO schema_version(version) VALUES (2)")
         conn.commit()
 
+    if version < 3:
+        # v3: provenance accumulates on a merge, so one row can name many
+        # projects. Existing rows keep their ids; the column defaults to empty
+        # and project_id stays the project that first wrote the record.
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(records)").fetchall()]
+        if "project_ids" not in cols:
+            conn.execute("ALTER TABLE records ADD COLUMN project_ids TEXT NOT NULL DEFAULT ''")
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version(version) VALUES (3)")
+        conn.commit()
+
 
 def init_db(conn: sqlite3.Connection, db_path: str = None, auto_repair: bool = True):
     """Create or migrate the schema on an open connection.
@@ -407,6 +472,67 @@ def upsert_record(conn: sqlite3.Connection, rtype: str, content: str, evidence: 
 
     conn.commit()
     return record_id
+
+
+def _insert_identity(conn: sqlite3.Connection, record_id: str, rtype: str, norm: str,
+                     evidence: str, verified: int, confidence: float, source: str,
+                     tags: str, session_id: str, project_id: str, parent_id: str):
+    stamp = now_iso()
+    conn.execute("""
+        INSERT INTO records
+            (id,type,content,evidence,verified,confidence,source,tags,
+             created_at,updated_at,session_id,project_id,parent_id,project_ids)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (record_id, rtype, norm, evidence or "", 1 if verified else 0, confidence,
+          source or "", tags or "", stamp, stamp, session_id or "", project_id or "",
+          parent_id or "", project_id or ""))
+
+
+def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str = "",
+             verified: int = 0, confidence: float = 0.5, source: str = "",
+             tags: str = "", session_id: str = "", project_id: str = "",
+             parent_id: str = "") -> dict:
+    """Write by content identity, not by provenance.
+
+    Two spellings of one fact (casing, whitespace) and two provenances of one
+    fact (source, project) are the same row. `source` and `project_id` are
+    recorded as provenance and accumulate, so a merge never loses where a fact
+    was seen.
+    """
+    if rtype not in VALID_TYPES:
+        raise ValueError(f"invalid type: {rtype}")
+    if not (content or "").strip():
+        raise ValueError("content must not be empty")
+    norm = normalize_content(content)
+    confidence = min(1.0, max(0.0, float(confidence)))
+    record_id = content_id(norm)
+
+    existing = get_record(conn, record_id)
+    if existing:
+        conn.execute(
+            "UPDATE records SET content=?, evidence=?, verified=?, confidence=?,"
+            " tags=?, session_id=?, parent_id=?, source=?, project_ids=?, updated_at=?"
+            " WHERE id=?",
+            (_richer_spelling(existing["content"], norm),
+             evidence or existing["evidence"],
+             max(1 if verified else 0, existing["verified"]),
+             confidence,
+             tags or existing["tags"],
+             session_id or existing["session_id"],
+             parent_id or existing["parent_id"],
+             existing["source"] or (source or ""),
+             _merge_provenance(existing["project_ids"], project_id),
+             now_iso(),
+             record_id)
+        )
+        applied = "updated"
+    else:
+        _insert_identity(conn, record_id, rtype, norm, evidence, verified, confidence,
+                         source, tags, session_id, project_id, parent_id)
+        applied = "inserted"
+
+    conn.commit()
+    return {"id": record_id, "type": rtype, "applied": applied}
 
 
 def _fts_query(query: str) -> str:
