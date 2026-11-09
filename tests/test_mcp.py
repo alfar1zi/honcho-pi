@@ -220,3 +220,18 @@ def test_recall_logs_retrieval(server):
         (rid,)).fetchone()[0]
     conn.close()
     assert n == 1
+
+
+def test_about_peer_scopes_remember_and_recall(server):
+    server.call("remember", {"content": "ada prefers rust for tooling", "type": "FACT",
+                             "about_peer": "ada"})
+    server.call("remember", {"content": "ben prefers python for tooling", "type": "FACT",
+                             "about_peer": "ben"})
+
+    ada = server.call("recall", {"query": "tooling", "about_peer": "ada"})
+    assert "rust" in ada
+    assert "python" not in ada
+
+    ben = server.call("recall", {"query": "tooling", "about_peer": "ben"})
+    assert "python" in ben
+    assert "rust" not in ben

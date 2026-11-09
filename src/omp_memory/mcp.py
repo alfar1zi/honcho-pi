@@ -180,13 +180,15 @@ def tool_recall(args: Dict[str, Any], user: str = "") -> str:
         project = args.get("project")
         verified_only = bool(args.get("verified_only"))
         min_confidence = float(args.get("min_confidence") or 0.0)
+        about_peer = args.get("about_peer")
         # recall() reranks and takes the same confidence filters, so every
         # query path keeps the same ranking instead of silently downgrading
         # filtered queries to plain lexical order.
         rows = db.recall(conn, query, limit=limit, full=True,
                          rtype=rtype, project_id=project,
                          verified_only=verified_only,
-                         min_confidence=min_confidence)
+                         min_confidence=min_confidence,
+                         about_peer=about_peer)
         if not rows:
             return f"No memory matched: {query!r}"
         _last_recall[user] = [r["id"] for r in rows]
@@ -231,6 +233,7 @@ def tool_remember(args: Dict[str, Any], user: str = "") -> str:
             tags=str(args.get("tags") or ""),
             session_id=str(args.get("session") or ""),
             project_id=str(args.get("project") or ""),
+            about_peer=str(args.get("about_peer") or ""),
         )
         rid = result["id"]
         rec = db.get_record(conn, rid) or {}

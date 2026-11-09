@@ -116,7 +116,7 @@ FORGET_WINDOW_DAYS = 365
 SLEEP_EVICT_BUDGET = 500
 SLEEP_PRUNE_SIMILARITY = 0.80
 PRE_COMPRESS_CHECKPOINT_API_VERSION = 2
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # Recall reranking weights. Lexical is dominant (0.70) because recall is
 # primarily an inquiry of relevance. Heat is moderate (0.25) so stale yet
@@ -648,6 +648,16 @@ def _migrate(conn: sqlite3.Connection):
         conn.execute("COMMIT")
         conn.execute("DELETE FROM schema_version")
         conn.execute("INSERT INTO schema_version(version) VALUES (8)")
+
+    if version < 9:
+        # v9: peer-scoped memory. `about_peer` marks whose facts a row is
+        # about (nullable, default '' = operator's own). Filtering happens
+        # in search, so a query can stay inside one peer's context.
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(records)").fetchall()]
+        if cols and "about_peer" not in cols:
+            conn.execute("ALTER TABLE records ADD COLUMN about_peer TEXT NOT NULL DEFAULT ''")
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version(version) VALUES (9)")
         conn.commit()
 
 
@@ -715,16 +725,18 @@ def upsert_record(conn: sqlite3.Connection, rtype: str, content: str, evidence: 
 
 def _insert_identity(conn: sqlite3.Connection, record_id: str, rtype: str, norm: str,
                      evidence: str, verified: int, confidence: float, source: str,
-                     tags: str, session_id: str, project_id: str, parent_id: str):
+                     tags: str, session_id: str, project_id: str, parent_id: str,
+                     about_peer: str = ""):
     stamp = now_iso()
     conn.execute("""
         INSERT INTO records
             (id,type,content,evidence,verified,confidence,source,tags,
-             created_at,updated_at,session_id,project_id,parent_id,project_ids)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             created_at,updated_at,session_id,project_id,parent_id,project_ids,
+             about_peer)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (record_id, rtype, norm, evidence or "", 1 if verified else 0, confidence,
           source or "", tags or "", stamp, stamp, session_id or "", project_id or "",
-          parent_id or "", project_id or ""))
+          parent_id or "", project_id or "", about_peer or ""))
 
 
 def _candidates(conn: sqlite3.Connection, content: str, rtype: str, limit: int) -> list:
@@ -1058,7 +1070,8 @@ def _record_gone(conn, record_id: str) -> bool:
 def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str = "",
              verified: int = 0, confidence: float = 0.5, source: str = "",
              tags: str = "", session_id: str = "", project_id: str = "",
-             parent_id: str = "", upsert: bool = False, limit: int = 5) -> dict:
+             parent_id: str = "", upsert: bool = False, limit: int = 5,
+             about_peer: str = "") -> dict:
     """Write by content identity, not by provenance.
 
     Two spellings of one fact (casing, whitespace) and two provenances of one
@@ -1090,7 +1103,7 @@ def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str =
         conn.execute(
             "UPDATE records SET content=?, evidence=?, verified=?, confidence=?,"
             " tags=?, session_id=?, parent_id=?, source=?, project_id=?,"
-            " project_ids=?, updated_at=?"
+            " project_ids=?, updated_at=?, about_peer=?"
             " WHERE id=?",
             (_richer_spelling(existing["content"], norm),
              evidence or existing["evidence"],
@@ -1103,13 +1116,15 @@ def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str =
              _merge_provenance(existing["project_id"], project_id),
              _merge_provenance(existing["project_ids"], project_id),
              now_iso(),
+             about_peer or existing["about_peer"],
              record_id)
         )
         applied = "updated"
     else:
         prior = _schema_prior(confidence, decision["similar"])
         _insert_identity(conn, record_id, rtype, norm, evidence, verified, prior,
-                         source, tags, session_id, project_id, parent_id)
+                         source, tags, session_id, project_id, parent_id,
+                         about_peer)
         applied = "inserted"
 
     conn.commit()
@@ -1222,14 +1237,15 @@ def _search_relaxed(conn: sqlite3.Connection, query: str, **kwargs) -> list:
 
 def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = None,
                   project_id: str = None, verified_only: bool = False,
-                  min_confidence: float = 0.0, pool: int = None):
+                  min_confidence: float = 0.0, pool: int = None,
+                  about_peer: str = None):
     match = query if query.startswith('>') else _fts_query(query)
     if not match:
         return []
     sql = """
         SELECT r.id, r.type, r.content, r.evidence, r.verified, r.confidence, r.source, r.tags,
                r.created_at, r.updated_at, r.session_id, r.project_id, r.parent_id,
-               bm25(records_fts) AS rank
+               r.about_peer, bm25(records_fts) AS rank
         FROM records_fts
         JOIN records r ON r.id = records_fts.id
         WHERE records_fts MATCH ?
@@ -1241,6 +1257,9 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
     if project_id:
         sql += " AND r.project_id = ?"
         params.append(project_id)
+    if about_peer:
+        sql += " AND r.about_peer = ?"
+        params.append(about_peer)
     if verified_only:
         sql += " AND r.verified = 1"
     if min_confidence > 0:
@@ -1264,12 +1283,14 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
 
 def search(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = None,
            project_id: str = None, verified_only: bool = False,
-           min_confidence: float = 0.0, pool: int = None):
+           min_confidence: float = 0.0, pool: int = None,
+           about_peer: str = None):
     """Exact AND first, then typo-repaired, then best single-word match."""
     return _search_relaxed(conn, query, limit=limit, rtype=rtype,
                            project_id=project_id,
                            verified_only=verified_only,
-                           min_confidence=min_confidence, pool=pool)
+                           min_confidence=min_confidence, pool=pool,
+                           about_peer=about_peer)
 
 BM25_CEILING = 10.0
 
@@ -1295,7 +1316,8 @@ def _absolute_lexical(candidates: list) -> dict:
 
 def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = False,
            pool: int = None, rtype: str = None, project_id: str = None, now=None,
-           verified_only: bool = False, min_confidence: float = 0.0) -> list:
+           verified_only: bool = False, min_confidence: float = 0.0,
+           about_peer: str = None) -> list:
     """Rerank candidate memories combining lexical match, heat and type prior.
 
     Confidence enters once, through heat (which already weights it 0.45); a
@@ -1309,7 +1331,8 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
     pool_size = max(pool or 0, limit * RECALL_POOL_FACTOR, RECALL_POOL_MIN)
     candidates = search(conn, query, limit=pool_size, pool=pool_size,
                         rtype=rtype, project_id=project_id,
-                        verified_only=verified_only, min_confidence=min_confidence)
+                        verified_only=verified_only, min_confidence=min_confidence,
+                        about_peer=about_peer)
     if not candidates:
         return []
     lexicals = _absolute_lexical(candidates)
@@ -1362,6 +1385,7 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
                 "type_prior": prior,
                 "age_days": parts["age_days"],
                 "successes": parts["successes"],
+                "about_peer": c.get("about_peer", ""),
             })
     else:
         for c, parts, heat, lexical, prior, score in top:
@@ -1374,6 +1398,7 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
                 "heat": heat,
                 "abstained": abstained,
                 "snippet": _snippet(c.get("content") or "", query),
+                "about_peer": c.get("about_peer", ""),
             })
     return out
 
