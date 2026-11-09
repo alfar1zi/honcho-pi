@@ -811,12 +811,29 @@ def decide(conn: sqlite3.Connection, content: str, rtype: str = "FACT", limit: i
                  only reported (action create, advisory says "similar to")
       novel      nothing scored above the advisory threshold; action create
 
-    Returns action update|create, the id it would touch, the reason above, the
-    similar candidates and the human-readable advisory. Never writes.
+    Returns action update|create|delete|noop, the id it would touch, the
+    reason above, the similar candidates and the human-readable advisory.
+    Never writes.
     """
     norm = normalize_content(content)
     own = content_id(norm)
-    if get_record(conn, own):
+    existing = get_record(conn, own)
+    if existing:
+        # Mem0-style taxonomy: not every write deserves a write. A restatement
+        # of a discredited fact asks for deletion (the fact is wrong and the
+        # duplicate adds nothing); a restatement of a fully-confirmed fact
+        # asks for nothing at all.
+        signals = _record_signals(conn, own)
+        if signals and signals[-1].get("signal") == "failure" \
+                and not existing["verified"]:
+            return {"action": "delete", "id": own, "reason": "identical",
+                    "similar": [],
+                    "advisory": ("repeats a discredited fact; delete instead "
+                                 "of re-storing it")}
+        if existing["verified"] and float(existing["confidence"] or 0) >= 0.95:
+            return {"action": "noop", "id": own, "reason": "identical",
+                    "similar": [],
+                    "advisory": "already confirmed; nothing to learn"}
         return {"action": "update", "id": own, "reason": "identical",
                 "similar": [], "advisory": ""}
 
