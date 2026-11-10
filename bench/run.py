@@ -11,6 +11,10 @@ Question types (Lin et al. 2025 retrieval split, Mem0 update case):
   update    query for a superseded fact -> expect the newest spelling
   temporal  query restricted to a time window -> expect a record from it
   abstention  query for a topic with no record -> expect recall to abstain
+  join      query spanning two records -> expect both in the top hits
+  topical-abstention  query missing a record's distinctive words -> expect
+            recall to rank it low or abstain (does the ranking resist a
+            half-matched query, or does any shared token buy a hit?)
 """
 import argparse
 import sqlite3
@@ -70,6 +74,51 @@ def question_temporal(rows):
     return cases
 
 
+def question_join(rows):
+    """Query spanning two records -> both in the top hits.
+
+    A join probe takes two records that share at least two content words
+    (>4 chars) and queries with the union of their distinctive words. A
+    ranked top-3 that returns only one half measured a keyword match, not
+    the retrieval of a multi-record answer.
+    """
+    cases = []
+    for i, a in enumerate(rows[:10]):
+        ta = {w for w in a["content"].split() if len(w) > 4}
+        if len(ta) < 2:
+            continue
+        for b in rows[i + 1:]:
+            tb = {w for w in b["content"].split() if len(w) > 4}
+            if len(tb) < 2 or len(ta & tb) < 2:
+                continue
+            query = " ".join(sorted(ta | tb))
+            cases.append((query, {a["id"], b["id"]}))
+            if len(cases) >= 5:
+                return cases
+    return cases
+
+
+def question_topical_abstention(rows):
+    """Strip the 2 most distinctive words -> expect the record ranked out.
+
+    The record's rarest words are the ones that identify it; a query with
+    them removed tests whether recall resists a half-matched query. Pass
+    means the record is absent from the top-3 (or recall abstains): the
+    remaining words are shared vocabulary, not evidence for this record.
+    """
+    cases = []
+    for r in rows[:10]:
+        words = [w for w in r["content"].split() if len(w) > 4]
+        if len(words) < 5:
+            continue
+        distinct = sorted(set(words), key=lambda w: (-len(w), w))[:2]
+        rest = [w for w in words if w not in distinct]
+        if len(rest) < 2:
+            continue
+        cases.append((" ".join(rest), r["id"]))
+    return cases
+
+
 def question_abstention(conn):
     """Tokens with zero hits in the corpus: real abstention probes.
 
@@ -90,7 +139,8 @@ def run(conn, report):
         print("corpus too small to benchmark (need >= 5 records)")
         return 1
 
-    results = {"exact": [0, 0], "update": [0, 0], "temporal": [0, 0], "abstain": [0, 0]}
+    results = {"exact": [0, 0], "update": [0, 0], "temporal": [0, 0],
+               "abstain": [0, 0], "join": [0, 0], "topical": [0, 0]}
 
     for q, expected in question_exact(rows):
         hits = db.recall(conn, q, limit=3)
@@ -116,9 +166,21 @@ def run(conn, report):
         if not hits or hits[0]["abstained"]:
             results["abstain"][0] += 1
 
+    for q, expected in question_join(rows):
+        hits = db.recall(conn, q, limit=3)
+        results["join"][1] += 1
+        if {h["id"] for h in hits} >= expected:
+            results["join"][0] += 1
+
+    for q, expected in question_topical_abstention(rows):
+        hits = db.recall(conn, q, limit=3)
+        results["topical"][1] += 1
+        if not hits or all(h["id"] != expected for h in hits):
+            results["topical"][0] += 1
+
     print(f"corpus: {len(rows)} probe records")
     total_hit = total_n = 0
-    for name in ("exact", "update", "temporal", "abstain"):
+    for name in ("exact", "update", "temporal", "abstain", "join", "topical"):
         hit, n = results[name]
         total_hit += hit
         total_n += n

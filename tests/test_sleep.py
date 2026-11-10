@@ -43,7 +43,11 @@ def test_sleep_pass_prune_is_guarded_by_apply(conn):
     assert memory_db.get_record(conn, b["id"]) is not None
 
 
-def test_sleep_pass_evicts_lowest_value_over_budget(conn):
+def test_sleep_pass_reports_over_budget_irreplaceable_rows(conn):
+    # Rate-distortion: prune deletes are recoverable (the keeper holds the
+    # fact), so they are the only deletes. A project over budget does not
+    # lose its lowest-value rows: they are the last holders of their content
+    # and a delete is irreversible, so they stay and are reported.
     keeper = memory_db.remember(conn, "FACT", "rule of thumb for the project",
                                 confidence=0.9, project_id="p1")
     weak = memory_db.remember(conn, "INFERENCE", "weak guess number one",
@@ -52,10 +56,31 @@ def test_sleep_pass_evicts_lowest_value_over_budget(conn):
                                 confidence=0.8, project_id="p1")
     _old(weak["id"], conn, 60)
     report = memory_db.sleep_pass(conn, budget=2)
-    assert [e["id"] for e in report["evicted"]] == [weak["id"]]
-    assert memory_db.get_record(conn, weak["id"]) is None
-    for rid in (keeper["id"], strong["id"]):
+    assert report["evicted"] == []
+    kept = {k["id"] for k in report["kept"]}
+    assert weak["id"] in kept
+    assert strong["id"] not in kept
+    for k in report["kept"]:
+        if k["id"] == weak["id"]:
+            assert k["reason"] == "over budget, irreplaceable"
+    for rid in (keeper["id"], weak["id"], strong["id"]):
         assert memory_db.get_record(conn, rid) is not None
+
+
+def test_sleep_pass_prune_still_merges_over_budget_duplicates(conn):
+    # The prune's own delete (merge into the keeper) survives, including
+    # over budget: a merge is recoverable, so it is not an eviction.
+    keeper = memory_db.remember(conn, "INFERENCE", "strong guess number two",
+                                confidence=0.8, project_id="p1")
+    dup = memory_db.remember(conn, "INFERENCE",
+                             "strong guess number two strong guess number two",
+                             confidence=0.3, project_id="p1", upsert=False)
+    _old(dup["id"], conn, 60)
+    report = memory_db.sleep_pass(conn, budget=1)
+    assert [m["merged"] for m in report["merged"]] == [dup["id"]]
+    assert report["evicted"] == []
+    assert memory_db.get_record(conn, dup["id"]) is None
+    assert memory_db.get_record(conn, keeper["id"]) is not None
 
 
 def test_sleep_pass_never_evicts_unscoped_or_verified(conn):
@@ -90,11 +115,15 @@ def test_sleep_pass_eviction_value_is_confidence_times_recency(conn):
     _old(weak["id"], conn, 100)
     strong = memory_db.remember(conn, "INFERENCE", "strong and fresh",
                                 confidence=0.8, project_id="p3")
+
+    _old(weak["id"], conn, 100)
     report = memory_db.sleep_pass(conn, budget=1)
-    assert [e["id"] for e in report["evicted"]] == [weak["id"]]
+    assert report["evicted"] == []
+    kept = {k["id"]: k for k in report["kept"]}
+    assert weak["id"] in kept
     # sleep_pass decays first: 100 days on tau=10, beta=0.5 gives factor 0.3015
     factor = (1 + 100 / memory_db.DECAY_POWER_TAU_DAYS) ** -memory_db.DECAY_POWER_BETA
     conf = memory_db.DECAY_FLOOR + (0.2 - memory_db.DECAY_FLOOR) * factor
     expected = conf * factor
-    assert report["evicted"][0]["value"] == pytest.approx(expected, abs=1e-6)
-    assert math.isfinite(report["evicted"][0]["value"])
+    assert kept[weak["id"]]["value"] == pytest.approx(expected, abs=1e-6)
+    assert math.isfinite(kept[weak["id"]]["value"])

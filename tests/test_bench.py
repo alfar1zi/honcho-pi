@@ -1,4 +1,4 @@
-"""Benchmark harness: read-only, 4 question types, works on any corpus."""
+"""Benchmark harness: read-only, 6 question types, works on any corpus."""
 import subprocess
 import sys
 from pathlib import Path
@@ -32,7 +32,8 @@ def test_bench_runs_readonly_and_scores(tmp_path, monkeypatch):
     )
     assert proc.returncode == 0, proc.stderr
     out = proc.stdout
-    for label in ("exact", "update", "temporal", "abstain", "overall"):
+    for label in ("exact", "update", "temporal", "abstain", "join", "topical",
+                  "overall"):
         assert label in out
     # abstain probes are nonsense tokens: the harness must expect 100% there
     abstain_line = [l for l in out.splitlines() if l.startswith("abstain")][0]

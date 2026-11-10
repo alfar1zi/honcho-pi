@@ -41,4 +41,4 @@ def test_peer_filter_does_not_match_empty_default(conn):
 
 
 def test_schema_version_is_nine(conn):
-    assert memory_db.SCHEMA_VERSION == 9
+    assert memory_db.SCHEMA_VERSION == 10

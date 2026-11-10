@@ -66,7 +66,7 @@ def test_migration_v6_rebuilds_fts_and_preserves_records(tmp_path):
     c = db.connect(path)
     db.init_db(c, path)
     version = c.execute("SELECT version FROM schema_version").fetchone()[0]
-    assert version == db.SCHEMA_VERSION == 9
+    assert version == db.SCHEMA_VERSION == 10
     rows = c.execute(
         "SELECT sql FROM sqlite_master WHERE name = 'records_fts'"
     ).fetchone()
@@ -129,3 +129,54 @@ def test_filtered_recall_still_reranks(conn):
     assert results[0]["type"] == "RULE"
     # score must reflect the full rerank (heat + prior), not raw bm25 order
     assert results[0]["score"] > 0.0
+
+def test_v9_check_without_intent_rebuilds_on_migrate(tmp_path):
+    # The live v9 records table has a CHECK without 'INTENT'. ALTER cannot
+    # change a CHECK, so _migrate must rebuild the table or an INTENT write
+    # fails with IntegrityError after the upgrade.
+    import sqlite3 as sq3
+    path = str(tmp_path / "v9.db")
+    c = sq3.connect(path)
+    c.executescript("""
+    CREATE TABLE schema_version (version INTEGER NOT NULL);
+    INSERT INTO schema_version VALUES (9);
+    CREATE TABLE records (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL CHECK (type IN
+            ('FACT','ASSUMPTION','INFERENCE','DECISION','RULE','CORRECTION')),
+        content TEXT NOT NULL,
+        evidence TEXT NOT NULL DEFAULT '',
+        verified INTEGER NOT NULL DEFAULT 0,
+        confidence REAL NOT NULL DEFAULT 0.5,
+        source TEXT NOT NULL DEFAULT '',
+        tags TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        session_id TEXT NOT NULL DEFAULT '',
+        project_id TEXT NOT NULL DEFAULT '',
+        parent_id TEXT NOT NULL DEFAULT '',
+        project_ids TEXT NOT NULL DEFAULT '',
+        last_decay_at TEXT NOT NULL DEFAULT '',
+        about_peer TEXT NOT NULL DEFAULT ''
+    );
+    INSERT INTO records (id, type, content, created_at, updated_at)
+    VALUES ('legacy1', 'FACT', 'legacy fact about deploys',
+            '2026-01-01', '2026-01-01');
+    CREATE VIRTUAL TABLE records_fts USING fts5(
+        id, content, evidence, tags, tokenize="porter unicode61");
+    INSERT INTO records_fts(id, content, evidence, tags)
+        SELECT id, content, evidence, tags FROM records;
+    """)
+    c.commit()
+    c.close()
+
+    c = db.connect(path)
+    db.init_db(c, path)
+    version = c.execute("SELECT version FROM schema_version").fetchone()[0]
+    assert version == 10
+    r = db.remember(c, "INTENT", "plan to add rate limiting", confidence=0.5)
+    assert r["applied"] == "inserted"
+    rec = db.get_record(c, "legacy1")
+    assert rec is not None and rec["type"] == "FACT"
+    assert len(db.search(c, "legacy fact about deploys", limit=5)) == 1
+    c.close()

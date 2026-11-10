@@ -56,6 +56,10 @@ _DEFAULT_SESSIONS = ""  # empty = auto from env
 
 # Keep at module level so callers can mutate before calling extract()
 CAPTURE_DEFAULT_CONFIDENCE = 0.35
+# Auto-captured lessons are pattern-matched from a transcript, not
+# verified by anyone: clamp them well below the trust bar so a noisy
+# session cannot outrank a confirmed fact.
+CAPTURE_CONFIDENCE_CEILING = 0.6
 CAPTURE_DEFAULT_TYPE = "INFERENCE"
 MAX_FAILURES_STORED = 8
 MAX_FILES_STORED = 30
@@ -359,7 +363,7 @@ def capture_session(
             content=cand["content"],
             evidence=cand["evidence"],
             verified=0,
-            confidence=cand["confidence"],
+            confidence=min(cand["confidence"], CAPTURE_CONFIDENCE_CEILING),
             source=cand["source"],
             tags=cand["tags"],
             session_id=cand["session_id"],

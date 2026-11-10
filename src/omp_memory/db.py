@@ -45,7 +45,8 @@ def _restrict_to_owner(path: str) -> None:
         pass
 
 
-VALID_TYPES = {"FACT", "ASSUMPTION", "INFERENCE", "DECISION", "RULE", "CORRECTION"}
+VALID_TYPES = {"FACT", "ASSUMPTION", "INFERENCE", "DECISION", "RULE", "CORRECTION",
+               "INTENT"}
 VALID_SIGNALS = {"success", "failure", "correction", "reinforce", "decay"}
 SIGNAL_DELTAS = {
     "success": 0.1,
@@ -115,9 +116,23 @@ FORGET_WINDOW_DAYS = 365
 # under the empty-string project and are never evicted.
 SLEEP_EVICT_BUDGET = 500
 SLEEP_PRUNE_SIMILARITY = 0.80
+# Conservative deletion (rate-distortion, A3): a merge is recoverable
+# (the keeper still holds the fact) but a delete is not, so eviction
+# requires stronger evidence of redundancy than a merge does.
+# Hypercorrection (B2): correcting a high-confidence record produces a
+# larger, more lasting update than correcting a doubtful one - the
+# surprise gap drives the rewrite. Applied on reinforce(correction) when
+# the record's confidence was already high, with a decay exemption so the
+# correction is not immediately cooled back down.
+HYPERCORRECTION_MIN_CONFIDENCE = 0.7
+HYPERCORRECTION_FACTOR = 1.5
+HYPERCORRECTION_DECAY_GRACE_DAYS = 30.0
+# Event segmentation (B6): records written inside one event boundary share
+# an event_id, so temporal joins and scoped replay can follow the event
+# structure of a session instead of only its clock.
+RECONSOLIDATION_WINDOW_MINUTES = 45.0
 PRE_COMPRESS_CHECKPOINT_API_VERSION = 2
-SCHEMA_VERSION = 9
-
+SCHEMA_VERSION = 10
 # Recall reranking weights. Lexical is dominant (0.70) because recall is
 # primarily an inquiry of relevance. Heat is moderate (0.25) so stale yet
 # relevant records do not sink while breaking ties among equally relevant
@@ -130,6 +145,7 @@ TYPE_PRIOR = {
     "FACT": 1.0,
     "CORRECTION": 0.85,
     "DECISION": 0.60,
+    "INTENT": 0.50,
     "ASSUMPTION": 0.35,
     "INFERENCE": 0.25,
 }
@@ -142,6 +158,7 @@ TYPE_BM25_WEIGHTS = {
     "RULE": 1.4,
     "CORRECTION": 1.4,
     "DECISION": 1.2,
+    "INTENT": 1.0,
     "FACT": 1.0,
     "INFERENCE": 0.8,
     "ASSUMPTION": 0.7,
@@ -409,14 +426,9 @@ def quick_check(conn: sqlite3.Connection) -> bool:
 
 # --- schema ------------------------------------------------------------------
 
-def _create_schema(conn: sqlite3.Connection):
-    conn.executescript("""
-    CREATE TABLE IF NOT EXISTS schema_version (
-        version INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS records (
+_RECORDS_DDL = """CREATE TABLE IF NOT EXISTS records (
         id          TEXT PRIMARY KEY,
-        type        TEXT NOT NULL CHECK (type IN ('FACT','ASSUMPTION','INFERENCE','DECISION','RULE','CORRECTION')),
+        type        TEXT NOT NULL CHECK (type IN ('FACT','ASSUMPTION','INFERENCE','DECISION','RULE','CORRECTION','INTENT')),
         content     TEXT NOT NULL,
         evidence    TEXT NOT NULL DEFAULT '',
         verified    INTEGER NOT NULL DEFAULT 0,
@@ -429,8 +441,19 @@ def _create_schema(conn: sqlite3.Connection):
         project_id  TEXT NOT NULL DEFAULT '',
         parent_id   TEXT NOT NULL DEFAULT '',
         project_ids TEXT NOT NULL DEFAULT '',
-        last_decay_at TEXT NOT NULL DEFAULT ''
+        last_decay_at TEXT NOT NULL DEFAULT '',
+        about_peer TEXT NOT NULL DEFAULT '',
+        event_id TEXT NOT NULL DEFAULT '',
+        decay_exempt_until TEXT NOT NULL DEFAULT ''
+    );"""
+
+
+def _create_schema(conn: sqlite3.Connection):
+    conn.executescript(f"""
+    CREATE TABLE IF NOT EXISTS schema_version (
+        version INTEGER NOT NULL
     );
+    {_RECORDS_DDL}
     CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(
         id, content, evidence, tags, tokenize="porter unicode61"
     );
@@ -672,6 +695,35 @@ def _migrate(conn: sqlite3.Connection):
         conn.execute("INSERT INTO schema_version(version) VALUES (9)")
         conn.commit()
 
+    if version < 10:
+        # v10: event segmentation (B6) and decay grace (B2). `event_id`
+        # groups records written inside one event boundary so temporal
+        # joins and scoped replay follow event structure, not just the
+        # clock. `decay_exempt_until` shields a hypercorrected record
+        # from decay for a grace period: the correction must be allowed
+        # to settle before the forgetting curve applies again.
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(records)").fetchall()]
+        if cols and "event_id" not in cols:
+            conn.execute("ALTER TABLE records ADD COLUMN event_id TEXT NOT NULL DEFAULT ''")
+        if cols and "decay_exempt_until" not in cols:
+            conn.execute("ALTER TABLE records ADD COLUMN decay_exempt_until TEXT NOT NULL DEFAULT ''")
+        # The v9 CHECK lacks 'INTENT'. SQLite cannot ALTER a CHECK, so the
+        # table is rebuilt when the live CHECK is stale, and rows carry over.
+        check = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='records'"
+        ).fetchone()[0]
+        if check and "'INTENT'" not in check:
+            conn.execute("PRAGMA foreign_keys=off")
+            conn.execute("ALTER TABLE records RENAME TO records_old")
+            conn.execute(_RECORDS_DDL)
+            conn.execute("INSERT INTO records SELECT * FROM records_old")
+            conn.execute("DROP TABLE records_old")
+            conn.execute("PRAGMA foreign_keys=on")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_records_event ON records(event_id)")
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version(version) VALUES (10)")
+        conn.commit()
+
 
 def init_db(conn: sqlite3.Connection, db_path: str = None, auto_repair: bool = True):
     """Create or migrate the schema on an open connection.
@@ -738,17 +790,17 @@ def upsert_record(conn: sqlite3.Connection, rtype: str, content: str, evidence: 
 def _insert_identity(conn: sqlite3.Connection, record_id: str, rtype: str, norm: str,
                      evidence: str, verified: int, confidence: float, source: str,
                      tags: str, session_id: str, project_id: str, parent_id: str,
-                     about_peer: str = ""):
+                     about_peer: str = "", event_id: str = ""):
     stamp = now_iso()
     conn.execute("""
         INSERT INTO records
             (id,type,content,evidence,verified,confidence,source,tags,
              created_at,updated_at,session_id,project_id,parent_id,project_ids,
-             about_peer)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             about_peer,event_id)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (record_id, rtype, norm, evidence or "", 1 if verified else 0, confidence,
           source or "", tags or "", stamp, stamp, session_id or "", project_id or "",
-          parent_id or "", project_id or "", about_peer or ""))
+          parent_id or "", project_id or "", about_peer or "", event_id or ""))
 
 
 def _candidates(conn: sqlite3.Connection, content: str, rtype: str, limit: int) -> list:
@@ -996,17 +1048,24 @@ def sleep_pass(conn, now=None, budget: int = SLEEP_EVICT_BUDGET,
     queries, not inside them. This pass is exactly that: decay ages
     confidence, consolidation rewards retrieved records, near-duplicate rows
     collapse into their keepers, and projects over budget evict their
-    lowest-value rows (RMM-style value = confidence x recency). Unscoped
-    records and verified/RULE/CORRECTION rows are never evicted.
+    Unscoped records and verified/RULE/CORRECTION rows are never deleted.
 
-    apply=False only reports: deleting memory is a decision, not a side
-    effect.
+    Deletion is conservative (rate-distortion): the only deletes this pass
+    performs are prune merges (recoverable, the keeper holds the fact). A
+    project over budget does NOT lose its lowest-value rows: those are the
+    last holders of their content and a delete is irreversible, so they stay
+    and are reported in "kept" (reason "over budget, irreplaceable") for the
+    operator to decide. The prune already collapsed every 0.80+ overlap, so
+    the evict loop can only ever see rows below that band.
+
+    apply=False reports the same plan without writing: deleting memory is a
+    decision, not a side effect.
     """
     now = now or datetime.now(timezone.utc)
     decayed = apply_decay(conn, now=now)
     consolidated = consolidate(conn, now=now)
     report = {"decayed": decayed, "consolidated": consolidated,
-              "merged": [], "evicted": [], "apply": bool(apply)}
+              "merged": [], "evicted": [], "kept": [], "apply": bool(apply)}
 
     # Prune: near-duplicate unverified rows collapse into the older keeper.
     rows = [dict(r) for r in conn.execute(
@@ -1046,8 +1105,8 @@ def sleep_pass(conn, now=None, budget: int = SLEEP_EVICT_BUDGET,
             continue
         over = n - budget
         rows = [dict(r) for r in conn.execute(
-            "SELECT id, confidence, updated_at FROM records WHERE project_id=?"
-            " AND verified=0", (pid,))]
+            "SELECT id, content, confidence, updated_at FROM records"
+            " WHERE project_id=? AND verified=0", (pid,))]
         for row in rows:
             age = 0.0
             ts = _parse_ts(row["updated_at"])
@@ -1057,18 +1116,13 @@ def sleep_pass(conn, now=None, budget: int = SLEEP_EVICT_BUDGET,
                 (1.0 + age / DECAY_POWER_TAU_DAYS) ** -DECAY_POWER_BETA)
         rows.sort(key=lambda r: r["value"])
         for row in rows[:over]:
-            if apply:
-                conn.execute(
-                    "INSERT OR REPLACE INTO forgotten_graveyard"
-                    " (id, type, content, reason, ts) VALUES (?,?,?,?,?)",
-                    (row["id"], "EVICTED", "",
-                     f"sleep: project '{pid}' over budget ({n} > {budget}),"
-                     f" value {row['value']:.4f}", now.isoformat()))
-                conn.execute("DELETE FROM reinforcement WHERE record_id=?",
-                             (row["id"],))
-                conn.execute("DELETE FROM records WHERE id=?", (row["id"],))
-            report["evicted"].append({"id": row["id"], "project": pid,
-                                      "value": round(row["value"], 6)})
+            # Report-only: the prune already collapsed every 0.80+ overlap,
+            # so these are the last holders of their content. Deleting them
+            # is irreversible, and the operator, not the sleep pass, owns
+            # that decision.
+            report["kept"].append({"id": row["id"], "project": pid,
+                                   "reason": "over budget, irreplaceable",
+                                   "value": round(row["value"], 6)})
     if apply and (report["merged"] or report["evicted"]):
         conn.commit()
     return report
@@ -1083,7 +1137,7 @@ def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str =
              verified: int = 0, confidence: float = 0.5, source: str = "",
              tags: str = "", session_id: str = "", project_id: str = "",
              parent_id: str = "", upsert: bool = False, limit: int = 5,
-             about_peer: str = "") -> dict:
+             about_peer: str = "", event_id: str = "") -> dict:
     """Write by content identity, not by provenance.
 
     Two spellings of one fact (casing, whitespace) and two provenances of one
@@ -1115,7 +1169,7 @@ def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str =
         conn.execute(
             "UPDATE records SET content=?, evidence=?, verified=?, confidence=?,"
             " tags=?, session_id=?, parent_id=?, source=?, project_id=?,"
-            " project_ids=?, updated_at=?, about_peer=?"
+            " project_ids=?, updated_at=?, about_peer=?, event_id=?"
             " WHERE id=?",
             (_richer_spelling(existing["content"], norm),
              evidence or existing["evidence"],
@@ -1129,6 +1183,7 @@ def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str =
              _merge_provenance(existing["project_ids"], project_id),
              now_iso(),
              about_peer or existing["about_peer"],
+             event_id or existing["event_id"],
              record_id)
         )
         applied = "updated"
@@ -1136,7 +1191,7 @@ def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str =
         prior = _schema_prior(confidence, decision["similar"])
         _insert_identity(conn, record_id, rtype, norm, evidence, verified, prior,
                          source, tags, session_id, project_id, parent_id,
-                         about_peer)
+                         about_peer, event_id)
         applied = "inserted"
 
     conn.commit()
@@ -1260,7 +1315,7 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
                r.about_peer,
                bm25(records_fts) / CASE r.type
                    WHEN 'RULE' THEN 1.4 WHEN 'CORRECTION' THEN 1.4
-                   WHEN 'DECISION' THEN 1.2 WHEN 'FACT' THEN 1.0
+                   WHEN 'DECISION' THEN 1.2 WHEN 'INTENT' THEN 1.0 WHEN 'FACT' THEN 1.0
                    WHEN 'INFERENCE' THEN 0.8 WHEN 'ASSUMPTION' THEN 0.7
                    ELSE 1.0 END AS rank
         FROM records_fts
@@ -1681,9 +1736,13 @@ def apply_decay(conn: sqlite3.Connection, now=None, floor: float = DECAY_FLOOR) 
     now = now or datetime.now(timezone.utc)
     moved = {}
     rows = [dict(r) for r in conn.execute(
-        "SELECT id, confidence, updated_at, last_decay_at, verified, type FROM records")]
+        "SELECT id, confidence, updated_at, last_decay_at, verified, type,"
+        " decay_exempt_until FROM records")]
     for row in rows:
         if row["verified"] or row["type"] in ("RULE", "CORRECTION"):
+            continue
+        exempt = _parse_ts(row["decay_exempt_until"])
+        if exempt and now < exempt:
             continue
         anchors = [t for t in (_parse_ts(row["updated_at"]),
                               _parse_ts(row["last_decay_at"])) if t]
@@ -1744,6 +1803,12 @@ def reinforce(conn: sqlite3.Connection, record_id: str, signal: str,
     Negative signals (failure, decay) do not touch updated_at: a record a
     session just discredited must stay eligible for forgetting, not be
     refreshed by the very signal that lowered it.
+
+    Reconsolidation window: a correction with a positive rewrite also
+    refreshes updated_at, which resets the decay anchor, so the rewritten
+    memory coasts (RECONSOLIDATION_WINDOW_MINUTES documents the intent; the
+    window IS the anchor reset, no separate timer). Hypercorrection adds
+    decay_exempt_until on top for the grace period.
     """
     if signal not in VALID_SIGNALS:
         raise ValueError(f"invalid signal: {signal}")
@@ -1752,16 +1817,30 @@ def reinforce(conn: sqlite3.Connection, record_id: str, signal: str,
                        (record_id,)).fetchone()
     if row is None:
         raise ValueError(f"record not found: {record_id}")
+    pre_confidence = float(row[0])
 
     actual_delta = float(delta) if delta is not None else SIGNAL_DELTAS[signal]
     if delta is None and signal in ("success", "reinforce"):
         actual_delta *= _spacing_factor(conn, record_id)
+    # Hypercorrection (B2): the higher the confidence being corrected, the
+    # bigger the surprise and the larger the rewrite. An explicit delta is
+    # the caller's decision and is not second-guessed. The corrected record
+    # also gets a decay grace window so the update settles before the
+    # forgetting curve resumes (reconsolidation: a recalled-and-rewritten
+    # memory is labile, not immediately re-consolidated).
+    grace_iso = ""
+    if signal == "correction" and delta is None \
+            and pre_confidence >= HYPERCORRECTION_MIN_CONFIDENCE:
+        actual_delta *= HYPERCORRECTION_FACTOR
+        grace_iso = (datetime.now(timezone.utc)
+                     + timedelta(days=HYPERCORRECTION_DECAY_GRACE_DAYS)).isoformat()
     # Atomic clamp in SQL: concurrent reinforces each read the same base, so a
     # Python-side read-modify-write loses every signal but the last.
     if actual_delta >= 0:
         conn.execute(
-            "UPDATE records SET confidence=min(1.0, max(0.0, confidence+?)), updated_at=? WHERE id=?",
-            (actual_delta, now_iso(), record_id))
+            "UPDATE records SET confidence=min(1.0, max(0.0, confidence+?)),"
+            " updated_at=?, decay_exempt_until=? WHERE id=?",
+            (actual_delta, now_iso(), grace_iso, record_id))
     else:
         conn.execute(
             "UPDATE records SET confidence=min(1.0, max(0.0, confidence+?)) WHERE id=?",
