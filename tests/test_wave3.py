@@ -160,12 +160,24 @@ def test_v9_check_without_intent_rebuilds_on_migrate(tmp_path):
         about_peer TEXT NOT NULL DEFAULT ''
     );
     INSERT INTO records (id, type, content, created_at, updated_at)
-    VALUES ('legacy1', 'FACT', 'legacy fact about deploys',
+    VALUES ('legacy1', 'FACT', 'legacy deployment note',
             '2026-01-01', '2026-01-01');
     CREATE VIRTUAL TABLE records_fts USING fts5(
         id, content, evidence, tags, tokenize="porter unicode61");
     INSERT INTO records_fts(id, content, evidence, tags)
         SELECT id, content, evidence, tags FROM records;
+    CREATE TABLE reinforcement (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        record_id TEXT NOT NULL,
+        signal TEXT NOT NULL CHECK (signal IN
+            ('success','failure','correction','reinforce','decay','retrieval')),
+        delta REAL NOT NULL DEFAULT 0.1,
+        source TEXT NOT NULL DEFAULT '',
+        ts TEXT NOT NULL,
+        FOREIGN KEY (record_id) REFERENCES records(id)
+    );
+    INSERT INTO reinforcement (record_id, signal, ts)
+        VALUES ('legacy1', 'success', '2026-01-01');
     """)
     c.commit()
     c.close()
@@ -174,9 +186,20 @@ def test_v9_check_without_intent_rebuilds_on_migrate(tmp_path):
     db.init_db(c, path)
     version = c.execute("SELECT version FROM schema_version").fetchone()[0]
     assert version == 10
+    # A rename-based rebuild orphans reinforcement FKs onto records_old and
+    # drops the FTS triggers, so every later write silently desyncs FTS.
+    # The swap must leave FKs on records, the triggers alive, and new
+    # writes searchable.
+    assert c.execute("PRAGMA foreign_key_check").fetchall() == []
+    trig = {t[0] for t in c.execute(
+        "SELECT name FROM sqlite_master WHERE type='trigger'")}
+    assert {"records_ai", "records_ad", "records_au"} <= trig
     r = db.remember(c, "INTENT", "plan to add rate limiting", confidence=0.5)
     assert r["applied"] == "inserted"
+    assert c.execute(
+        "SELECT COUNT(*) FROM records_fts WHERE id=?", (r["id"],)).fetchone()[0] == 1
+    assert len(db.search(c, "rate limiting", limit=3)) == 1
     rec = db.get_record(c, "legacy1")
     assert rec is not None and rec["type"] == "FACT"
-    assert len(db.search(c, "legacy fact about deploys", limit=5)) == 1
+    assert len(db.search(c, "legacy deployment note", limit=5)) == 1
     c.close()

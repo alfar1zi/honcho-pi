@@ -713,12 +713,27 @@ def _migrate(conn: sqlite3.Connection):
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='records'"
         ).fetchone()[0]
         if check and "'INTENT'" not in check:
+            # The rename makes every FK pointing at `records` (reinforcement)
+            # track `records_old` instead, and renaming the table drops the
+            # FTS triggers that keep records_fts in sync. So the rebuild is a
+            # new-table swap (the new table takes the name `records`, FKs
+            # keep pointing at the real name) and the triggers are recreated
+            # before any write can land.
             conn.execute("PRAGMA foreign_keys=off")
-            conn.execute("ALTER TABLE records RENAME TO records_old")
-            conn.execute(_RECORDS_DDL)
-            conn.execute("INSERT INTO records SELECT * FROM records_old")
-            conn.execute("DROP TABLE records_old")
+            conn.execute(_RECORDS_DDL.replace("CREATE TABLE IF NOT EXISTS records",
+                                              "CREATE TABLE records_new"))
+            conn.execute("INSERT INTO records_new SELECT * FROM records")
+            conn.execute("DROP TABLE records")
+            conn.execute("ALTER TABLE records_new RENAME TO records")
             conn.execute("PRAGMA foreign_keys=on")
+            _create_fts_triggers(conn)
+            # The FTS rows for the migrated records are still in the index
+            # (FTS is not part of the swap), so a plain insert would double
+            # every row. Clear and rebuild instead.
+            conn.execute("DELETE FROM records_fts")
+            conn.execute(
+                "INSERT INTO records_fts(id, content, evidence, tags)"
+                " SELECT id, content, evidence, tags FROM records")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_records_event ON records(event_id)")
         conn.execute("DELETE FROM schema_version")
         conn.execute("INSERT INTO schema_version(version) VALUES (10)")
