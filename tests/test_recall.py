@@ -269,3 +269,32 @@ def test_snippet_centers_on_query_match(conn):
     snippet = results[0]["snippet"]
     assert len(snippet) <= memory_db.SNIPPET_CHARS
     assert "saffron" in snippet
+
+
+def test_bm25_type_weight_prefers_rule_over_inference(conn):
+    # Same lexical content, different type: RULE must outrank INFERENCE.
+    memory_db.remember(conn, "INFERENCE", "I think the deploy gate blocks on coverage",
+                       confidence=0.9)
+    memory_db.remember(conn, "RULE", "the deploy gate always blocks on coverage",
+                       confidence=0.9)
+    hits = memory_db.recall(conn, "deploy gate coverage", limit=2, full=True)
+    assert [h["type"] for h in hits] == ["RULE", "INFERENCE"]
+
+
+def test_type_bm25_weights_cover_all_types():
+    import re
+    from omp_memory import db
+
+    sql = inspect_sql_case(db)
+    for rtype in db.VALID_TYPES:
+        assert rtype in sql, f"TYPE_BM25_WEIGHTS missing CASE branch for {rtype}"
+    for rtype in db.VALID_TYPES:
+        assert rtype in sql, f"TYPE_BM25_WEIGHTS missing CASE branch for {rtype}"
+
+
+def inspect_sql_case(db):
+    import re
+    src = open(db.__file__).read()
+    m = re.search(r"CASE r\.type(.*?) END AS rank", src, re.DOTALL)
+    assert m, "type-weight CASE clause not found in _search_exact"
+    return m.group(1)

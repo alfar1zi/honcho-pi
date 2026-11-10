@@ -134,6 +134,18 @@ TYPE_PRIOR = {
     "INFERENCE": 0.25,
 }
 RECALL_POOL_MIN = 20
+# bm25 is type-blind: a tentative INFERENCE and a hard-won RULE matching the
+# same words rank identically. Weight the bm25 rank by type so binding records
+# surface above speculation on a lexical tie. Weight divides the (negative)
+# rank, so a larger weight = smaller rank = earlier in the ORDER BY.
+TYPE_BM25_WEIGHTS = {
+    "RULE": 1.4,
+    "CORRECTION": 1.4,
+    "DECISION": 1.2,
+    "FACT": 1.0,
+    "INFERENCE": 0.8,
+    "ASSUMPTION": 0.7,
+}
 RECALL_POOL_FACTOR = 4
 SNIPPET_CHARS = 120
 
@@ -1245,7 +1257,12 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
     sql = """
         SELECT r.id, r.type, r.content, r.evidence, r.verified, r.confidence, r.source, r.tags,
                r.created_at, r.updated_at, r.session_id, r.project_id, r.parent_id,
-               r.about_peer, bm25(records_fts) AS rank
+               r.about_peer,
+               bm25(records_fts) / CASE r.type
+                   WHEN 'RULE' THEN 1.4 WHEN 'CORRECTION' THEN 1.4
+                   WHEN 'DECISION' THEN 1.2 WHEN 'FACT' THEN 1.0
+                   WHEN 'INFERENCE' THEN 0.8 WHEN 'ASSUMPTION' THEN 0.7
+                   ELSE 1.0 END AS rank
         FROM records_fts
         JOIN records r ON r.id = records_fts.id
         WHERE records_fts MATCH ?
