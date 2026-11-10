@@ -235,3 +235,10 @@ def test_about_peer_scopes_remember_and_recall(server):
     ben = server.call("recall", {"query": "tooling", "about_peer": "ben"})
     assert "python" in ben
     assert "rust" not in ben
+
+
+def test_maintenance_sleep_op(server):
+    server.call("remember", {"content": "sleep op keeps duplicates out", "type": "INFERENCE",
+                             "confidence": 0.6})
+    report = server.call("maintenance", {"op": "sleep", "apply": True})
+    assert '"apply": true' in report

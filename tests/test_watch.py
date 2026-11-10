@@ -89,3 +89,20 @@ def test_session_project_name(wenv, monkeypatch, tmp_path):
         session.write_text("{}", encoding="utf-8")
         monkeypatch.setattr(watch, "sessions_dir", lambda r=root: r)
         assert watch._session_project(session) == expected
+
+
+def test_sleep_interval_runs_sleep_pass(tmp_path, monkeypatch):
+    from omp_memory import watch, db as memory_db
+
+    monkeypatch.setattr(watch, "STATE_FILE", tmp_path / "state.json")
+    db_path = tmp_path / "w.db"
+    conn = memory_db.connect(str(db_path))
+    memory_db.init_db(conn)
+    a = memory_db.remember(conn, "INFERENCE", "the deploy needs free disk space",
+                           confidence=0.6)
+    b = memory_db.remember(conn, "INFERENCE", "deploy needs free disk space",
+                           confidence=0.6)
+
+    report = memory_db.sleep_pass(conn, apply=True)
+    assert report["apply"] is True
+    assert report["merged"], "near-duplicates merged by sleep pass"

@@ -315,6 +315,9 @@ def tool_maintenance(args: Dict[str, Any], user: str = "") -> str:
             report = {"decayed": db.apply_decay(conn),
                       "consolidated": db.consolidate(conn)}
             return json.dumps(report, indent=2, sort_keys=True)
+        if op == "sleep":
+            report = db.sleep_pass(conn, apply=bool(args.get("apply", True)))
+            return json.dumps(report, indent=2, sort_keys=True)
         if op == "forget_cold":
             report = db.forget_cold(conn, apply=bool(args.get("apply")))
             return json.dumps(report, indent=2, sort_keys=True)
@@ -327,7 +330,7 @@ def tool_maintenance(args: Dict[str, Any], user: str = "") -> str:
             report = capture.capture_session(
                 db, conn, apply=bool(args.get("apply")))
             return json.dumps(report, indent=2, sort_keys=True)
-        return f"maintenance: unknown op {op}; use decay | forget_cold | promote | capture"
+        return f"maintenance: unknown op {op}; use decay | sleep | forget_cold | promote | capture"
     return with_conn(user, body)
 _SECRET_PATTERNS = [
     (r"sk-[A-Za-z0-9_-]{20,}", "openai-style key"),

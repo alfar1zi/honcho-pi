@@ -18,6 +18,7 @@ from .capture import latest_session, sessions_dir
 
 IDLE_SECONDS = int(os.environ.get("OMP_MEMORY_IDLE_SECONDS", "600"))
 POLL_SECONDS = int(os.environ.get("OMP_MEMORY_POLL_SECONDS", "60"))
+SLEEP_INTERVAL = int(os.environ.get("OMP_MEMORY_SLEEP_INTERVAL", "3600"))
 
 STATE_FILE = Path(
     os.environ.get(
@@ -108,12 +109,17 @@ def main(argv=None) -> int:
 
     print(f"[watch] polling {sessions_dir()} every {POLL_SECONDS}s, idle {IDLE_SECONDS}s", flush=True)
     conn = db.connect()
+    last_sleep = time.time()
     try:
         while running["flag"]:
             try:
                 result = capture_once(db, conn)
                 if result["action"] != "none":
                     print(f"[watch] {json.dumps(result)}", flush=True)
+                if time.time() - last_sleep >= SLEEP_INTERVAL:
+                    report = db.sleep_pass(conn, apply=True)
+                    last_sleep = time.time()
+                    print(f"[watch] sleep {json.dumps(report)}", flush=True)
             except Exception as exc:  # noqa: BLE001 - watcher must survive
                 print(f"[watch] error: {exc}", file=sys.stderr, flush=True)
             time.sleep(POLL_SECONDS)
