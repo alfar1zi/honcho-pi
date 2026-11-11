@@ -88,16 +88,19 @@ def test_absolute_lexical_is_comparable_across_queries(conn):
     assert broad[0]["lexical"] <= 1.0
 
 
-def test_absolute_lexical_uses_fixed_ceiling():
-    # rank 0 is a perfect match, -5.0 sits halfway down the ceiling of 10,
-    # and -12.0 is past the ceiling and clamps to 0. The mapping does not
-    # depend on the pool, so a hit scores the same in every query.
+def test_absolute_lexical_prefers_stronger_rank():
+    # bm25 is negative and MORE negative = more relevant. Within the
+    # same matched count, rank -12.0 outranks -5.0; a 1-term match cannot
+    # beat a 3-term match even at a much stronger rank; rank 0 means the
+    # row contributed no term (weakest lexical, the fraction floor).
     ranked = db._absolute_lexical([
-        {"id": "a", "rank": 0.0},
-        {"id": "b", "rank": -5.0},
-        {"id": "c", "rank": -12.0},
+        {"id": "strong", "rank": -12.0, "matched_terms": 3, "query_terms": 3},
+        {"id": "weaker", "rank": -5.0, "matched_terms": 3, "query_terms": 3},
+        {"id": "single", "rank": -1.0, "matched_terms": 1, "query_terms": 3},
+        {"id": "none", "rank": 0.0, "matched_terms": 1, "query_terms": 3},
     ])
-    assert ranked == {"a": 1.0, "b": 0.5, "c": 0.0}
+    assert ranked["strong"] > ranked["weaker"] > ranked["single"]
+    assert ranked["none"] == round(1 / 3, 6)
 
 
 def test_confidence_not_double_counted(conn):

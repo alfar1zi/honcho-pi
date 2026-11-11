@@ -1350,13 +1350,15 @@ def _search_relaxed(conn: sqlite3.Connection, query: str, **kwargs) -> list:
     if len(words) < 2:
         return []
     or_expr = _or_query(words)
-    return _search_exact(conn, ">" + or_expr, **kwargs) if or_expr else []
+    if not or_expr:
+        return []
+    return _search_exact(conn, ">" + or_expr, term_count=len(words), **kwargs)
 
 
 def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = None,
                   project_id: str = None, verified_only: bool = False,
                   min_confidence: float = 0.0, pool: int = None,
-                  about_peer: str = None):
+                  about_peer: str = None, term_count: int = 0):
     match = query if query.startswith('>') else _fts_query(query)
     if not match:
         return []
@@ -1393,6 +1395,16 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
     rows = [dict(row) for row in conn.execute(sql, params)]
     if not rows:
         return []
+    # bm25 accumulates per matched term, so the lexical ceiling needs each
+    # record's matched-term count: the query tokens the record actually
+    # contains. AND queries matched every term by construction (overlap
+    # == token count); OR queries may match a subset.
+    query_tokens = set(_tokens(query if not match.startswith(">") else
+                               " ".join(re.findall(r'"([^"]+)"', match))))
+    for r in rows:
+        overlap = len(query_tokens & set(_tokens(r["content"])))
+        r["matched_terms"] = max(1, overlap)
+        r["query_terms"] = max(1, len(query_tokens))
     ranks = [r["rank"] for r in rows]
     min_rank, max_rank = min(ranks), max(ranks)
     denom = max_rank - min_rank
@@ -1419,22 +1431,37 @@ BM25_CEILING = 10.0
 
 
 def _absolute_lexical(candidates: list) -> dict:
-    """bm25 rank on a fixed [0, 1] scale, keyed by record id.
+    """Lexical strength on a fixed [0, 1] scale, keyed by record id.
 
-    bm25 is negative (more relevant = more negative) and unbounded, so its
-    raw value means nothing across queries, and normalising by the best
-    rank in the pool makes every pool's top hit 1.0 regardless of how well
-    it actually matched. A fixed ceiling instead: lexical = 1 + rank /
-    CEILING, so a perfect match is 1.0, a rank at -CEILING is 0.0, and a
-    hit at lexical 0.9 is as strong in one query as in another. Tiny
-    corpora produce tiny bm25 magnitudes, so everything clamps near 1.0
-    there; that is the honest reading (all hits are near-perfect matches)
-    and the spread reappears as the corpus grows.
+    bm25 saturates on long OR pools: a record matching 65 of 119 terms
+    and one matching 14 can carry similar per-term scores, so bm25 rank
+    alone cannot separate a join answer from an incidental hit. The
+    primary signal is the matched-term fraction: query terms the record
+    actually contains, over the query's term count. bm25 breaks ties
+    within the same count, scaled by BM25_CEILING and normalised against
+    the best rank in that count's group so it stays [0, 1]. Tiny corpora
+    produce tiny bm25 magnitudes, so everything clamps near 1.0 there;
+    that is the honest reading (all hits are near-perfect matches) and
+    the spread reappears as the corpus grows.
     """
-    return {
-        c["id"]: round(min(1.0, max(0.0, 1.0 + c["rank"] / BM25_CEILING)), 6)
-        for c in candidates
-    }
+    qtokens = _pool_query_terms(candidates)
+    out = {}
+    for c in candidates:
+        n = c["matched_terms"] or 1
+        frac = n / qtokens if qtokens else 1.0
+        # bm25 is negative and more negative = stronger; the tie term
+        # runs the same direction so it only orders records with the
+        # same matched count, never against the fraction.
+        tie = min(1.0, max(0.0, -c["rank"] / max(1.0, BM25_CEILING * n)))
+        score = round(frac + tie / 1000.0, 6)
+        out[c["id"]] = score
+    return out
+
+
+def _pool_query_terms(candidates: list) -> int:
+    """Query term count shared by the pool (all rows come from one query)."""
+    n = candidates[0].get("query_terms") or 0
+    return max(1, n)
 
 
 def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = False,

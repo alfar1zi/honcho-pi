@@ -12,11 +12,12 @@ Question types (Lin et al. 2025 retrieval split, Mem0 update case):
   temporal  query restricted to a time window -> expect a record from it
   abstention  query for a topic with no record -> expect recall to abstain
   join      query spanning two records -> expect both in the top hits
-  topical-abstention  query missing a record's distinctive words -> expect
-            recall to rank it low or abstain (does the ranking resist a
-            half-matched query, or does any shared token buy a hit?)
+  topical       query from record B's words -> record A (sharing B's topic
+            vocabulary) must not surface: does recall discriminate
+            neighbours, or does any shared token buy a hit?
 """
 import argparse
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -74,6 +75,16 @@ def question_temporal(rows):
     return cases
 
 
+def _terms(text):
+    """Alphanumeric words (>4 chars) that are safe inside an FTS MATCH.
+
+    Parentheses and other MATCH syntax characters in record content turn
+    a probe into a query for an unintended expression, so the terms are
+    restricted to letters and digits.
+    """
+    return {w for w in re.findall(r"[A-Za-z0-9]+", text) if len(w) > 4}
+
+
 def question_join(rows):
     """Query spanning two records -> both in the top hits.
 
@@ -84,11 +95,11 @@ def question_join(rows):
     """
     cases = []
     for i, a in enumerate(rows[:10]):
-        ta = {w for w in a["content"].split() if len(w) > 4}
+        ta = _terms(a["content"])
         if len(ta) < 2:
             continue
         for b in rows[i + 1:]:
-            tb = {w for w in b["content"].split() if len(w) > 4}
+            tb = _terms(b["content"])
             if len(tb) < 2 or len(ta & tb) < 2:
                 continue
             query = " ".join(sorted(ta | tb))
@@ -99,23 +110,38 @@ def question_join(rows):
 
 
 def question_topical_abstention(rows):
-    """Strip the 2 most distinctive words -> expect the record ranked out.
+    """Query record B's words; record A must not surface.
 
-    The record's rarest words are the ones that identify it; a query with
-    them removed tests whether recall resists a half-matched query. Pass
-    means the record is absent from the top-3 (or recall abstains): the
-    remaining words are shared vocabulary, not evidence for this record.
+    A query built from a record's own words can never be stripped of
+    them: the exact AND still matches the source record, so "remove the
+    distinctive words and expect it ranked out" is unanswerable by
+    construction on this corpus. The measurable question is
+    discrimination: two records sharing topic vocabulary, a query drawn
+    from B's non-shared words (rarest first, capped at 6), and the
+    expectation that A does not appear in the top-3. Pass means recall
+    returned B's neighbourhood, not A.
     """
+    freq = {}
+    for r in rows:
+        for w in _terms(r["content"]):
+            freq[w] = freq.get(w, 0) + 1
     cases = []
-    for r in rows[:10]:
-        words = [w for w in r["content"].split() if len(w) > 4]
-        if len(words) < 5:
-            continue
-        distinct = sorted(set(words), key=lambda w: (-len(w), w))[:2]
-        rest = [w for w in words if w not in distinct]
-        if len(rest) < 2:
-            continue
-        cases.append((" ".join(rest), r["id"]))
+    for i, a in enumerate(rows[:10]):
+        if len(cases) >= 10:
+            break
+        ta = _terms(a["content"])
+        for b in rows[i + 1:]:
+            if len(cases) >= 10:
+                break
+            if not (ta & _terms(b["content"])):
+                continue
+            bwords = [w for w in b["content"].split() if len(w) > 4]
+            query_words = sorted(
+                (w for w in bwords if w not in ta),
+                key=lambda w: freq.get(w, 0))[:6]
+            if len(query_words) < 3:
+                continue
+            cases.append((" ".join(query_words), a["id"]))
     return cases
 
 
