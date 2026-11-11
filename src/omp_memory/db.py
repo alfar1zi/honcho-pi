@@ -718,22 +718,43 @@ def _migrate(conn: sqlite3.Connection):
             # FTS triggers that keep records_fts in sync. So the rebuild is a
             # new-table swap (the new table takes the name `records`, FKs
             # keep pointing at the real name) and the triggers are recreated
-            # before any write can land.
+            # before any write can land. The swap is one transaction: dying
+            # halfway would leave records half-swapped and _migrate would
+            # never retry it. foreign_keys cannot change inside a
+            # transaction, so the pragma calls bracket it.
             conn.execute("PRAGMA foreign_keys=off")
-            conn.execute(_RECORDS_DDL.replace("CREATE TABLE IF NOT EXISTS records",
-                                              "CREATE TABLE records_new"))
-            conn.execute("INSERT INTO records_new SELECT * FROM records")
-            conn.execute("DROP TABLE records")
-            conn.execute("ALTER TABLE records_new RENAME TO records")
-            conn.execute("PRAGMA foreign_keys=on")
-            _create_fts_triggers(conn)
-            # The FTS rows for the migrated records are still in the index
-            # (FTS is not part of the swap), so a plain insert would double
-            # every row. Clear and rebuild instead.
-            conn.execute("DELETE FROM records_fts")
-            conn.execute(
-                "INSERT INTO records_fts(id, content, evidence, tags)"
-                " SELECT id, content, evidence, tags FROM records")
+            conn.execute("BEGIN")
+            try:
+                conn.execute(_RECORDS_DDL.replace(
+                    "CREATE TABLE IF NOT EXISTS records", "CREATE TABLE records_new"))
+                conn.execute("INSERT INTO records_new SELECT * FROM records")
+                conn.execute("DROP TABLE records")
+                conn.execute("ALTER TABLE records_new RENAME TO records")
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+            finally:
+                conn.execute("PRAGMA foreign_keys=on")
+        # The refill runs even when the swap does not: a database that
+        # crashed between the swap and the refill (or was migrated by the
+        # buggy rename-based rebuild) has version 10 with a stale or empty
+        # index, and the early return at the top of _migrate would never
+        # fix it. Both statements are idempotent and cheap.
+        _create_fts_triggers(conn)
+        conn.execute("DELETE FROM records_fts")
+        conn.execute(
+            "INSERT INTO records_fts(id, content, evidence, tags)"
+            " SELECT id, content, evidence, tags FROM records")
+        # DROP TABLE records dropped the plain indexes with it, and
+        # _create_schema already ran, so recreate them here.
+        for name, col in (("idx_records_type", "type"),
+                          ("idx_records_project", "project_id"),
+                          ("idx_records_session", "session_id"),
+                          ("idx_records_parent", "parent_id"),
+                          ("idx_records_verified", "verified"),
+                          ("idx_records_confidence", "confidence")):
+            conn.execute(f"CREATE INDEX IF NOT EXISTS {name} ON records({col})")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_records_event ON records(event_id)")
         conn.execute("DELETE FROM schema_version")
         conn.execute("INSERT INTO schema_version(version) VALUES (10)")
