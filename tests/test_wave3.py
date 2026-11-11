@@ -255,3 +255,34 @@ def test_capture_clamps_confidence_to_ceiling(tmp_path):
     assert seen["confidence"] <= cap.CAPTURE_CONFIDENCE_CEILING, (
         f"capture wrote confidence {seen['confidence']} above the ceiling")
     conn.close()
+
+
+def test_v10_desynced_fts_self_heals_on_open(tmp_path):
+    # A v10 database that crashed between the table swap and the FTS
+    # refill (or was rebuilt by the pre-hardened migration) has the right
+    # schema version, live triggers, and an empty or stale index, and the
+    # version gate would never repair it. Every open must reconcile.
+    import sqlite3 as sq3
+    path = str(tmp_path / "broken.db")
+    c = db.connect(path)
+    db.init_db(c, path)
+    r1 = db.remember(c, "FACT", "heal probe one", confidence=0.5)
+    r2 = db.remember(c, "FACT", "heal probe two", confidence=0.5)
+    c.commit()
+    # Simulate the crash: empty the index and drop the plain indexes.
+    c.execute("DELETE FROM records_fts")
+    c.execute("DROP INDEX IF EXISTS idx_records_type")
+    c.commit()
+    c.close()
+
+    c = db.connect(path)
+    db.init_db(c, path)
+    assert c.execute("SELECT COUNT(*) FROM records_fts").fetchone()[0] == \
+        c.execute("SELECT COUNT(*) FROM records").fetchone()[0]
+    assert c.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_records_type'"
+    ).fetchone() is not None
+    assert len(db.search(c, "heal probe one", limit=3)) == 1
+    assert db.get_record(c, r1["id"]) is not None
+    assert db.get_record(c, r2["id"]) is not None
+    c.close()

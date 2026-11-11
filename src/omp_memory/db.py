@@ -555,10 +555,39 @@ def _current_schema_version(conn: sqlite3.Connection) -> int:
         return 0
 
 
+def _reconcile_fts(conn: sqlite3.Connection):
+    """Self-heal the FTS index and plain indexes on `records`.
+
+    Runs on every open, before the version gate: a database can reach
+    SCHEMA_VERSION with a broken FTS index (a migration that crashed
+    between the table swap and the refill, or the pre-hardened
+    rename-based rebuild) and the version gate would never repair it.
+    Trigger recreation and index creation are idempotent; the refill
+    only fires when the index disagrees with the table, so a healthy
+    database pays two counts and no writes.
+    """
+    _create_fts_triggers(conn)
+    for name, col in (("idx_records_type", "type"),
+                      ("idx_records_project", "project_id"),
+                      ("idx_records_session", "session_id"),
+                      ("idx_records_parent", "parent_id"),
+                      ("idx_records_verified", "verified"),
+                      ("idx_records_confidence", "confidence")):
+        conn.execute(f"CREATE INDEX IF NOT EXISTS {name} ON records({col})")
+    fts_count = conn.execute("SELECT COUNT(*) FROM records_fts").fetchone()[0]
+    rec_count = conn.execute("SELECT COUNT(*) FROM records").fetchone()[0]
+    if fts_count != rec_count:
+        conn.execute("DELETE FROM records_fts")
+        conn.execute(
+            "INSERT INTO records_fts(id, content, evidence, tags)"
+            " SELECT id, content, evidence, tags FROM records")
+
+
 def _migrate(conn: sqlite3.Connection):
     """Bring an older database up to SCHEMA_VERSION. Idempotent."""
     version = _current_schema_version(conn)
     if version >= SCHEMA_VERSION:
+        _reconcile_fts(conn)
         return
 
     if version < 1:
@@ -736,29 +765,15 @@ def _migrate(conn: sqlite3.Connection):
                 raise
             finally:
                 conn.execute("PRAGMA foreign_keys=on")
-        # The refill runs even when the swap does not: a database that
-        # crashed between the swap and the refill (or was migrated by the
-        # buggy rename-based rebuild) has version 10 with a stale or empty
-        # index, and the early return at the top of _migrate would never
-        # fix it. Both statements are idempotent and cheap.
-        _create_fts_triggers(conn)
-        conn.execute("DELETE FROM records_fts")
-        conn.execute(
-            "INSERT INTO records_fts(id, content, evidence, tags)"
-            " SELECT id, content, evidence, tags FROM records")
-        # DROP TABLE records dropped the plain indexes with it, and
-        # _create_schema already ran, so recreate them here.
-        for name, col in (("idx_records_type", "type"),
-                          ("idx_records_project", "project_id"),
-                          ("idx_records_session", "session_id"),
-                          ("idx_records_parent", "parent_id"),
-                          ("idx_records_verified", "verified"),
-                          ("idx_records_confidence", "confidence")):
-            conn.execute(f"CREATE INDEX IF NOT EXISTS {name} ON records({col})")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_records_event ON records(event_id)")
         conn.execute("DELETE FROM schema_version")
         conn.execute("INSERT INTO schema_version(version) VALUES (10)")
         conn.commit()
+        # The swap dropped the FTS triggers with the old records table;
+        # recreate the index state before any write can land. On the
+        # fresh-migration path the refill is a no-op (counts already
+        # agree), so this only pays on the broken path.
+        _reconcile_fts(conn)
 
 
 def init_db(conn: sqlite3.Connection, db_path: str = None, auto_repair: bool = True):
