@@ -203,3 +203,55 @@ def test_v9_check_without_intent_rebuilds_on_migrate(tmp_path):
     assert rec is not None and rec["type"] == "FACT"
     assert len(db.search(c, "legacy deployment note", limit=5)) == 1
     c.close()
+
+
+def test_capture_clamps_confidence_to_ceiling(tmp_path):
+    # The ceiling is the trust boundary for auto-captured lessons: a
+    # transcript cannot mint high-confidence memory. A write above it must
+    # come out clamped.
+    import importlib
+    import sqlite3 as sq3
+
+    conn = db.connect(str(tmp_path / "m.db"))
+    db.init_db(conn)
+    entries = [{
+        "type": "message", "timestamp": "2026-11-18T08:00:00.000Z",
+        "message": {"role": "user", "content": "decided to use sqlite not postgres"},
+    }]
+    # A candidate above the ceiling must come out clamped at write time.
+    capped = {
+        "rtype": "DECISION",
+        "content": "decided to use sqlite not postgres",
+        "evidence": "user decision",
+        "confidence": 0.95,
+        "source": "auto-capture",
+        "tags": "decision",
+        "session_id": "capceil",
+        "project_id": "proj",
+    }
+    cap = importlib.import_module("omp_memory.capture")
+    # The write loop is capture_session's, driven through a fake db module
+    # that records the confidence it was given: the clamp, not the caller,
+    # must be what bounds the stored value.
+    seen = {}
+    class FakeDb:
+        def find_record(self, *a):
+            return None
+        def upsert_record(self, conn, **kw):
+            seen["confidence"] = kw["confidence"]
+            return "id-1"
+    from pathlib import Path
+    session_file = tmp_path / "capceil.jsonl"
+    import json as _json
+    session_file.write_text(_json.dumps(entries[0]) + "\n")
+    real_extract = cap.extract_lessons
+    cap.extract_lessons = lambda entries, path: [capped]
+    try:
+        report = cap.capture_session(FakeDb(), conn, session_path=session_file,
+                                     apply=True)
+    finally:
+        cap.extract_lessons = real_extract
+    assert report["written"] == 1
+    assert seen["confidence"] <= cap.CAPTURE_CONFIDENCE_CEILING, (
+        f"capture wrote confidence {seen['confidence']} above the ceiling")
+    conn.close()
