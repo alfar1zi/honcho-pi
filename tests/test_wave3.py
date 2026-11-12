@@ -88,6 +88,18 @@ def test_absolute_lexical_is_comparable_across_queries(conn):
     assert broad[0]["lexical"] <= 1.0
 
 
+def test_absolute_lexical_spreads_within_same_count():
+    # Two records matching the same term count (a short AND query's
+    # whole pool) still order by bm25 rank: the tie term owns a real
+    # slice of the lexical range, not a 1/1000 decoration.
+    ranked = db._absolute_lexical([
+        {"id": "strong", "rank": -30.0, "matched_terms": 3, "query_terms": 3},
+        {"id": "weak", "rank": -3.0, "matched_terms": 3, "query_terms": 3},
+    ])
+    assert ranked["strong"] > ranked["weak"]
+    assert ranked["strong"] - ranked["weak"] > 0.01
+
+
 def test_absolute_lexical_prefers_stronger_rank():
     # bm25 is negative and MORE negative = more relevant. Within the
     # same matched count, rank -12.0 outranks -5.0; a 1-term match cannot

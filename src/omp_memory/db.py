@@ -1445,16 +1445,21 @@ def _absolute_lexical(candidates: list) -> dict:
     the spread reappears as the corpus grows.
     """
     qtokens = _pool_query_terms(candidates)
-    out = {}
+    groups = {}
     for c in candidates:
-        n = c["matched_terms"] or 1
+        groups.setdefault(c["matched_terms"] or 1, []).append(c)
+    out = {}
+    for n, group in groups.items():
         frac = n / qtokens if qtokens else 1.0
-        # bm25 is negative and more negative = stronger; the tie term
-        # runs the same direction so it only orders records with the
-        # same matched count, never against the fraction.
-        tie = min(1.0, max(0.0, -c["rank"] / max(1.0, BM25_CEILING * n)))
-        score = round(frac + tie / 1000.0, 6)
-        out[c["id"]] = score
+        # Within a matched-count bucket bm25 gets a real slice of the
+        # scale: one bucket step (1/nterms) is the gap a record gains
+        # per extra matched term, and bm25 may order records inside the
+        # bucket by up to that step so a short AND query (all frac 1.0)
+        # still spreads across the full lexical range.
+        bm25_share = 0.25 * (1.0 / qtokens)
+        for c in group:
+            tie = min(1.0, max(0.0, -c["rank"] / max(1.0, BM25_CEILING * n)))
+            out[c["id"]] = round(frac + tie * bm25_share, 6)
     return out
 
 
