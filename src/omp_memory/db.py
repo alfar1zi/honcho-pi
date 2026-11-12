@@ -131,8 +131,16 @@ HYPERCORRECTION_DECAY_GRACE_DAYS = 30.0
 # an event_id, so temporal joins and scoped replay can follow the event
 # structure of a session instead of only its clock.
 RECONSOLIDATION_WINDOW_MINUTES = 45.0
+# Reconsolidation gate (Sevenster 2013; Lee et al. 2017): only a correction
+# that contradicts what the record says opens the content-rewrite window.
+# A success recall is read-only reinforcement, never a rewrite. The rewrite
+# also demands trust: Metcalfe & Eich 2019 showed a wrong correction to a
+# confidently-wrong record contaminates it deeper, so the caller must mark
+# the correction as verified or the rewrite is refused.
+REWRITE_MAX_CONTENT_LEN = 20000
+
 PRE_COMPRESS_CHECKPOINT_API_VERSION = 2
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 # Recall reranking weights. Lexical is dominant (0.70) because recall is
 # primarily an inquiry of relevance. Heat is moderate (0.25) so stale yet
 # relevant records do not sink while breaking ties among equally relevant
@@ -426,6 +434,12 @@ def quick_check(conn: sqlite3.Connection) -> bool:
 
 # --- schema ------------------------------------------------------------------
 
+_RECORD_COLUMNS = (
+    "id", "type", "content", "evidence", "verified", "confidence", "source",
+    "tags", "created_at", "updated_at", "session_id", "project_id", "parent_id",
+    "project_ids", "last_decay_at", "about_peer", "event_id",
+    "decay_exempt_until", "superseded_by",
+)
 _RECORDS_DDL = """CREATE TABLE IF NOT EXISTS records (
         id          TEXT PRIMARY KEY,
         type        TEXT NOT NULL CHECK (type IN ('FACT','ASSUMPTION','INFERENCE','DECISION','RULE','CORRECTION','INTENT')),
@@ -444,7 +458,8 @@ _RECORDS_DDL = """CREATE TABLE IF NOT EXISTS records (
         last_decay_at TEXT NOT NULL DEFAULT '',
         about_peer TEXT NOT NULL DEFAULT '',
         event_id TEXT NOT NULL DEFAULT '',
-        decay_exempt_until TEXT NOT NULL DEFAULT ''
+        decay_exempt_until TEXT NOT NULL DEFAULT '',
+        superseded_by TEXT NOT NULL DEFAULT ''
     );"""
 
 
@@ -756,7 +771,10 @@ def _migrate(conn: sqlite3.Connection):
             try:
                 conn.execute(_RECORDS_DDL.replace(
                     "CREATE TABLE IF NOT EXISTS records", "CREATE TABLE records_new"))
-                conn.execute("INSERT INTO records_new SELECT * FROM records")
+                carry = [r[1] for r in conn.execute("PRAGMA table_info(records)").fetchall()]
+                shared = ",".join(c for c in carry if c in _RECORD_COLUMNS)
+                conn.execute(f"INSERT INTO records_new ({shared})"
+                             f" SELECT {shared} FROM records")
                 conn.execute("DROP TABLE records")
                 conn.execute("ALTER TABLE records_new RENAME TO records")
                 conn.execute("COMMIT")
@@ -774,6 +792,19 @@ def _migrate(conn: sqlite3.Connection):
         # fresh-migration path the refill is a no-op (counts already
         # agree), so this only pays on the broken path.
         _reconcile_fts(conn)
+
+    if version < 11:
+        # v11: supersede links. `superseded_by` points a superseded record at
+        # the CORRECTION that replaced it, so recall can downrank it and a
+        # caller can follow the chain instead of reading a stale fact as
+        # current. Rewrites stay in the row history via the reinforcement log.
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(records)").fetchall()]
+        if cols and "superseded_by" not in cols:
+            conn.execute("ALTER TABLE records ADD COLUMN superseded_by TEXT NOT NULL DEFAULT ''")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_records_superseded ON records(superseded_by)")
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version(version) VALUES (11)")
+        conn.commit()
 
 
 def init_db(conn: sqlite3.Connection, db_path: str = None, auto_repair: bool = True):
@@ -1478,7 +1509,7 @@ def _absolute_lexical(candidates: list) -> dict:
     qtokens = _pool_query_terms(candidates)
     groups = {}
     for c in candidates:
-        groups.setdefault(c["matched_terms"] or 1, []).append(c)
+        groups.setdefault(c["matched_terms"] or 0, []).append(c)
     out = {}
     for n, group in groups.items():
         frac = n / qtokens if qtokens else 1.0

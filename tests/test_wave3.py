@@ -66,7 +66,7 @@ def test_migration_v6_rebuilds_fts_and_preserves_records(tmp_path):
     c = db.connect(path)
     db.init_db(c, path)
     version = c.execute("SELECT version FROM schema_version").fetchone()[0]
-    assert version == db.SCHEMA_VERSION == 10
+    assert version == db.SCHEMA_VERSION == 11
     rows = c.execute(
         "SELECT sql FROM sqlite_master WHERE name = 'records_fts'"
     ).fetchone()
@@ -129,10 +129,10 @@ def test_absolute_lexical_prefers_stronger_rank():
         {"id": "strong", "rank": -12.0, "matched_terms": 3, "query_terms": 3},
         {"id": "weaker", "rank": -5.0, "matched_terms": 3, "query_terms": 3},
         {"id": "single", "rank": -1.0, "matched_terms": 1, "query_terms": 3},
-        {"id": "none", "rank": 0.0, "matched_terms": 1, "query_terms": 3},
+        {"id": "none", "rank": 0.0, "matched_terms": 0, "query_terms": 3},
     ])
     assert ranked["strong"] > ranked["weaker"] > ranked["single"]
-    assert ranked["none"] == 0.25  # 1/3 frac, no tie
+    assert ranked["none"] == 0.0  # zero overlap is its own bucket, not noise
 
 
 def test_confidence_not_double_counted(conn):
@@ -220,7 +220,7 @@ def test_v9_check_without_intent_rebuilds_on_migrate(tmp_path):
     c = db.connect(path)
     db.init_db(c, path)
     version = c.execute("SELECT version FROM schema_version").fetchone()[0]
-    assert version == 10
+    assert version == 11
     # A rename-based rebuild orphans reinforcement FKs onto records_old and
     # drops the FTS triggers, so every later write silently desyncs FTS.
     # The swap must leave FKs on records, the triggers alive, and new
