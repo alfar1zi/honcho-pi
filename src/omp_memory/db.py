@@ -1327,6 +1327,17 @@ def _search_after_repairs(conn: sqlite3.Connection, query: str, **kwargs) -> lis
     return rows
 
 
+def _stem(word: str) -> str:
+    """Porter-ish suffix strip matching the FTS tokenizer's common cases."""
+    for suffix in ("ization", "ational", "iveness", "fulness", "ousness",
+                   "ization", "ation", "ement", "ances", "ences", "ingly",
+                   "edly", "ings", "ies", "ied", "ally", "es", "ed", "ing",
+                   "er", "est", "ly", "s"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            return word[: -len(suffix)]
+    return word
+
+
 def _or_query(words: list) -> str:
     """Build an OR match: any word hitting is enough to surface a candidate."""
     return " OR ".join('"' + w + '"*' for w in words)
@@ -1352,13 +1363,13 @@ def _search_relaxed(conn: sqlite3.Connection, query: str, **kwargs) -> list:
     or_expr = _or_query(words)
     if not or_expr:
         return []
-    return _search_exact(conn, ">" + or_expr, term_count=len(words), **kwargs)
+    return _search_exact(conn, ">" + or_expr, **kwargs)
 
 
 def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = None,
                   project_id: str = None, verified_only: bool = False,
                   min_confidence: float = 0.0, pool: int = None,
-                  about_peer: str = None, term_count: int = 0):
+                  about_peer: str = None):
     match = query if query.startswith('>') else _fts_query(query)
     if not match:
         return []
@@ -1396,13 +1407,22 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
     if not rows:
         return []
     # bm25 accumulates per matched term, so the lexical ceiling needs each
-    # record's matched-term count: the query tokens the record actually
-    # contains. AND queries matched every term by construction (overlap
-    # == token count); OR queries may match a subset.
+    # record's matched-term count: the query terms the record actually
+    # matches. AND queries matched every term by construction; OR queries
+    # may match a subset. The overlap runs over the same three fields the
+    # FTS index covers (content, evidence, tags), and stems both sides
+    # with the same suffix rules as the porter tokenizer so "verified"
+    # matches "verify". ponytail: suffix-stemming is an approximation of
+    # the porter algorithm; wrong stems are possible on irregular words,
+    # ceiling: swap for the FTS index itself (one MATCH per term) when
+    # lexical precision matters more than latency.
     query_tokens = set(_tokens(query if not match.startswith(">") else
                                " ".join(re.findall(r'"([^"]+)"', match))))
     for r in rows:
-        overlap = len(query_tokens & set(_tokens(r["content"])))
+        row_text = " ".join((r.get("content") or "", r.get("evidence") or "",
+                             " ".join(r.get("tags") or [])))
+        row_tokens = {_stem(w) for w in _tokens(row_text)}
+        overlap = len({_stem(w) for w in query_tokens} & row_tokens)
         r["matched_terms"] = max(1, overlap)
         r["query_terms"] = max(1, len(query_tokens))
     ranks = [r["rank"] for r in rows]
