@@ -138,6 +138,11 @@ RECONSOLIDATION_WINDOW_MINUTES = 45.0
 # confidently-wrong record contaminates it deeper, so the caller must mark
 # the correction as verified or the rewrite is refused.
 REWRITE_MAX_CONTENT_LEN = 20000
+# Superseded records keep their row (history is append-only) but are
+# downranked in recall: the correction that replaced them is the current
+# answer. A small penalty is enough because the replacement is usually
+# the lexical match, not the loser.
+SUPERSEDED_PENALTY = 0.15
 
 PRE_COMPRESS_CHECKPOINT_API_VERSION = 2
 SCHEMA_VERSION = 11
@@ -1064,6 +1069,32 @@ def _rif_supersede(conn, record_id: str, rtype: str, norm: str,
     return penalized
 
 
+def _set_superseded(conn, record_id: str, source: str) -> list:
+    """Mark near-duplicates as superseded by a rewritten record.
+
+    A correction that replaced content left the old content in a
+    near-duplicate somewhere. RIF already penalized them at write time;
+    this links the loser to the winner so recall can downrank it and a
+    caller can follow the chain.
+    """
+    rewritten = conn.execute(
+        "SELECT content FROM records WHERE id=?", (record_id,)).fetchone()
+    if rewritten is None:
+        return []
+    similar = find_similar(conn, rewritten[0], limit=5,
+                           threshold=SIMILAR_THRESHOLD)
+    linked = []
+    for cand in similar:
+        if cand["id"] == record_id:
+            continue
+        conn.execute(
+            "UPDATE records SET superseded_by=? WHERE id=?"
+            " AND superseded_by=''",
+            (record_id, cand["id"]))
+        linked.append(cand["id"])
+    return linked
+
+
 def log_retrieval(conn, record_ids: list) -> int:
     """Log one zero-delta retrieval signal per record (Roediger & Karpicke 2006).
 
@@ -1562,12 +1593,11 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
         heat = parts["heat"]
         lexical = lexicals[cand["id"]]
         prior = TYPE_PRIOR.get(cand.get("type"), 0.0)
-        score = round(
-            RECALL_WEIGHTS["lexical"] * lexical
-            + RECALL_WEIGHTS["heat"] * heat
-            + RECALL_WEIGHTS["type_prior"] * prior,
-            6,
-        )
+        base = (RECALL_WEIGHTS["lexical"] * lexical
+                + RECALL_WEIGHTS["heat"] * heat
+                + RECALL_WEIGHTS["type_prior"] * prior)
+        superseded = bool(cand.get("superseded_by"))
+        score = round(max(0.0, base - (SUPERSEDED_PENALTY if superseded else 0.0)), 6)
         scored.append((cand, parts, heat, lexical, prior, score))
 
     def _sort_key(item):
@@ -1605,6 +1635,7 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
                 "age_days": parts["age_days"],
                 "successes": parts["successes"],
                 "about_peer": c.get("about_peer", ""),
+                "superseded_by": c.get("superseded_by", ""),
             })
     else:
         for c, parts, heat, lexical, prior, score in top:
@@ -1940,7 +1971,9 @@ def _spacing_factor(conn: sqlite3.Connection, record_id: str) -> float:
 
 
 def reinforce(conn: sqlite3.Connection, record_id: str, signal: str,
-              delta: float = None, source: str = "") -> float:
+              delta: float = None, source: str = "",
+              content: str = None, evidence: str = None,
+              verified: int = 0) -> float:
     """Apply a reinforcement signal, then reconsider promotion on success.
 
     An explicit delta overrides the canonical one. Promotion runs only for a
@@ -1965,6 +1998,33 @@ def reinforce(conn: sqlite3.Connection, record_id: str, signal: str,
     if row is None:
         raise ValueError(f"record not found: {record_id}")
     pre_confidence = float(row[0])
+
+    # Reconsolidation gate (Sevenster 2013; Lee et al. 2017): a success
+    # recall is read-only reinforcement. Only a correction that carries
+    # replacement content opens the rewrite, and Metcalfe & Eich 2019
+    # showed a wrong correction to a confidently-wrong record
+    # contaminates it deeper, so the rewrite is refused unless the
+    # caller marks it verified or supplies evidence.
+    rewrite_applied = False
+    if signal == "correction" and content is not None:
+        if not (verified or (evidence or "").strip()):
+            raise ValueError(
+                "correction rewrite needs evidence or verified=True")
+        if len(content) > REWRITE_MAX_CONTENT_LEN:
+            raise ValueError(
+                f"content exceeds {REWRITE_MAX_CONTENT_LEN} chars")
+        if not content.strip():
+            raise ValueError("correction content must not be empty")
+        row_content = conn.execute(
+            "SELECT content FROM records WHERE id=?", (record_id,)
+        ).fetchone()[0]
+        if content.strip() != row_content.strip():
+            conn.execute(
+                "UPDATE records SET content=?, evidence=?, verified=?,"
+                " updated_at=? WHERE id=?",
+                (content.strip(), evidence or "", 1 if verified else 0,
+                 now_iso(), record_id))
+            rewrite_applied = True
 
     actual_delta = float(delta) if delta is not None else SIGNAL_DELTAS[signal]
     if delta is None and signal in ("success", "reinforce"):
@@ -1998,6 +2058,8 @@ def reinforce(conn: sqlite3.Connection, record_id: str, signal: str,
         INSERT INTO reinforcement (record_id, signal, delta, source, ts)
         VALUES (?, ?, ?, ?, ?)
     """, (record_id, signal, actual_delta, source, now_iso()))
+    if rewrite_applied:
+        _set_superseded(conn, record_id, source)
     conn.commit()
 
     _promotion_context.last = None
