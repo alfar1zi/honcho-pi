@@ -1329,12 +1329,23 @@ def _search_after_repairs(conn: sqlite3.Connection, query: str, **kwargs) -> lis
 
 def _stem(word: str) -> str:
     """Porter-ish suffix strip matching the FTS tokenizer's common cases."""
+    # porter step 1b: *ied under a consonant just drops the d, so
+    # "verified" rejoins "verify" before step 1c
+    if word.endswith("ied") and len(word) >= 5:
+        word = word[:-1]
     for suffix in ("ization", "ational", "iveness", "fulness", "ousness",
-                   "ization", "ation", "ement", "ances", "ences", "ingly",
-                   "edly", "ings", "ies", "ied", "ally", "es", "ed", "ing",
-                   "er", "est", "ly", "s"):
+                   "ation", "ement", "ances", "ences", "ingly", "edly",
+                   "ings", "ies", "ally", "es", "ed", "ing", "er",
+                   "est", "ly", "s"):
         if word.endswith(suffix) and len(word) - len(suffix) >= 3:
-            return word[: -len(suffix)]
+            word = word[: -len(suffix)]
+            break
+    # porter step 1c: trailing y after a consonant becomes i, so
+    # "verify" and "verified" stem to "verifi"
+    if word.endswith("y") and len(word) >= 3 and word[-2] not in "aeiou":
+        word = word[:-1] + "i"
+    elif word.endswith("ie") and len(word) >= 4:
+        word = word[:-2] + "i"
     return word
 
 
@@ -1420,7 +1431,7 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
                                " ".join(re.findall(r'"([^"]+)"', match))))
     for r in rows:
         row_text = " ".join((r.get("content") or "", r.get("evidence") or "",
-                             " ".join(r.get("tags") or [])))
+                             r.get("tags") or ""))
         row_tokens = {_stem(w) for w in _tokens(row_text)}
         overlap = len({_stem(w) for w in query_tokens} & row_tokens)
         r["matched_terms"] = max(1, overlap)
@@ -1471,15 +1482,16 @@ def _absolute_lexical(candidates: list) -> dict:
     out = {}
     for n, group in groups.items():
         frac = n / qtokens if qtokens else 1.0
-        # Within a matched-count bucket bm25 gets a real slice of the
-        # scale: one bucket step (1/nterms) is the gap a record gains
-        # per extra matched term, and bm25 may order records inside the
-        # bucket by up to that step so a short AND query (all frac 1.0)
-        # still spreads across the full lexical range.
-        bm25_share = 0.25 * (1.0 / qtokens)
+        # Within a matched-count bucket bm25 owns the full bucket step
+        # (1/nterms): records matching the same term count order by
+        # rank, and a stronger rank can beat a heat difference. The
+        # spread stays inside the step so the fraction still dominates
+        # across buckets, and the whole thing is normalised back to
+        # [0, 1] so the documented scale holds.
+        step = 1.0 / qtokens
         for c in group:
             tie = min(1.0, max(0.0, -c["rank"] / max(1.0, BM25_CEILING * n)))
-            out[c["id"]] = round(frac + tie * bm25_share, 6)
+            out[c["id"]] = round((frac + tie * step) / (1.0 + step), 6)
     return out
 
 
@@ -1557,6 +1569,7 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
                 "content": c.get("content", ""),
                 "evidence": c.get("evidence", ""),
                 "lexical": lexical,
+                "matched_terms": c.get("matched_terms"),
                 "type_prior": prior,
                 "age_days": parts["age_days"],
                 "successes": parts["successes"],

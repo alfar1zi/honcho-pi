@@ -88,6 +88,26 @@ def test_absolute_lexical_is_comparable_across_queries(conn):
     assert broad[0]["lexical"] <= 1.0
 
 
+def test_stem_maps_inflected_forms_together():
+    # The FTS index stems with porter; the overlap counter must stem
+    # the same way or "verified" scores as no match for a record
+    # containing "verify".
+    assert db._stem("verified") == db._stem("verify")
+    assert db._stem("deployed") == db._stem("deploy")
+
+
+def test_matched_terms_cover_evidence_and_tags():
+    conn = db.connect(":memory:")
+    db.init_db(conn, ":memory:")
+    # the match lives in evidence and tags, not content; the lexical
+    # fraction must still see both terms
+    db.remember(conn, "FACT", "nothing relevant here",
+                evidence="scheduler fairness analysis", tags="kernel")
+    hits = db.recall(conn, "scheduler kernel", limit=3, full=True)
+    assert hits[0]["matched_terms"] == 2
+    conn.close()
+
+
 def test_absolute_lexical_spreads_within_same_count():
     # Two records matching the same term count (a short AND query's
     # whole pool) still order by bm25 rank: the tie term owns a real
@@ -112,7 +132,7 @@ def test_absolute_lexical_prefers_stronger_rank():
         {"id": "none", "rank": 0.0, "matched_terms": 1, "query_terms": 3},
     ])
     assert ranked["strong"] > ranked["weaker"] > ranked["single"]
-    assert ranked["none"] == round(1 / 3, 6)
+    assert ranked["none"] == 0.25  # 1/3 frac, no tie
 
 
 def test_confidence_not_double_counted(conn):
