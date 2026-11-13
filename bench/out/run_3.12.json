@@ -1,0 +1,439 @@
+{
+  "api": {
+    "connect": "connect",
+    "db_path_constant": "/home/farizi/Documents/project/honcho-pi/bench/db/bench.db",
+    "get_record": "get_record",
+    "import_error": null,
+    "init_db": "init_db",
+    "list_records": "list_records",
+    "quick_check": "quick_check",
+    "recall": null,
+    "reinforce": "reinforce",
+    "remember": "remember",
+    "search": "search",
+    "stats": "stats",
+    "upsert_record": "upsert_record"
+  },
+  "fidelity_note": "Retrieval/integrity corpora are inserted with a direct INSERT mirroring the shipped schema (FTS triggers fire), not through upsert_record, to avoid per-row commits. Write-path behaviour is measured on upsert_record.",
+  "groups": {
+    "A_dedup": {
+      "data": {
+        "ceiling": "5 of the 6 variants differ only in casing, whitespace or provenance, so the floor for a content-normalising path is 2 rows: those 5 collapse to one and the wording-disjoint paraphrase stays its own row unless a similarity guard merges it. dedup_ratio 1.0 = nothing merged, 0.3333 = the expected floor for this 6-variant set.",
+        "modes": {
+          "remember": {
+            "actions": [
+              {
+                "action": "create",
+                "advisory": "",
+                "reason": "novel",
+                "variant": "base"
+              },
+              {
+                "action": "update",
+                "advisory": "",
+                "reason": "identical",
+                "variant": "casing"
+              },
+              {
+                "action": "update",
+                "advisory": "",
+                "reason": "identical",
+                "variant": "whitespace"
+              },
+              {
+                "action": "update",
+                "advisory": "",
+                "reason": "identical",
+                "variant": "source"
+              },
+              {
+                "action": "update",
+                "advisory": "",
+                "reason": "identical",
+                "variant": "project"
+              },
+              {
+                "action": "create",
+                "advisory": "similar to 15094107f3ac3670 at 0.5556; keep separate unless it is the same fact",
+                "reason": "similar",
+                "variant": "paraphrase"
+              }
+            ],
+            "applied_sequence": [
+              {
+                "applied": "inserted",
+                "variant": "base"
+              },
+              {
+                "applied": "updated",
+                "variant": "casing"
+              },
+              {
+                "applied": "updated",
+                "variant": "whitespace"
+              },
+              {
+                "applied": "updated",
+                "variant": "source"
+              },
+              {
+                "applied": "updated",
+                "variant": "project"
+              },
+              {
+                "applied": "inserted",
+                "variant": "paraphrase"
+              }
+            ],
+            "dedup_ratio": 0.3333,
+            "distinct_ids_returned": 2,
+            "ids": [
+              "15094107f3ac3670",
+              "15094107f3ac3670",
+              "15094107f3ac3670",
+              "15094107f3ac3670",
+              "15094107f3ac3670",
+              "329900f1f49e04ba"
+            ],
+            "project_provenance": [
+              "p1",
+              "p1,p2"
+            ],
+            "source_values": [
+              "s1"
+            ],
+            "status": "OK",
+            "stored_content": [
+              "RETENTION POLICY FOR RELAY BACKLOG IS 30 DAYS",
+              "relay backlog kept for 30 days"
+            ],
+            "units_for_one_fact": 2
+          },
+          "remember_upsert": {
+            "actions": [
+              {
+                "action": "create",
+                "advisory": "",
+                "reason": "novel",
+                "variant": "base"
+              },
+              {
+                "action": "update",
+                "advisory": "",
+                "reason": "identical",
+                "variant": "casing"
+              },
+              {
+                "action": "update",
+                "advisory": "",
+                "reason": "identical",
+                "variant": "whitespace"
+              },
+              {
+                "action": "update",
+                "advisory": "",
+                "reason": "identical",
+                "variant": "source"
+              },
+              {
+                "action": "update",
+                "advisory": "",
+                "reason": "identical",
+                "variant": "project"
+              },
+              {
+                "action": "create",
+                "advisory": "similar to 15094107f3ac3670 at 0.5556; keep separate unless it is the same fact",
+                "reason": "similar",
+                "variant": "paraphrase"
+              }
+            ],
+            "applied_sequence": [
+              {
+                "applied": "inserted",
+                "variant": "base"
+              },
+              {
+                "applied": "updated",
+                "variant": "casing"
+              },
+              {
+                "applied": "updated",
+                "variant": "whitespace"
+              },
+              {
+                "applied": "updated",
+                "variant": "source"
+              },
+              {
+                "applied": "updated",
+                "variant": "project"
+              },
+              {
+                "applied": "inserted",
+                "variant": "paraphrase"
+              }
+            ],
+            "dedup_ratio": 0.3333,
+            "distinct_ids_returned": 2,
+            "ids": [
+              "15094107f3ac3670",
+              "15094107f3ac3670",
+              "15094107f3ac3670",
+              "15094107f3ac3670",
+              "15094107f3ac3670",
+              "329900f1f49e04ba"
+            ],
+            "project_provenance": [
+              "p1",
+              "p1,p2"
+            ],
+            "source_values": [
+              "s1"
+            ],
+            "status": "OK",
+            "stored_content": [
+              "RETENTION POLICY FOR RELAY BACKLOG IS 30 DAYS",
+              "relay backlog kept for 30 days"
+            ],
+            "units_for_one_fact": 2
+          },
+          "upsert_record": {
+            "actions": [
+              {
+                "action": null,
+                "variant": "base"
+              },
+              {
+                "action": null,
+                "variant": "casing"
+              },
+              {
+                "action": null,
+                "variant": "whitespace"
+              },
+              {
+                "action": null,
+                "variant": "source"
+              },
+              {
+                "action": null,
+                "variant": "project"
+              },
+              {
+                "action": null,
+                "variant": "paraphrase"
+              }
+            ],
+            "applied_sequence": [
+              {
+                "applied": null,
+                "variant": "base"
+              },
+              {
+                "applied": null,
+                "variant": "casing"
+              },
+              {
+                "applied": null,
+                "variant": "whitespace"
+              },
+              {
+                "applied": null,
+                "variant": "source"
+              },
+              {
+                "applied": null,
+                "variant": "project"
+              },
+              {
+                "applied": null,
+                "variant": "paraphrase"
+              }
+            ],
+            "dedup_ratio": 1.0,
+            "distinct_ids_returned": 6,
+            "ids": [
+              "78a9ecc9127e0322",
+              "e856fa7de50cc5ab",
+              "24c5802fc6c4fb11",
+              "b74fe785fcaf58ff",
+              "3e4fd4c10c32453a",
+              "d3ac93d1de8ec208"
+            ],
+            "project_provenance": [
+              "",
+              "",
+              "",
+              "",
+              "",
+              ""
+            ],
+            "source_values": [
+              "s1",
+              "s2"
+            ],
+            "status": "OK",
+            "stored_content": [
+              "RETENTION POLICY FOR RELAY BACKLOG IS 30 DAYS",
+              "Retention   policy for\nrelay backlog is 30 days",
+              "Retention policy for relay backlog is 30 days",
+              "Retention policy for relay backlog is 30 days",
+              "Retention policy for relay backlog is 30 days",
+              "relay backlog kept for 30 days"
+            ],
+            "units_for_one_fact": 6
+          }
+        },
+        "variants_written": 6
+      },
+      "status": "OK"
+    },
+    "B_retrieval": {
+      "data": {
+        "chance_target_rate": null,
+        "k": 5,
+        "latency_note": "p50/p95 are min-of-3 wall-clock samples per query on this host, in-process SQLite; compare across corpus sizes, not across machines.",
+        "scale": {
+          "200": {
+            "chance_hit_at_1": 0.02,
+            "records": 200,
+            "results": {
+              "paraphrase": {
+                "hit_at_1": 1.0,
+                "latency_ms_p50": 0.358,
+                "latency_ms_p95": 0.392,
+                "mrr": 1.0,
+                "queries": 4,
+                "recall_at_k": 1.0,
+                "target_never_found": 0,
+                "win_rate": 1.0
+              },
+              "specific": {
+                "hit_at_1": 1.0,
+                "latency_ms_p50": 0.297,
+                "latency_ms_p95": 0.311,
+                "mrr": 1.0,
+                "queries": 4,
+                "recall_at_k": 1.0,
+                "target_never_found": 0,
+                "win_rate": 1.0
+              }
+            },
+            "type_counts": {
+              "FACT": 100,
+              "INFERENCE": 40,
+              "RULE": 60
+            }
+          },
+          "2000": {
+            "chance_hit_at_1": 0.002,
+            "records": 2000,
+            "results": {
+              "paraphrase": {
+                "hit_at_1": 1.0,
+                "latency_ms_p50": 0.489,
+                "latency_ms_p95": 0.518,
+                "mrr": 1.0,
+                "queries": 4,
+                "recall_at_k": 1.0,
+                "target_never_found": 0,
+                "win_rate": 1.0
+              },
+              "specific": {
+                "hit_at_1": 1.0,
+                "latency_ms_p50": 0.95,
+                "latency_ms_p95": 1.341,
+                "mrr": 1.0,
+                "queries": 4,
+                "recall_at_k": 1.0,
+                "target_never_found": 0,
+                "win_rate": 1.0
+              }
+            },
+            "type_counts": {
+              "FACT": 1000,
+              "INFERENCE": 400,
+              "RULE": 600
+            }
+          }
+        },
+        "search_api": "search",
+        "win": 100
+      },
+      "status": "OK"
+    },
+    "C_token": {
+      "data": {
+        "compact": {
+          "chars": 540,
+          "est_chars_div4": 135.0,
+          "est_words_x135": 81.0
+        },
+        "compact_over_full": 0.3529,
+        "estimators": "len(text)//4 and word_count*1.35; both coarse, no tokenizer run",
+        "full": {
+          "chars": 1760,
+          "est_chars_div4": 440.0,
+          "est_words_x135": 229.5
+        },
+        "row_width_full": 352.0,
+        "rows": 5
+      },
+      "status": "OK"
+    },
+    "D_staleness": {
+      "data": {
+        "columns_probed": [
+          "superseded",
+          "supersedes",
+          "invalidated",
+          "valid_until",
+          "replaced_by"
+        ],
+        "distinct_rows": 1,
+        "marker_columns_found": [],
+        "new_unverified_id": "4cdb2499b80594ff",
+        "old_verified_id": "5d9d70d1724d9ce2",
+        "ranking": {
+          "new_rank": 2,
+          "old_rank": 1,
+          "order": [
+            "5d9d70d1724d9ce2",
+            "4cdb2499b80594ff"
+          ],
+          "verified_flags": {
+            "4cdb2499b80594ff": 0,
+            "5d9d70d1724d9ce2": 1
+          },
+          "verified_wins": true
+        },
+        "verdict": "TIDAK ADA DI POHON: no supersession marker column, so the older verified claim stays live by construction",
+        "writer": "remember"
+      },
+      "status": "OK"
+    },
+    "E_integrity": {
+      "data": {
+        "fts": 200,
+        "fts_missing_ids": 0,
+        "fts_orphan_ids": 0,
+        "quick_check": "ok",
+        "records": 200,
+        "records_equal_fts": true,
+        "rule_expected": 60,
+        "rule_intact": true,
+        "rule_rows": 60,
+        "verified_expected": 60,
+        "verified_intact": true,
+        "verified_rows": 60
+      },
+      "status": "OK"
+    }
+  },
+  "harness": "honcho-pi bench",
+  "measured_constant_DB_PATH": "/home/farizi/Documents/project/honcho-pi/bench/db/bench.db",
+  "measured_module": "/home/farizi/Documents/project/honcho-pi/src/omp_memory/db.py",
+  "module_md5": "4590f61d3073b38bf45fc4e80e2d0749",
+  "python": "3.12.3"
+}

@@ -44,25 +44,25 @@ def check_number(v, path):
 
 
 def check_group_a(grp):
-    """Dedup must report a row count for every write path it can reach."""
+    """Dedup must report a row count for every write mode it can reach."""
     fails = []
     if grp["status"] != "OK":
         return ["status %s: %s" % (grp["status"], grp.get("reason"))]
-    paths = grp["data"].get("paths") or {}
-    if not paths:
-        return ["no write paths reported"]
+    modes = grp["data"].get("modes") or {}
+    if not modes:
+        return ["no write modes reported"]
     measured = 0
-    for name, block in paths.items():
+    for name, block in modes.items():
         if block.get("status") != "OK":
             continue
         measured += 1
-        fails += check_number(block.get("units_for_one_fact"), "A.%s.units" % name)
+        units = block.get("units_for_one_fact")
+        fails += check_number(units, "A.%s.units" % name)
         fails += check_number(block.get("dedup_ratio"), "A.%s.dedup_ratio" % name)
-        if block.get("units_for_one_fact") is not None:
-            if not (1 <= block["units_for_one_fact"] <= grp["data"]["variants_written"]):
-                fails.append("A.%s.units out of range: %s" % (name, block["units_for_one_fact"]))
+        if units is not None and not (1 <= units <= grp["data"]["variants_written"]):
+            fails.append("A.%s.units out of range: %s" % (name, units))
     if measured == 0:
-        fails.append("A: no write path measured (all API TIDAK ADA)")
+        fails.append("A: no write mode measured (all API TIDAK ADA)")
     return fails
 
 
