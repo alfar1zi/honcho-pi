@@ -155,6 +155,19 @@ def test_reinforce_updates_confidence(env):
     assert rows[0]["confidence"] == pytest.approx(0.6)
 
 
+def test_reinforce_correction_rewrite(env):
+    run(env, "capture", "--task", "deploy host is prod-01 in us-east",
+        "--outcome", "deploy host is prod-01 in us-east", "--confidence", "0.5")
+    rid = json.loads(
+        run(env, "search", "deploy host", "--json").stdout)[0]["id"]
+    r = run(env, "reinforce", rid, "correction",
+            "--content", "deploy host is prod-01 in us-central",
+            "--evidence", "ops confirmed")
+    assert r.returncode == 0, r.stderr
+    row = json.loads(run(env, "search", "deploy host", "--json").stdout)[0]
+    assert row["content"] == "deploy host is prod-01 in us-central"
+
+
 def test_reinforce_rejects_bad_signal(env):
     run(env, "capture", "--task", "t", "--outcome", "o")
     rid = json.loads(run(env, "search", "t", "--json").stdout)[0]["id"]

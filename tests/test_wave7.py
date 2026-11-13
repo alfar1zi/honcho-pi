@@ -53,6 +53,31 @@ def test_superseded_candidate_is_downranked(conn):
     assert db.get_record(conn, clean)["superseded_by"] == ""
 
 
+def test_version_bump_is_not_superseded(conn):
+    # A different number is a different fact, however similar the words:
+    # the stale-side marker must not jump numeric boundaries.
+    rid = db.remember(conn, "FACT", "deploy host is prod-01 in us-east")["id"]
+    other = db.remember(conn, "FACT", "deploy host is prod-02 in us-east")["id"]
+    db.reinforce(conn, rid, "correction",
+                 content="deploy host is prod-03 in us-east",
+                 evidence="ops confirmed")
+    assert db.get_record(conn, other)["superseded_by"] == ""
+
+
+def test_correction_of_superseded_record_clears_marker(conn):
+    # A record that was the stale side, then corrected to the authoritative
+    # value, is authoritative again and must not pay the penalty forever.
+    rid = db.remember(conn, "FACT", "deploy host is prod-01 in us-east")["id"]
+    twin = db.remember(conn, "FACT", "deploy host is prod-01 in us-east")["id"]
+    assert twin == rid
+    conn.execute("UPDATE records SET superseded_by='x' WHERE id=?", (rid,))
+    conn.commit()
+    db.reinforce(conn, rid, "correction",
+                 content="deploy host is prod-02 in us-east",
+                 evidence="ops confirmed")
+    assert db.get_record(conn, rid)["superseded_by"] == ""
+
+
 def test_correction_with_evidence_keeps_verified(conn):
     rid = db.remember(conn, "FACT", "deploy host is prod-01",
                       verified=1)["id"]

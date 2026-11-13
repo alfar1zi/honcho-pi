@@ -391,11 +391,12 @@ def group_staleness(mod, api):
     conn = fresh_conn(mod)
     try:
         columns = [r[1] for r in conn.execute("PRAGMA table_info(records)").fetchall()]
-        for name in ("superseded", "supersedes", "invalidated", "valid_until", "replaced_by"):
+        for name in ("superseded", "supersedes", "invalidated", "valid_until",
+                     "replaced_by", "superseded_by"):
             if name in columns:
                 marker.append(name)
         out = {"columns_probed": ["superseded", "supersedes", "invalidated",
-                                  "valid_until", "replaced_by"],
+                                  "valid_until", "replaced_by", "superseded_by"],
                "marker_columns_found": marker}
 
         out["verdict"] = _staleness_verdict(marker)

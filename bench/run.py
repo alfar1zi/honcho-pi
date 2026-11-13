@@ -33,10 +33,14 @@ def open_readonly(path: str) -> sqlite3.Connection:
 
 
 def probe_rows(conn, n):
+    columns = [r[1] for r in conn.execute(
+        "PRAGMA table_info(records)").fetchall()]
+    extra = ", superseded_by" if "superseded_by" in columns else ""
     rows = [dict(r) for r in conn.execute(
-        "SELECT id, content, created_at, updated_at, confidence,"
-        " superseded_by FROM records"
-        " ORDER BY updated_at DESC LIMIT ?", (n,))]
+        f"SELECT id, content, created_at, updated_at, confidence{extra}"
+        " FROM records ORDER BY updated_at DESC LIMIT ?", (n,))]
+    for r in rows:
+        r.setdefault("superseded_by", "")
     return rows
 
 

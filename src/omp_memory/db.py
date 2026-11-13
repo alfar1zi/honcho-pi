@@ -250,7 +250,12 @@ def identity_text(content: str) -> str:
 
 def content_id(content: str) -> str:
     """Id is the normalised, case-folded content. Type and provenance excluded:
-    the same statement from another source or project is the same record."""
+    the same statement from another source or project is the same record.
+
+    A correction rewrite (reinforce, signal=correction) is the one operation
+    that deliberately breaks this binding: the row keeps its id while its
+    content moves to the corrected statement. Callers that need id-content
+    correspondence should read the row, not recompute content_id."""
     return sha(identity_text(content))
 
 
@@ -1092,6 +1097,9 @@ def _set_superseded(conn, record_id: str, source: str,
     if not similar:
         similar = find_similar(conn, rewritten[0], limit=5,
                                threshold=SIMILAR_THRESHOLD)
+    own_numbers = _numeric_tokens(rewritten[0])
+    similar = [c for c in similar
+               if _numeric_tokens(c["content"]) == own_numbers]
     linked = []
     for cand in similar:
         if cand["id"] == record_id:
@@ -2033,7 +2041,7 @@ def reinforce(conn: sqlite3.Connection, record_id: str, signal: str,
                 (record_id,)).fetchone()
             conn.execute(
                 "UPDATE records SET content=?, evidence=?, verified=?,"
-                " updated_at=? WHERE id=?",
+                " updated_at=?, superseded_by='' WHERE id=?",
                 (content.strip(),
                  evidence or prev[0] or "",
                  max(1 if verified else 0, prev[1] or 0),

@@ -158,6 +158,38 @@ def test_reinforce_forget_flow(server):
     assert stats["forgotten"] == 1
 
 
+def test_reinforce_correction_rewrite_flow(server):
+    stored = server.call("remember", {"content": "deploy host is prod-01 in us-east", "type": "FACT"})
+    rid = stored.split("id=")[1].split()[0]
+    server.call("remember", {"content": "deploy host is prod-01 in us-west", "type": "FACT"})
+    out = server.call("reinforce", {"id": rid, "signal": "correction",
+                                    "content": "deploy host is prod-01 in us-central",
+                                    "evidence": "ops confirmed"})
+    assert "confidence" in out
+    import sqlite3
+    conn = sqlite3.connect(server.db_path)
+    conn.row_factory = sqlite3.Row
+    row = dict(conn.execute("SELECT content, superseded_by FROM records WHERE id=?",
+                            (rid,)).fetchone())
+    assert row["content"] == "deploy host is prod-01 in us-central"
+    superseded = conn.execute(
+        "SELECT id FROM records WHERE superseded_by=? AND id != ?", (rid, rid)
+    ).fetchall()
+    assert len(superseded) == 1
+    conn.close()
+
+
+def test_reinforce_rejects_secret_content(server):
+    stored = server.call("remember", {"content": "psi pump primes itself", "type": "FACT"})
+    rid = stored.split("id=")[1].split()[0]
+    out = server.call("reinforce", {"id": rid, "signal": "correction",
+                                    "content": "token ghp_abcdefghijabcdefghij for ci",
+                                    "evidence": "x"})
+    assert "github token" in out
+    # The record was not rewritten: the secret never reached storage.
+    assert "psi pump" in server.call("recall", {"query": "psi pump"})
+
+
 def test_batch_request(tmp_path):
     s = Server(tmp_path)
     try:

@@ -254,6 +254,8 @@ def cmd_reinforce(args) -> int:
     conn = _open()
     try:
         new_conf = db.reinforce(conn, args.record_id, args.signal,
+                                content=getattr(args, "content", None),
+                                evidence=getattr(args, "evidence", None),
                                 delta=args.delta, source=args.source)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -553,6 +555,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("signal", choices=sorted(db.VALID_SIGNALS))
     p.add_argument("--delta", type=float, default=None)
     p.add_argument("--source", default="")
+    p.add_argument("--content", default=None,
+                   help="correction only: the corrected statement")
+    p.add_argument("--evidence", default=None,
+                   help="why the correction is true")
     p.set_defaults(func=cmd_reinforce)
 
     p = sub.add_parser("promote", help="promote verified records to RULE")

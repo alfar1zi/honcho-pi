@@ -263,8 +263,16 @@ def tool_reinforce(args: Dict[str, Any], user: str = "") -> str:
         signal = str(args.get("signal") or "").strip().lower()
         if signal not in db.VALID_SIGNALS:
             return f"reinforce: invalid signal {signal}; use one of {sorted(db.VALID_SIGNALS)}"
+        content = _neutralize_fence(str(args.get("content") or "").strip())
+        evidence = _neutralize_fence(str(args.get("evidence") or "").strip())
+        if content:
+            leaked = _scan_secret(content + " " + evidence)
+            if leaked:
+                return f"reinforce: {leaked} detected in correction content"
         try:
             new_conf = db.reinforce(conn, rid, signal,
+                                    content=content or None,
+                                    evidence=evidence,
                                     source=str(args.get("source") or "recall"))
         except ValueError as exc:
             return f"reinforce: {exc}"
@@ -408,6 +416,12 @@ TOOLS: List[Dict[str, Any]] = [
                        "description": "record id; defaults to the last single-hit recall"},
                 "signal": {"type": "string", "enum": sorted(db.VALID_SIGNALS)},
                 "source": {"type": "string"},
+                "content": {"type": "string",
+                            "description": ("correction only: the corrected "
+                                            "statement; requires evidence or a "
+                                            "verified record")},
+                "evidence": {"type": "string",
+                             "description": "why the correction is true"},
             },
             "required": ["signal"],
         },

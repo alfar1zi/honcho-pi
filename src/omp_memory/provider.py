@@ -117,7 +117,8 @@ class MemoryProvider(ABC):
         return []
 
     def reinforce(self, record_id: str, signal: str, delta: float = 0.1,
-                  source: str = "") -> float:
+                  source: str = "", content: str = None,
+                  evidence: str = "") -> float:
         raise NotImplementedError
 
 
