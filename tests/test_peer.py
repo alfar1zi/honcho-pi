@@ -1,4 +1,4 @@
-"""Peer-scoped memory (schema v9): facts can be marked about a peer, and
+"""Peer-scoped memory (schema v9: facts can be marked about a peer, and
 search filters on that mark so one peer's context never leaks into another's
 query."""
 from omp_memory import db as memory_db
@@ -40,5 +40,5 @@ def test_peer_filter_does_not_match_empty_default(conn):
     assert len(memory_db.search(conn, "plain operator fact")) == 1
 
 
-def test_schema_version_is_nine(conn):
-    assert memory_db.SCHEMA_VERSION == 11
+def test_schema_version(conn):
+    assert memory_db.SCHEMA_VERSION == 12

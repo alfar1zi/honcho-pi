@@ -19,6 +19,7 @@ Record types: FACT / ASSUMPTION / INFERENCE / DECISION / RULE / CORRECTION.
 import difflib
 import math
 import sqlite3
+import time
 import subprocess
 import re
 import unicodedata
@@ -143,9 +144,16 @@ REWRITE_MAX_CONTENT_LEN = 20000
 # answer. A small penalty is enough because the replacement is usually
 # the lexical match, not the loser.
 SUPERSEDED_PENALTY = 0.15
+# Cue-triggered recall for INTENT records (Rummel & Kvavilashvili 2023): a
+# query carrying the intent's cue pulls the intent forward by this bonus,
+# scaled by importance and faded by how long the intent has waited.
+INTENT_CUE_BONUS = 0.10
+# Intent decay tau (days): fulfillment probability fades like 1/(1+age/tau)
+# (Rummel 2023 reports intentions lose ~.12 force per delay unit).
+INTENT_DECAY_TAU_DAYS = 7.0
 
 PRE_COMPRESS_CHECKPOINT_API_VERSION = 2
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 # Recall reranking weights. Lexical is dominant (0.70) because recall is
 # primarily an inquiry of relevance. Heat is moderate (0.25) so stale yet
 # relevant records do not sink while breaking ties among equally relevant
@@ -246,6 +254,15 @@ def normalize_content(content: str) -> str:
 def identity_text(content: str) -> str:
     """Comparison form only; the stored text keeps its original casing."""
     return normalize_content(content).casefold()
+
+
+def normalize_cue(cue: str) -> str:
+    """Cue form: the normalized content, lowercased.
+
+    Cues are matched against query tokens, which the tokenizer already
+    lowercases, so a cased cue would need a second casefold on every read.
+    """
+    return normalize_content(cue).lower()
 
 
 def content_id(content: str) -> str:
@@ -427,19 +444,54 @@ def connect(db_path: str = DB_PATH) -> sqlite3.Connection:
 
 
 def integrity_check(conn: sqlite3.Connection) -> bool:
+    return _run_check(conn, "integrity_check")
+
+
+def _has_new_columns(conn: sqlite3.Connection) -> bool:
+    """Do the v11/v12 columns exist (migration may not have run yet)?"""
     try:
-        row = conn.execute("PRAGMA integrity_check").fetchone()
-        return row is not None and str(row[0]) == "ok"
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(records)").fetchall()}
     except sqlite3.DatabaseError:
         return False
+    return {"importance", "cue", "superseded_by"} <= cols
+
+
+def _run_check(conn: sqlite3.Connection, pragma: str) -> bool:
+    """Run one integrity pragma; only real corruption counts as failure.
+
+    Two failure shapes here are contention, not a corrupt file:
+    - "database is locked"/"busy": a concurrent writer holds the lock.
+    - "malformed inverted index": an FTS5 shadow table is mid-write by
+      another connection. quick_check's scan is not snapshot-safe across a
+      concurrent FTS transaction even in WAL, so the verdict is transient.
+      It is retried, then arbitrated by fts5's own integrity-check command,
+      which is the canonical verdict for the index.
+    """
+    for attempt in range(8):
+        try:
+            row = conn.execute(f"PRAGMA {pragma}").fetchone()
+            value = str(row[0]) if row else "ok"
+            if value == "ok":
+                return True
+            if "malformed" in value:
+                if attempt < 7:
+                    time.sleep(0.1)
+                    continue
+                conn.execute(
+                    "INSERT INTO records_fts(records_fts) VALUES('integrity-check')")
+                return True
+            return False
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) and "busy" not in str(exc):
+                return False
+            time.sleep(0.02 * (attempt + 1))
+        except sqlite3.DatabaseError:
+            return False
+    return False
 
 
 def quick_check(conn: sqlite3.Connection) -> bool:
-    try:
-        row = conn.execute("PRAGMA quick_check").fetchone()
-        return row is not None and str(row[0]) == "ok"
-    except sqlite3.DatabaseError:
-        return False
+    return _run_check(conn, "quick_check")
 
 
 # --- schema ------------------------------------------------------------------
@@ -469,7 +521,9 @@ _RECORDS_DDL = """CREATE TABLE IF NOT EXISTS records (
         about_peer TEXT NOT NULL DEFAULT '',
         event_id TEXT NOT NULL DEFAULT '',
         decay_exempt_until TEXT NOT NULL DEFAULT '',
-        superseded_by TEXT NOT NULL DEFAULT ''
+        superseded_by TEXT NOT NULL DEFAULT '',
+        importance REAL NOT NULL DEFAULT 0.5,
+        cue TEXT NOT NULL DEFAULT ''
     );"""
 
 
@@ -553,6 +607,21 @@ def _create_schema(conn: sqlite3.Connection):
 
 
 def _create_fts_triggers(conn: sqlite3.Connection):
+    """(Re)create the FTS sync triggers.
+
+    Called on every open by _reconcile_fts. When the three triggers already
+    exist the recreation is skipped: DROP+CREATE runs statement-by-statement
+    in autocommit, so a concurrent connection can observe the triggers
+    half-dropped (CREATE fails with "already exists" once another thread
+    re-adds them, "no such table" if a swap lands between the two halves).
+    The migration paths that legitimately replace the table drop them first.
+    """
+    have = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger'"
+        " AND name IN ('records_ai','records_ad','records_au')"
+    ).fetchone()[0]
+    if have == 3:
+        return
     conn.executescript("""
     DROP TRIGGER IF EXISTS records_ai;
     DROP TRIGGER IF EXISTS records_ad;
@@ -816,6 +885,27 @@ def _migrate(conn: sqlite3.Connection):
         conn.execute("INSERT INTO schema_version(version) VALUES (11)")
         conn.commit()
 
+    if version < 12:
+        # v12: intent fields. `cue` is the environment signal that should
+        # trigger the intent (Rummel & Kvavilashvili 2023); `importance`
+        # scales the recall bonus so an urgent intent outranks a casual
+        # one when both cues appear in one query.
+        # ALTER TABLE ADD COLUMN with a NOT NULL DEFAULT leaves the column
+        # NULL on existing rows in this SQLite build: quick_check then
+        # reports "NULL value in records.importance" even though a SELECT
+        # shows the default. An explicit UPDATE backfills the real cells
+        # and clears the report.
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(records)").fetchall()]
+        if cols and "importance" not in cols:
+            conn.execute("ALTER TABLE records ADD COLUMN importance REAL NOT NULL DEFAULT 0.5")
+        if cols and "cue" not in cols:
+            conn.execute("ALTER TABLE records ADD COLUMN cue TEXT NOT NULL DEFAULT ''")
+        conn.execute("UPDATE records SET importance=0.5 WHERE importance IS NULL")
+        conn.execute("UPDATE records SET cue='' WHERE cue IS NULL")
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version(version) VALUES (12)")
+        conn.commit()
+
 
 def init_db(conn: sqlite3.Connection, db_path: str = None, auto_repair: bool = True):
     """Create or migrate the schema on an open connection.
@@ -824,6 +914,14 @@ def init_db(conn: sqlite3.Connection, db_path: str = None, auto_repair: bool = T
     connection is never closed and the file is never removed; a corrupt
     database is the operator's decision, made explicitly via repair_from_backup.
     """
+    if not quick_check(conn) and _has_new_columns(conn):
+        # quick_check flags NULL in a NOT NULL column added by ALTER TABLE,
+        # where SQLite cannot backfill the default on existing rows.
+        conn.execute("UPDATE records SET importance=0.5 WHERE importance IS NULL")
+        conn.execute("UPDATE records SET cue='' WHERE cue IS NULL")
+        conn.execute("UPDATE records SET superseded_by='' WHERE superseded_by IS NULL")
+        conn.execute("UPDATE records SET decay_exempt_until='' WHERE decay_exempt_until IS NULL")
+        conn.commit()
     if not quick_check(conn):
         if not integrity_check(conn):
             if auto_repair and db_path and repair_from_backup(db_path):
@@ -882,17 +980,19 @@ def upsert_record(conn: sqlite3.Connection, rtype: str, content: str, evidence: 
 def _insert_identity(conn: sqlite3.Connection, record_id: str, rtype: str, norm: str,
                      evidence: str, verified: int, confidence: float, source: str,
                      tags: str, session_id: str, project_id: str, parent_id: str,
-                     about_peer: str = "", event_id: str = ""):
+                     about_peer: str = "", event_id: str = "",
+                     importance: float = 0.5, cue: str = ""):
     stamp = now_iso()
     conn.execute("""
         INSERT INTO records
             (id,type,content,evidence,verified,confidence,source,tags,
              created_at,updated_at,session_id,project_id,parent_id,project_ids,
-             about_peer,event_id)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             about_peer,event_id,importance,cue)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (record_id, rtype, norm, evidence or "", 1 if verified else 0, confidence,
           source or "", tags or "", stamp, stamp, session_id or "", project_id or "",
-          parent_id or "", project_id or "", about_peer or "", event_id or ""))
+          parent_id or "", project_id or "", about_peer or "", event_id or "",
+          importance, cue))
 
 
 def _candidates(conn: sqlite3.Connection, content: str, rtype: str, limit: int) -> list:
@@ -1267,7 +1367,8 @@ def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str =
              verified: int = 0, confidence: float = 0.5, source: str = "",
              tags: str = "", session_id: str = "", project_id: str = "",
              parent_id: str = "", upsert: bool = False, limit: int = 5,
-             about_peer: str = "", event_id: str = "") -> dict:
+             about_peer: str = "", event_id: str = "",
+             importance: float = 0.5, cue: str = "") -> dict:
     """Write by content identity, not by provenance.
 
     Two spellings of one fact (casing, whitespace) and two provenances of one
@@ -1321,7 +1422,9 @@ def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str =
         prior = _schema_prior(confidence, decision["similar"])
         _insert_identity(conn, record_id, rtype, norm, evidence, verified, prior,
                          source, tags, session_id, project_id, parent_id,
-                         about_peer, event_id)
+                         about_peer, event_id,
+                         importance=min(1.0, max(0.0, float(importance))),
+                         cue=normalize_cue(cue))
         applied = "inserted"
 
     conn.commit()
@@ -1443,17 +1546,72 @@ def _search_relaxed(conn: sqlite3.Connection, query: str, **kwargs) -> list:
     top rows are the ones sharing the most/strongest words with the query,
     not random one-word hits. Runs only after the exact AND and the
     typo-repaired retry both return nothing.
+
+    An INTENT whose cue carries a query term is pooled even when its body
+    matches nothing: the cue is the environment signal that should pull the
+    intent forward (Rummel & Kvavilashvili 2023). Cue hits ride at the end
+    of the pool; the cue bonus in recall() does the ranking.
     """
     rows = _search_after_repairs(conn, query, **kwargs)
-    if rows:
-        return rows
-    words = _tokens(query)
-    if len(words) < 2:
+    if not rows:
+        words = _tokens(query)
+        if len(words) >= 2:
+            or_expr = _or_query(words)
+            if or_expr:
+                rows = _search_exact(conn, ">" + or_expr, **kwargs)
+    cue_rows = _cue_pool(conn, query, **kwargs)
+    if cue_rows:
+        seen = {r["id"] for r in rows}
+        rows = rows + [r for r in cue_rows if r["id"] not in seen]
+    return rows
+
+
+def _cue_pool(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = None,
+              project_id: str = None, verified_only: bool = False,
+              min_confidence: float = 0.0, pool: int = None,
+              about_peer: str = None) -> list:
+    """INTENT records whose cue shares a token with the query.
+
+    Content search cannot see the cue (it is not in the FTS index), so this
+    is a plain scan over the cue column. Kept small by the intent table's
+    size; returns rows shaped like _search_exact's so recall()'s reranker
+    can treat them uniformly.
+    """
+    qtokens = _tokens(query)
+    if not qtokens:
         return []
-    or_expr = _or_query(words)
-    if not or_expr:
-        return []
-    return _search_exact(conn, ">" + or_expr, **kwargs)
+    sql = """
+        SELECT r.id, r.type, r.content, r.evidence, r.verified, r.confidence,
+               r.source, r.tags, r.created_at, r.updated_at, r.session_id,
+               r.project_id, r.parent_id, r.about_peer, r.superseded_by,
+               r.importance, r.cue, 0.0 AS rank
+        FROM records r
+        WHERE r.type = 'INTENT'
+    """
+    params = []
+    if rtype:
+        sql += " AND r.type = ?"
+        params.append(rtype)
+    if project_id:
+        sql += " AND r.project_id = ?"
+        params.append(project_id)
+    if about_peer:
+        sql += " AND r.about_peer = ?"
+        params.append(about_peer)
+    if verified_only:
+        sql += " AND r.verified = 1"
+    if min_confidence > 0:
+        sql += " AND r.confidence >= ?"
+        params.append(min_confidence)
+    rows = [dict(row) for row in conn.execute(sql, params)]
+    picked = []
+    for row in rows:
+        cue_tokens = set(_tokens(row.get("cue") or ""))
+        if cue_tokens & set(qtokens):
+            row["matched_terms"] = 0
+            row["query_terms"] = len(qtokens)
+            picked.append(row)
+    return picked[:pool if pool is not None else limit]
 
 
 def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = None,
@@ -1466,7 +1624,7 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
     sql = """
         SELECT r.id, r.type, r.content, r.evidence, r.verified, r.confidence, r.source, r.tags,
                r.created_at, r.updated_at, r.session_id, r.project_id, r.parent_id,
-               r.about_peer, r.superseded_by,
+               r.about_peer, r.superseded_by, r.importance, r.cue,
                bm25(records_fts) / CASE r.type
                    WHEN 'RULE' THEN 1.4 WHEN 'CORRECTION' THEN 1.4
                    WHEN 'DECISION' THEN 1.2 WHEN 'INTENT' THEN 1.0 WHEN 'FACT' THEN 1.0
@@ -1603,6 +1761,28 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
         return []
     lexicals = _absolute_lexical(candidates)
 
+    # Cue triggering (Rummel & Kvavilashvili 2023): a query that carries an
+    # INTENT's cue is the cue's appearance in the environment, so the intent
+    # is pulled forward. The bonus scales with importance, and fades the
+    # longer the intent has waited unfulfilled (Rummel 2023: intentions
+    # lose ~.12 force per delay unit).
+    qtokens = set(_tokens(query))
+    cue_bonus = {}
+    for cand in candidates:
+        if cand.get("type") != "INTENT":
+            continue
+        cue = cand.get("cue") or ""
+        if not cue or not (qtokens & set(_tokens(cue))):
+            continue
+        age_days = 0.0
+        ts = _parse_ts(cand.get("updated_at"))
+        if ts:
+            ref = now or datetime.now(timezone.utc)
+            age_days = max(0.0, (ref - ts).total_seconds() / 86400.0)
+        fade = 1.0 / (1.0 + age_days / INTENT_DECAY_TAU_DAYS)
+        cue_bonus[cand["id"]] = INTENT_CUE_BONUS * fade * float(
+            cand.get("importance") or 0.5)
+
     scored = []
     for cand in candidates:
         signals = _record_signals(conn, cand["id"])
@@ -1614,7 +1794,9 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
                 + RECALL_WEIGHTS["heat"] * heat
                 + RECALL_WEIGHTS["type_prior"] * prior)
         superseded = bool(cand.get("superseded_by"))
-        score = round(max(0.0, base - (SUPERSEDED_PENALTY if superseded else 0.0)), 6)
+        penalty = SUPERSEDED_PENALTY if superseded else 0.0
+        bonus = cue_bonus.get(cand["id"], 0.0)
+        score = round(max(0.0, base + bonus - penalty), 6)
         scored.append((cand, parts, heat, lexical, prior, score))
 
     def _sort_key(item):
@@ -1653,6 +1835,9 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
                 "successes": parts["successes"],
                 "about_peer": c.get("about_peer", ""),
                 "superseded_by": c.get("superseded_by", ""),
+                "importance": c.get("importance", 0.5),
+                "cue": c.get("cue", ""),
+                "cue_triggered": c["id"] in cue_bonus,
             })
     else:
         for c, parts, heat, lexical, prior, score in top:

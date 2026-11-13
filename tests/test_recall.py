@@ -101,8 +101,13 @@ def test_compact_reports_no_evidence_and_is_smaller_than_full(conn):
         "id", "type", "confidence", "verified", "score", "heat", "abstained",
         "content", "evidence", "lexical", "matched_terms", "type_prior",
         "superseded_by",
-        "age_days", "successes", "about_peer",
+        "age_days", "successes", "about_peer", "importance", "cue",
+        "cue_triggered",
     }
+    # intent fields ride on the full payload; a non-INTENT record reports
+    # them as empty/false so callers need no type branch.
+    assert f_item["cue"] == ""
+    assert f_item["cue_triggered"] is False
     assert len(json.dumps(compact)) < len(json.dumps(full))
 
 
