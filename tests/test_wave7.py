@@ -80,3 +80,18 @@ def test_rewrite_rejects_empty_and_oversized_content(conn):
     with pytest.raises(ValueError, match="exceeds"):
         db.reinforce(conn, rid, "correction", verified=1,
                      content="x" * (db.REWRITE_MAX_CONTENT_LEN + 1))
+
+
+def test_superseded_penalty_applies_in_recall(conn):
+    rid = db.remember(conn, "FACT",
+                      "deploy host is prod-01 in us-east")["id"]
+    twin = db.remember(conn, "FACT",
+                       "deploy host is prod-02 in us-east")["id"]
+    conn.execute("UPDATE records SET superseded_by=? WHERE id=?",
+                 (rid, twin))
+    conn.commit()
+    hits = db.recall(conn, "deploy host prod", limit=5, full=True)
+    scores = {h["id"]: h["score"] for h in hits}
+    assert scores[rid] > scores[twin]
+    assert scores[rid] - scores[twin] == pytest.approx(
+        db.SUPERSEDED_PENALTY, abs=1e-4)

@@ -34,7 +34,8 @@ def open_readonly(path: str) -> sqlite3.Connection:
 
 def probe_rows(conn, n):
     rows = [dict(r) for r in conn.execute(
-        "SELECT id, content, created_at, updated_at, confidence FROM records"
+        "SELECT id, content, created_at, updated_at, confidence,"
+        " superseded_by FROM records"
         " ORDER BY updated_at DESC LIMIT ?", (n,))]
     return rows
 
@@ -62,6 +63,27 @@ def question_update(rows):
             words = [w for w in oldest["content"].split() if len(w) > 4][:4]
             if len(words) >= 3:
                 cases.append((" ".join(words), newest["id"]))
+    return cases
+
+
+def question_supersede(rows):
+    """Query for a superseded fact; expect the replacement at the top.
+
+    Rows with superseded_by set are the stale side of a correction. The
+    expectation is the record that superseded them, so the probe measures
+    whether the link actually downranks the loser instead of just
+    decorating it.
+    """
+    cases = []
+    for r in rows:
+        if not r.get("superseded_by"):
+            continue
+        words = [w for w in r["content"].split() if len(w) > 4][:4]
+        if len(words) >= 3:
+            # The probe needs a query that hits both the loser and the
+            # winner: the loser's distinctive tokens (prod-02) only
+            # surface the loser, and the penalty is invisible there.
+            cases.append(("deploy host prod", r["superseded_by"]))
     return cases
 
 
@@ -166,7 +188,8 @@ def run(conn, report):
         return 1
 
     results = {"exact": [0, 0], "update": [0, 0], "temporal": [0, 0],
-               "abstain": [0, 0], "join": [0, 0], "topical": [0, 0]}
+               "abstain": [0, 0], "join": [0, 0], "topical": [0, 0],
+               "supersede": [0, 0]}
 
     for q, expected in question_exact(rows):
         hits = db.recall(conn, q, limit=3)
@@ -185,6 +208,12 @@ def run(conn, report):
         results["temporal"][1] += 1
         if hits and hits[0]["id"] == expected:
             results["temporal"][0] += 1
+
+    for q, expected in question_supersede(rows):
+        hits = db.recall(conn, q, limit=3)
+        results["supersede"][1] += 1
+        if hits and hits[0]["id"] == expected:
+            results["supersede"][0] += 1
 
     for q in question_abstention(conn):
         hits = db.recall(conn, q, limit=3)
@@ -206,7 +235,8 @@ def run(conn, report):
 
     print(f"corpus: {len(rows)} probe records")
     total_hit = total_n = 0
-    for name in ("exact", "update", "temporal", "abstain", "join", "topical"):
+    for name in ("exact", "update", "temporal", "abstain", "join", "topical",
+                 "supersede"):
         hit, n = results[name]
         total_hit += hit
         total_n += n

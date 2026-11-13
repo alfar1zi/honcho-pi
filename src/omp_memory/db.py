@@ -1069,20 +1069,29 @@ def _rif_supersede(conn, record_id: str, rtype: str, norm: str,
     return penalized
 
 
-def _set_superseded(conn, record_id: str, source: str) -> list:
+def _set_superseded(conn, record_id: str, source: str,
+                    prev_content: str = None) -> list:
     """Mark near-duplicates as superseded by a rewritten record.
 
     A correction that replaced content left the old content in a
     near-duplicate somewhere. RIF already penalized them at write time;
     this links the loser to the winner so recall can downrank it and a
-    caller can follow the chain.
+    caller can follow the chain. Similarity runs against the PRE-rewrite
+    content when the rewrite is what linked this record: the losers are
+    near-duplicates of what the record used to say. When the old content
+    scores nothing above threshold, the new content is tried too: a
+    correction can narrow the claim (prod-01 becomes prod-02) and the
+    near-duplicate was only ever close to the narrower form.
     """
     rewritten = conn.execute(
         "SELECT content FROM records WHERE id=?", (record_id,)).fetchone()
     if rewritten is None:
         return []
-    similar = find_similar(conn, rewritten[0], limit=5,
-                           threshold=SIMILAR_THRESHOLD)
+    similar = find_similar(conn, prev_content, limit=5,
+                           threshold=SIMILAR_THRESHOLD) if prev_content else []
+    if not similar:
+        similar = find_similar(conn, rewritten[0], limit=5,
+                               threshold=SIMILAR_THRESHOLD)
     linked = []
     for cand in similar:
         if cand["id"] == record_id:
@@ -1449,7 +1458,7 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
     sql = """
         SELECT r.id, r.type, r.content, r.evidence, r.verified, r.confidence, r.source, r.tags,
                r.created_at, r.updated_at, r.session_id, r.project_id, r.parent_id,
-               r.about_peer,
+               r.about_peer, r.superseded_by,
                bm25(records_fts) / CASE r.type
                    WHEN 'RULE' THEN 1.4 WHEN 'CORRECTION' THEN 1.4
                    WHEN 'DECISION' THEN 1.2 WHEN 'INTENT' THEN 1.0 WHEN 'FACT' THEN 1.0
@@ -2064,7 +2073,7 @@ def reinforce(conn: sqlite3.Connection, record_id: str, signal: str,
         VALUES (?, ?, ?, ?, ?)
     """, (record_id, signal, actual_delta, source, now_iso()))
     if rewrite_applied:
-        _set_superseded(conn, record_id, source)
+        _set_superseded(conn, record_id, source, prev_content=row_content)
     conn.commit()
 
     _promotion_context.last = None
