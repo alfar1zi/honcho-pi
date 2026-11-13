@@ -17,6 +17,7 @@ Design constraints (verified by tests/test_memory_db.py):
 Record types: FACT / ASSUMPTION / INFERENCE / DECISION / RULE / CORRECTION.
 """
 import sqlite3
+import subprocess
 import re
 import unicodedata
 import json
@@ -1331,6 +1332,207 @@ def set_profile_context(conn: sqlite3.Connection, key: str, value):
         VALUES (?, ?, ?, ?)
     """, (profile, key, json.dumps(value, ensure_ascii=False), now_iso()))
     conn.commit()
+
+
+# --- Markdown Mirror & Sync --------------------------------------------------
+
+def _format_markdown_record(r: dict) -> str:
+    parts = [f"## {r['id']}"]
+    parts.append(f"- confidence: {r['confidence']}")
+    parts.append(f"- verified: {r['verified']}")
+    if r.get("source"):
+        parts.append(f"- sources: {r['source']}")
+    parts.append("")
+    parts.append(r["content"])
+    if r.get("evidence"):
+        for ev_line in str(r["evidence"]).splitlines():
+            parts.append(f"> {ev_line}")
+    parts.append("")
+    return "\n".join(parts) + "\n"
+
+
+def _git_run(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            args,
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        err = exc.stderr.strip() if exc.stderr else exc.stdout.strip()
+        raise RuntimeError(err) from exc
+
+
+def export_markdown(conn: sqlite3.Connection, out_dir, types=None) -> dict:
+    """Export memory records to deterministic Markdown files with a manifest."""
+    out_path = Path(out_dir)
+    if not out_path.exists():
+        raise FileNotFoundError(f"Output directory does not exist: {out_dir}")
+    if not out_path.is_dir():
+        raise NotADirectoryError(f"Output path is not a directory: {out_dir}")
+    out_path = out_path.resolve()
+
+    for entry in out_path.iterdir():
+        if entry.is_symlink():
+            try:
+                entry.resolve().relative_to(out_path)
+            except ValueError:
+                raise ValueError(f"Symlink escapes output directory: {entry}")
+
+    if types is not None:
+        target_types = sorted(types)
+    else:
+        cur = conn.execute("SELECT DISTINCT type FROM records WHERE type IS NOT NULL")
+        existing_types = {row[0] for row in cur.fetchall()}
+        target_types = [t for t in sorted(VALID_TYPES) if t in existing_types]
+
+    new_files = {}
+    index_entries = []
+
+    for rtype in target_types:
+        cur = conn.execute(
+            "SELECT id, type, content, confidence, verified, source, evidence "
+            "FROM records WHERE type = ? ORDER BY id ASC",
+            (rtype,),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        filename = f"{rtype.lower()}.md"
+        body = f"# {rtype}\n\n" + "".join(_format_markdown_record(r) for r in rows)
+        new_files[filename] = body
+        index_entries.append(f"- [{rtype}]({filename}) - {len(rows)} record")
+
+    index_body = "# Memory Index\n\n"
+    if index_entries:
+        index_body += "\n".join(index_entries) + "\n"
+    new_files["INDEX.md"] = index_body
+
+    for relpath in new_files:
+        target_p = out_path / relpath
+        if target_p.is_symlink():
+            try:
+                target_p.resolve().relative_to(out_path)
+            except ValueError:
+                raise ValueError(f"Symlink escapes output directory: {target_p}")
+        try:
+            target_p.resolve().relative_to(out_path)
+        except ValueError:
+            raise ValueError(f"Target path escapes output directory: {target_p}")
+
+    manifest_path = out_path / ".honcho-mirror.json"
+    old_manifest_files = {}
+    if manifest_path.is_file():
+        try:
+            old_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(old_data, dict) and isinstance(old_data.get("files"), dict):
+                old_manifest_files = old_data["files"]
+        except Exception:
+            old_manifest_files = {}
+
+    new_manifest_files = {
+        relpath: hashlib.sha256(content.encode("utf-8")).hexdigest()
+        for relpath, content in new_files.items()
+    }
+
+    removed = []
+    stale_relpaths = set(old_manifest_files.keys()) - set(new_manifest_files.keys())
+    for rel in sorted(stale_relpaths):
+        stale_path = out_path / rel
+        try:
+            stale_resolved = stale_path.resolve()
+            stale_resolved.relative_to(out_path)
+        except ValueError:
+            continue
+        if stale_path.is_file() or stale_path.is_symlink():
+            stale_path.unlink()
+            removed.append(rel)
+
+    written = []
+    unchanged = []
+    for relpath in sorted(new_files.keys()):
+        content_bytes = new_files[relpath].encode("utf-8")
+        target = out_path / relpath
+        if target.is_file() and not target.is_symlink():
+            if target.read_bytes() == content_bytes:
+                unchanged.append(relpath)
+                continue
+        target.write_bytes(content_bytes)
+        written.append(relpath)
+
+    new_manifest_data = {
+        "version": 1,
+        "files": dict(sorted(new_manifest_files.items())),
+    }
+    manifest_bytes = (json.dumps(new_manifest_data, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+    if not written and not removed and manifest_path.is_file():
+        pass
+    else:
+        if not (manifest_path.is_file() and manifest_path.read_bytes() == manifest_bytes):
+            manifest_path.write_bytes(manifest_bytes)
+
+    return {"written": written, "removed": removed, "unchanged": unchanged, "out_dir": str(out_path)}
+
+
+def sync_mirror(out_dir, message: str = None, init: bool = False) -> dict:
+    """Sync markdown mirror directory to a dedicated git repository without pushing."""
+    out_path = Path(out_dir)
+    if not out_path.exists():
+        raise FileNotFoundError(f"Output directory does not exist: {out_dir}")
+    if not out_path.is_dir():
+        raise NotADirectoryError(f"Output path is not a directory: {out_dir}")
+    out_path = out_path.resolve()
+
+    module_dir = Path(__file__).resolve().parent
+    if out_path == module_dir or module_dir.is_relative_to(out_path):
+        raise ValueError(f"Module directory {module_dir} is inside output directory {out_path}")
+
+    proc_top = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=out_path,
+        capture_output=True,
+        text=True,
+    )
+    if proc_top.returncode == 0:
+        top_level = Path(proc_top.stdout.strip()).resolve()
+        if top_level != out_path:
+            raise ValueError(f"Git toplevel {top_level} differs from {out_path}")
+    else:
+        if not init:
+            raise ValueError(f"Output directory is not a git repository: {out_dir}")
+        _git_run(["git", "init"], cwd=out_path)
+        proc_top = _git_run(["git", "rev-parse", "--show-toplevel"], cwd=out_path)
+        top_level = Path(proc_top.stdout.strip()).resolve()
+        if top_level != out_path:
+            raise ValueError(f"Git toplevel {top_level} differs from {out_path}")
+
+    manifest_file = out_path / ".honcho-mirror.json"
+    if not manifest_file.is_file():
+        raise FileNotFoundError(f"Manifest not found in {out_path}")
+    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    files_to_stage = sorted(manifest.get("files", {}).keys())
+
+    for rel in files_to_stage:
+        target = (out_path / rel).resolve()
+        try:
+            target.relative_to(out_path)
+        except ValueError:
+            raise ValueError(f"Target file escapes output directory: {rel}")
+
+    if files_to_stage:
+        _git_run(["git", "add", "--"] + files_to_stage, cwd=out_path)
+
+    diff_proc = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=out_path)
+    if diff_proc.returncode == 0:
+        return {"committed": False, "reason": "clean"}
+    if diff_proc.returncode != 1:
+        raise RuntimeError(f"git diff --cached failed with code {diff_proc.returncode}")
+
+    commit_msg = message or "chore(memory): sync markdown mirror"
+    _git_run(["git", "commit", "-m", commit_msg], cwd=out_path)
+    sha_proc = _git_run(["git", "rev-parse", "HEAD"], cwd=out_path)
+    return {"committed": True, "sha": sha_proc.stdout.strip(), "files": files_to_stage}
 
 
 if __name__ == "__main__":

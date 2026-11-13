@@ -26,6 +26,7 @@ from .db import (
     decide,
     end_session,
     ensure_dirs,
+    export_markdown,
     forget_cold,
     find_record,
     find_similar,
@@ -58,6 +59,7 @@ from .db import (
     similarity,
     start_session,
     stats,
+    sync_mirror,
     upsert_record,
 )
 from .context import (
@@ -103,6 +105,7 @@ __all__ = [
     "decide",
     "end_session",
     "forget_cold",
+    "export_markdown",
     "ensure_dirs",
     "find_record",
     "find_similar",
@@ -134,6 +137,7 @@ __all__ = [
     "similarity",
     "start_session",
     "stats",
+    "sync_mirror",
     "SNIPPET_CHARS",
     "TYPE_PRIOR",
     "upsert_record",
