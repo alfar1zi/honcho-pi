@@ -24,7 +24,7 @@ import hashlib
 import os
 import glob
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 DB_PATH = os.environ.get("OMP_MEMORY_DB", str(Path.home() / ".omp/memory/memory.db"))
@@ -41,10 +41,25 @@ SIGNAL_DELTAS = {
     "reinforce": 0.05,
     "decay": -0.05,
 }
+
+# Heat weights are fixed, not fitted. Fitting them to one corpus would bake that
+# corpus's quirks into the ranking and make the numbers impossible to explain
+# per record; fixed weights keep heat decomposable and comparable across
+# sessions. They sum to 1.0 so heat stays inside [0, 1].
+HEAT_WEIGHTS = {"confidence": 0.45, "recency": 0.25, "reinforcement": 0.30}
+HEAT_HALF_LIFE_DAYS = 30.0
+PROMOTE_HEAT = 0.80
+PROMOTABLE_TYPES = ("INFERENCE", "ASSUMPTION")
+DECAY_FLOOR = 0.15
+DECAY_HALF_LIFE_DAYS = 30.0
+FORGET_FLOOR_SLACK = 0.01
+FORGET_MIN_AGE_DAYS = 180
+FORGET_WINDOW_DAYS = 365
 PRE_COMPRESS_CHECKPOINT_API_VERSION = 2
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 _profile_context = threading.local()
+_promotion_context = threading.local()
 
 
 # --- helpers -----------------------------------------------------------------
@@ -134,12 +149,51 @@ def _richer_spelling(stored: str, incoming: str) -> str:
 
 
 def _merge_provenance(stored: str, incoming: str) -> str:
-    """Comma-joined, order-preserving, deduplicated."""
+    """Comma-joined, order-preserving, deduplicated.
+
+    Provenance accumulates, so merging two observations of one fact keeps both
+    names. Re-writing the same name is a no-op, which keeps the column stable
+    under repeated saves.
+    """
     seen = [p for p in (stored or "").split(",") if p]
     for p in (incoming or "").split(","):
         if p and p not in seen:
             seen.append(p)
     return ",".join(seen)
+
+
+# --- near-duplicate advisory -------------------------------------------------
+
+# Similarity never merges on its own. Measured scores: real paraphrases of one
+# fact land at 0.40-0.64, adversarial near-misses ("payment-service 1000" vs
+# "shipping-service 1000") reach 0.82. No single threshold separates those two
+# bands, so a high score is an advisory and the only automatic merge requires
+# a number-identical candidate above UPSERT_THRESHOLD as well.
+SIMILAR_THRESHOLD = 0.50
+UPSERT_THRESHOLD = 0.85
+
+
+def _tokens(text: str) -> list:
+    return _TOKEN_RE.findall(identity_text(text))
+
+
+def _numeric_tokens(text: str) -> frozenset:
+    """Numbers are compared exactly: "section 2" and "section 9" are different
+    facts however similar the surrounding words are."""
+    return frozenset(t for t in _tokens(text) if t.isdigit())
+
+
+def similarity(a: str, b: str) -> float:
+    """Jaccard over word tokens.
+
+    Jaccard, not the overlap coefficient: containment scoring returns 1.0 for
+    any text that is a subset of another, which made a short fragment look
+    identical to the whole record it came from.
+    """
+    ta, tb = set(_tokens(a)), set(_tokens(b))
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
 
 
 # --- backups -----------------------------------------------------------------
@@ -283,7 +337,8 @@ def _create_schema(conn: sqlite3.Connection):
         session_id  TEXT NOT NULL DEFAULT '',
         project_id  TEXT NOT NULL DEFAULT '',
         parent_id   TEXT NOT NULL DEFAULT '',
-        project_ids TEXT NOT NULL DEFAULT ''
+        project_ids TEXT NOT NULL DEFAULT '',
+        last_decay_at TEXT NOT NULL DEFAULT ''
     );
     CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(
         id, content, evidence, tags
@@ -335,6 +390,24 @@ def _create_schema(conn: sqlite3.Connection):
     CREATE INDEX IF NOT EXISTS idx_sessions_profile   ON sessions(profile);
     CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON pre_compress_checkpoints(session_id);
     CREATE INDEX IF NOT EXISTS idx_reinforcement_record ON reinforcement(record_id);
+    CREATE TABLE IF NOT EXISTS promotion_log (
+        record_id   TEXT NOT NULL,
+        from_type   TEXT NOT NULL,
+        to_type     TEXT NOT NULL,
+        heat        REAL NOT NULL,
+        successes   INTEGER NOT NULL DEFAULT 0,
+        sources     TEXT NOT NULL DEFAULT '',
+        ts          TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS forgotten_graveyard (
+        id          TEXT PRIMARY KEY,
+        type        TEXT NOT NULL,
+        content     TEXT NOT NULL,
+        reason      TEXT NOT NULL DEFAULT '',
+        ts          TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_promotion_record ON promotion_log(record_id);
+    CREATE INDEX IF NOT EXISTS idx_graveyard_ts     ON forgotten_graveyard(ts);
     """)
 
 
@@ -409,6 +482,27 @@ def _migrate(conn: sqlite3.Connection):
             conn.execute("ALTER TABLE records ADD COLUMN project_ids TEXT NOT NULL DEFAULT ''")
         conn.execute("DELETE FROM schema_version")
         conn.execute("INSERT INTO schema_version(version) VALUES (3)")
+        conn.commit()
+
+    if version < 4:
+        # v4 adds two append-only audit tables. Both are created by
+        # _create_schema with IF NOT EXISTS, so this step only records that the
+        # upgrade ran; an older database keeps every row it had.
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version(version) VALUES (4)")
+        conn.commit()
+
+    if version < 5:
+        # v5: decay needs its own anchor. Without it, applying decay twice
+        # re-decays an already-decayed confidence for the same elapsed time,
+        # which compounds instead of converging. last_decay_at records when the
+        # value was last lowered; existing rows keep their data and begin
+        # anchoring on updated_at until the first decay touches them.
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(records)").fetchall()]
+        if "last_decay_at" not in cols:
+            conn.execute("ALTER TABLE records ADD COLUMN last_decay_at TEXT NOT NULL DEFAULT ''")
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version(version) VALUES (5)")
         conn.commit()
 
 
@@ -488,16 +582,128 @@ def _insert_identity(conn: sqlite3.Connection, record_id: str, rtype: str, norm:
           parent_id or "", project_id or ""))
 
 
+def _candidates(conn: sqlite3.Connection, content: str, rtype: str, limit: int) -> list:
+    """Lexical prefilter: FTS first, LIKE over rows as the fallback.
+
+    FTS only matches tokens that exist, so a reworded fact can score nothing
+    there; the LIKE fallback on the longest tokens keeps such a record visible
+    to the advisory stage. Both are bounded by a multiple of `limit`, so the
+    cost is one query per remember call, not per record.
+    """
+    own = content_id(content)
+    rows = []
+    try:
+        rows = search(conn, content, limit=limit * 8, rtype=rtype)
+    except sqlite3.Error:
+        rows = []
+    others = [r for r in rows if r["id"] != own]
+    if others:
+        return others
+    # FTS matched nothing but the record itself, so nothing shares a token
+    # suffix: widen to any row that contains one of the longest words.
+    tokens = sorted(set(_tokens(content)), key=len, reverse=True)[:4]
+    if not tokens:
+        return []
+    sql = "SELECT * FROM records WHERE 1=1"
+    params = []
+    if rtype:
+        sql += " AND type=?"
+        params.append(rtype)
+    sql += " AND (" + " OR ".join("content LIKE ?" for _ in tokens) + ")"
+    params.extend(f"%{tok}%" for tok in tokens)
+    sql += " LIMIT ?"
+    params.append(limit * 8)
+    return [dict(r) for r in conn.execute(sql, params) if r["id"] != own]
+
+
+def find_similar(conn: sqlite3.Connection, content: str, limit: int = 5,
+                 threshold: float = SIMILAR_THRESHOLD, rtype: str = None) -> list:
+    """Candidates for one fact, scored by Jaccard, best first.
+
+    Excludes the identical record: asking what a fact resembles does not
+    include itself.
+    """
+    norm = normalize_content(content)
+    hits = []
+    for row in _candidates(conn, norm, rtype, limit):
+        score = round(similarity(norm, row["content"]), 4)
+        if score < threshold:
+            continue
+        hits.append({
+            "id": row["id"],
+            "type": row["type"],
+            "content": row["content"],
+            "score": score,
+            "same_numbers": _numeric_tokens(row["content"]) == _numeric_tokens(norm),
+        })
+    hits.sort(key=lambda h: (-h["score"], h["id"]))
+    return hits[:limit]
+
+
+def _upsertable(candidate: dict, norm: str) -> bool:
+    """Both guards: a high score and identical numbers.
+
+    The score guard keeps genuinely different statements apart; the number
+    guard stops a one-character version bump from collapsing into its
+    predecessor at a score the threshold alone would accept.
+    """
+    if float(candidate.get("score") or 0.0) < UPSERT_THRESHOLD:
+        return False
+    return _numeric_tokens(candidate.get("content") or "") == _numeric_tokens(norm)
+
+
+def decide(conn: sqlite3.Connection, content: str, rtype: str = "FACT", limit: int = 5,
+           threshold: float = SIMILAR_THRESHOLD, upsert: bool = False) -> dict:
+    """Read-only: what remembering this content would do.
+
+    `reason` is one of three values and is the only thing that distinguishes a
+    merge from a report, so it is contract, not a hint:
+      identical  the same content id is already stored; action update
+      similar    a candidate exists. With upsert and both guards met this is an
+                 explicit merge (action update, advisory says "merging into"),
+                 otherwise the write creates a new row and the candidate is
+                 only reported (action create, advisory says "similar to")
+      novel      nothing scored above the advisory threshold; action create
+
+    Returns action update|create, the id it would touch, the reason above, the
+    similar candidates and the human-readable advisory. Never writes.
+    """
+    norm = normalize_content(content)
+    own = content_id(norm)
+    if get_record(conn, own):
+        return {"action": "update", "id": own, "reason": "identical",
+                "similar": [], "advisory": ""}
+
+    similar = find_similar(conn, norm, limit=limit, threshold=threshold, rtype=rtype)
+    mergeable = [c for c in similar if upsert and _upsertable(c, norm)]
+    if mergeable:
+        best = mergeable[0]
+        return {"action": "update", "id": best["id"], "reason": "similar",
+                "similar": similar,
+                "advisory": f"merging into {best['id']} at similarity {best['score']}"}
+    if similar:
+        best = similar[0]
+        return {"action": "create", "id": own, "reason": "similar",
+                "similar": similar,
+                "advisory": (f"similar to {best['id']} at {best['score']}; "
+                             "keep separate unless it is the same fact")}
+    return {"action": "create", "id": own, "reason": "novel", "similar": [], "advisory": ""}
+
+
 def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str = "",
              verified: int = 0, confidence: float = 0.5, source: str = "",
              tags: str = "", session_id: str = "", project_id: str = "",
-             parent_id: str = "") -> dict:
+             parent_id: str = "", upsert: bool = False, limit: int = 5) -> dict:
     """Write by content identity, not by provenance.
 
     Two spellings of one fact (casing, whitespace) and two provenances of one
-    fact (source, project) are the same row. `source` and `project_id` are
-    recorded as provenance and accumulate, so a merge never loses where a fact
-    was seen.
+    fact (source, project) are the same row; `source` and `project_id` are
+    provenance and accumulate, so a merge never loses where a fact was seen.
+
+    Near-duplicates follow `upsert`: off by default, in which case a similar
+    record is reported and a new row is written; on, a candidate that clears
+    both guards is merged in place. Either way the decision, the candidates and
+    the advisory come back to the caller.
     """
     if rtype not in VALID_TYPES:
         raise ValueError(f"invalid type: {rtype}")
@@ -505,9 +711,11 @@ def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str =
         raise ValueError("content must not be empty")
     norm = normalize_content(content)
     confidence = min(1.0, max(0.0, float(confidence)))
-    record_id = content_id(norm)
 
+    decision = decide(conn, norm, rtype=rtype, limit=limit, upsert=upsert)
+    record_id = decision["id"]
     existing = get_record(conn, record_id)
+
     if existing:
         conn.execute(
             "UPDATE records SET content=?, evidence=?, verified=?, confidence=?,"
@@ -520,7 +728,7 @@ def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str =
              tags or existing["tags"],
              session_id or existing["session_id"],
              parent_id or existing["parent_id"],
-             existing["source"] or (source or ""),
+             _merge_provenance(existing["source"], source),
              _merge_provenance(existing["project_ids"], project_id),
              now_iso(),
              record_id)
@@ -532,7 +740,9 @@ def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str =
         applied = "inserted"
 
     conn.commit()
-    return {"id": record_id, "type": rtype, "applied": applied}
+    return {"id": record_id, "type": rtype, "shape": norm, "applied": applied,
+            "action": decision["action"], "reason": decision["reason"],
+            "similar": decision["similar"], "advisory": decision["advisory"]}
 
 
 def _fts_query(query: str) -> str:
@@ -607,9 +817,231 @@ def list_records(conn: sqlite3.Connection, rtype: str = None, project_id: str = 
     return [dict(row) for row in conn.execute(sql, params)]
 
 
+def _parse_ts(value: str):
+    """Tolerant ISO parse; a malformed stamp ages to zero rather than crashing."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _record_signals(conn: sqlite3.Connection, record_id: str) -> list:
+    rows = conn.execute(
+        "SELECT signal, source, delta, ts FROM reinforcement WHERE record_id=? ORDER BY ts",
+        (record_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def heat_parts(row: dict, signals: list, now=None) -> dict:
+    """Decompose heat so every score can be explained and re-derived per record.
+
+    heat = 0.45*confidence + 0.25*recency + 0.30*reinforcement
+
+    recency is computed from `updated_at`, never from confidence. apply_decay
+    already lowers confidence as time passes; ageing that value again here
+    would count the same elapsed time twice and make an old record look older
+    than its own timestamp says.
+
+    Weights are fixed rather than fitted: a fit would encode one corpus's
+    behaviour, become unexplainable per record, and drift whenever the corpus
+    changes. Fixed weights keep the components comparable across sessions.
+    """
+    now = now or datetime.now(timezone.utc)
+    signals = signals or []
+    updated = _parse_ts(row.get("updated_at"))
+    age_days = max(0.0, (now - updated).total_seconds() / 86400.0) if updated else 0.0
+    recency = 0.5 ** (age_days / HEAT_HALF_LIFE_DAYS)
+
+    successes = [s for s in signals if s.get("signal") == "success"]
+    sources = []
+    for s in successes:
+        name = normalize_content(s.get("source") or "").casefold()
+        if name and name not in sources:
+            sources.append(name)
+    net_delta = sum(float(s.get("delta") or 0.0) for s in signals)
+    reinforcement = (0.5 * min(1.0, len(successes) / 2.0)
+                     + 0.5 * min(1.0, max(0.0, net_delta) / 0.2))
+
+    confidence = min(1.0, max(0.0, float(row.get("confidence") or 0.0)))
+    heat = (HEAT_WEIGHTS["confidence"] * confidence
+            + HEAT_WEIGHTS["recency"] * recency
+            + HEAT_WEIGHTS["reinforcement"] * reinforcement)
+    return {
+        "heat": round(min(1.0, max(0.0, heat)), 6),
+        "confidence": confidence,
+        "age_days": round(age_days, 4),
+        "recency": round(recency, 6),
+        "reinforcement": round(reinforcement, 6),
+        "successes": len(successes),
+        "net_delta": round(net_delta, 6),
+        "sources": sorted(sources),
+    }
+
+
+def heat_of(conn: sqlite3.Connection, record_id: str, now=None) -> float:
+    rec = get_record(conn, record_id)
+    if not rec:
+        raise ValueError(f"record not found: {record_id}")
+    return heat_parts(rec, _record_signals(conn, record_id), now)["heat"]
+
+
+def last_promotion():
+    """The promotion produced by the most recent reinforce() on this thread."""
+    return getattr(_promotion_context, "last", None)
+
+
+def promote_hot(conn: sqlite3.Connection, record_id: str = None, now=None):
+    """Turn a hot, twice-corroborated inference into a fact.
+
+    Every condition is required: a promotable type, heat at or above
+    PROMOTE_HEAT, and successes reported from two distinct sources after
+    normalising case and whitespace. `verified` is left alone: corroboration is
+    evidence, not an operator's confirmation.
+
+    Returns the promotion dict, or None when nothing changed, in which case
+    nothing is written. With no record_id, every promotable record is examined.
+    """
+    now = now or datetime.now(timezone.utc)
+    if record_id:
+        one = get_record(conn, record_id)
+        rows = [one] if one else []
+    else:
+        marks = ",".join("?" for _ in PROMOTABLE_TYPES)
+        rows = [dict(r) for r in conn.execute(
+            f"SELECT * FROM records WHERE type IN ({marks})", PROMOTABLE_TYPES)]
+
+    promoted = None
+    for row in rows:
+        if row["type"] not in PROMOTABLE_TYPES:
+            continue
+        parts = heat_parts(row, _record_signals(conn, row["id"]), now)
+        if parts["heat"] < PROMOTE_HEAT:
+            continue
+        if len(parts["sources"]) < 2:
+            continue
+        conn.execute("UPDATE records SET type=?, updated_at=? WHERE id=?",
+                     ("FACT", now.isoformat(), row["id"]))
+        conn.execute("""
+            INSERT INTO promotion_log
+                (record_id, from_type, to_type, heat, successes, sources, ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (row["id"], row["type"], "FACT", parts["heat"], parts["successes"],
+              ",".join(parts["sources"]), now.isoformat()))
+        promoted = {"record_id": row["id"], "from_type": row["type"], "to_type": "FACT",
+                    "heat": parts["heat"], "successes": parts["successes"],
+                    "sources": parts["sources"], "promoted": True}
+    if promoted:
+        conn.commit()
+    return promoted
+
+
+def forget_cold(conn: sqlite3.Connection, apply: bool = False, now=None,
+                floor: float = DECAY_FLOOR, min_age_days: int = FORGET_MIN_AGE_DAYS,
+                window_days: int = FORGET_WINDOW_DAYS) -> dict:
+    """Find records nothing has touched, and optionally delete them.
+
+    All conditions must hold: unverified, not a RULE or CORRECTION, confidence
+    at the decay floor, older than min_age_days since updated_at, and no
+    reinforcement inside window_days. The window is bounded by default: any
+    reinforcement ever recorded would otherwise protect a record forever, which
+    makes forgetting impossible on a corpus that has ever been used. apply=False
+    only reports, which is the default: deleting an operator's memory is a
+    decision, not a side effect.
+
+    On apply the graveyard row is written before the delete, so a crash between
+    the two leaves an audit trail rather than a silently missing record.
+    """
+    now = now or datetime.now(timezone.utc)
+    cutoff = (now - timedelta(days=min_age_days)).isoformat()
+    window_cutoff = ((now - timedelta(days=window_days)).isoformat()
+                     if window_days else None)
+
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM records WHERE verified=0 AND type NOT IN ('RULE','CORRECTION')"
+        " AND confidence <= ? AND updated_at < ?",
+        (floor + FORGET_FLOOR_SLACK, cutoff))]
+
+    candidates = []
+    for row in rows:
+        sql = "SELECT COUNT(*) FROM reinforcement WHERE record_id=?"
+        params = [row["id"]]
+        if window_cutoff:
+            sql += " AND ts >= ?"
+            params.append(window_cutoff)
+        if conn.execute(sql, params).fetchone()[0]:
+            continue
+        candidates.append(row)
+
+    if apply:
+        for row in candidates:
+            conn.execute(
+                "INSERT OR REPLACE INTO forgotten_graveyard (id, type, content, reason, ts)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (row["id"], row["type"], (row["content"] or "")[:200],
+                 f"cold: confidence {row['confidence']} at floor, no reinforcement",
+                 now.isoformat()))
+            conn.execute("DELETE FROM reinforcement WHERE record_id=?", (row["id"],))
+            conn.execute("DELETE FROM records WHERE id=?", (row["id"],))
+        if candidates:
+            conn.commit()
+    return {
+        "forgotten": len(candidates) if apply else 0,
+        "candidates": [r["id"] for r in candidates],
+        "apply": bool(apply),
+    }
+
+
+def apply_decay(conn: sqlite3.Connection, now=None, floor: float = DECAY_FLOOR) -> dict:
+    """Age every unprotected record's confidence toward `floor`.
+
+    The decay anchor is the later of updated_at and last_decay_at. Anchoring on
+    updated_at alone compounds: a second call would decay the already-decayed
+    value over the same elapsed time again, so two calls at one instant would
+    disagree. Recording the anchor makes the function idempotent for a given
+    `now` and still linear across real time.
+
+    Verified records and the correction types are exempt: an operator's
+    confirmation and a recorded correction do not become less true with time.
+
+    Returns {record_id: new_confidence} for the records that moved.
+    """
+    now = now or datetime.now(timezone.utc)
+    moved = {}
+    rows = [dict(r) for r in conn.execute(
+        "SELECT id, confidence, updated_at, last_decay_at, verified, type FROM records")]
+    for row in rows:
+        if row["verified"] or row["type"] in ("RULE", "CORRECTION"):
+            continue
+        anchors = [t for t in (_parse_ts(row["updated_at"]),
+                              _parse_ts(row["last_decay_at"])) if t]
+        if not anchors:
+            continue
+        anchor = max(anchors)
+        age_days = max(0.0, (now - anchor).total_seconds() / 86400.0)
+        factor = 0.5 ** (age_days / DECAY_HALF_LIFE_DAYS)
+        base = max(floor, float(row["confidence"]))
+        target = floor + (base - floor) * factor
+        value = round(min(float(row["confidence"]), target), 6)
+        if value < float(row["confidence"]):
+            conn.execute("UPDATE records SET confidence=?, last_decay_at=? WHERE id=?",
+                         (value, now.isoformat(), row["id"]))
+            moved[row["id"]] = value
+    if moved:
+        conn.commit()
+    return moved
+
+
 def reinforce(conn: sqlite3.Connection, record_id: str, signal: str,
               delta: float = None, source: str = "") -> float:
-    """Apply a reinforcement signal. Explicit delta overrides the canonical one."""
+    """Apply a reinforcement signal, then reconsider promotion on success.
+
+    An explicit delta overrides the canonical one. Promotion runs only for a
+    success signal, and its outcome is reported through last_promotion() so the
+    caller can say what happened without re-reading the row.
+    """
     if signal not in VALID_SIGNALS:
         raise ValueError(f"invalid signal: {signal}")
 
@@ -626,8 +1058,11 @@ def reinforce(conn: sqlite3.Connection, record_id: str, signal: str,
         INSERT INTO reinforcement (record_id, signal, delta, source, ts)
         VALUES (?, ?, ?, ?, ?)
     """, (record_id, signal, actual_delta, source, now_iso()))
-
     conn.commit()
+
+    _promotion_context.last = None
+    if signal == "success":
+        _promotion_context.last = promote_hot(conn, record_id)
     return new_conf
 
 
@@ -742,6 +1177,8 @@ def stats(conn: sqlite3.Connection) -> dict:
     result["sessions"] = conn.execute("SELECT COUNT(*) AS n FROM sessions").fetchone()["n"]
     result["checkpoints"] = conn.execute("SELECT COUNT(*) AS n FROM pre_compress_checkpoints").fetchone()["n"]
     result["reinforcements"] = conn.execute("SELECT COUNT(*) AS n FROM reinforcement").fetchone()["n"]
+    result["promotions"] = conn.execute("SELECT COUNT(*) AS n FROM promotion_log").fetchone()["n"]
+    result["forgotten"] = conn.execute("SELECT COUNT(*) AS n FROM forgotten_graveyard").fetchone()["n"]
     return result
 
 
