@@ -53,6 +53,17 @@ def test_superseded_candidate_is_downranked(conn):
     assert db.get_record(conn, clean)["superseded_by"] == ""
 
 
+def test_correction_with_evidence_keeps_verified(conn):
+    rid = db.remember(conn, "FACT", "deploy host is prod-01",
+                      verified=1)["id"]
+    db.reinforce(conn, rid, "correction",
+                 content="deploy host is prod-02",
+                 evidence="ops confirmed")
+    row = db.get_record(conn, rid)
+    assert row["verified"] == 1
+    assert "ops confirmed" in row["evidence"]
+
+
 def test_rewrite_window_refreshes_updated_at(conn):
     rid = db.remember(conn, "FACT", "deploy host is prod-01")["id"]
     before = db.get_record(conn, rid)["updated_at"]

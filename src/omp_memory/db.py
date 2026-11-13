@@ -2019,10 +2019,15 @@ def reinforce(conn: sqlite3.Connection, record_id: str, signal: str,
             "SELECT content FROM records WHERE id=?", (record_id,)
         ).fetchone()[0]
         if content.strip() != row_content.strip():
+            prev = conn.execute(
+                "SELECT evidence, verified FROM records WHERE id=?",
+                (record_id,)).fetchone()
             conn.execute(
                 "UPDATE records SET content=?, evidence=?, verified=?,"
                 " updated_at=? WHERE id=?",
-                (content.strip(), evidence or "", 1 if verified else 0,
+                (content.strip(),
+                 evidence or prev[0] or "",
+                 max(1 if verified else 0, prev[1] or 0),
                  now_iso(), record_id))
             rewrite_applied = True
 
