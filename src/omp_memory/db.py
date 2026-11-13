@@ -142,7 +142,12 @@ REWRITE_MAX_CONTENT_LEN = 20000
 # Superseded records keep their row (history is append-only) but are
 # downranked in recall: the correction that replaced them is the current
 # answer. A small penalty is enough because the replacement is usually
-# the lexical match, not the loser.
+# the lexical match, not the loser; the replacement itself earns a small
+# boost, so a correction outranks its stale twin rather than merely
+# trailing it. Chain resolution lives on the write path: when a winner
+# itself is superseded, every predecessor follows the new head, so a
+# query always resolves a chain to its current answer.
+SUPERSEDED_BOOST = 0.05
 SUPERSEDED_PENALTY = 0.15
 # Cue-triggered recall for INTENT records (Rummel & Kvavilashvili 2023): a
 # query carrying the intent's cue pulls the intent forward by this bonus,
@@ -1209,6 +1214,20 @@ def _set_superseded(conn, record_id: str, source: str,
             " AND superseded_by=''",
             (record_id, cand["id"]))
         linked.append(cand["id"])
+    # Chain resolution: rows superseded by the rewritten record may
+    # themselves be the target of older markers (A -> B, B -> C). After
+    # B is linked to C, A still points at a loser, so every row pointing
+    # at B follows to C: the chain resolves to its head in one hop, and
+    # no query walks A -> B -> C at read time.
+    if linked:
+        losers = [rid for rid in linked if not str(rid).startswith("chain:")]
+        for loser in losers:
+            conn.execute(
+                "UPDATE records SET superseded_by=? WHERE superseded_by=?"
+                " AND id != ?",
+                (record_id, loser, record_id))
+        linked.append(f"chain:{losers}->{record_id}" if losers
+                      else f"chain:none->{record_id}")
     return linked
 
 
@@ -1252,7 +1271,7 @@ def consolidate(conn, now=None) -> list:
                  WHERE x.record_id = r.id AND x.signal = 'failure'
                    AND x.ts >= ?) AS failures
         FROM records r
-        WHERE r.verified = 0
+        WHERE r.verified = 0 AND r.superseded_by = ''
         """, (cutoff, cutoff, cutoff)).fetchall()
     consolidated = []
     for row in rows:
@@ -1783,6 +1802,8 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
         cue_bonus[cand["id"]] = INTENT_CUE_BONUS * fade * float(
             cand.get("importance") or 0.5)
 
+    chain_heads = {c["superseded_by"] for c in candidates
+                   if c.get("superseded_by")}
     scored = []
     for cand in candidates:
         signals = _record_signals(conn, cand["id"])
@@ -1795,8 +1816,9 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
                 + RECALL_WEIGHTS["type_prior"] * prior)
         superseded = bool(cand.get("superseded_by"))
         penalty = SUPERSEDED_PENALTY if superseded else 0.0
+        boost = SUPERSEDED_BOOST if cand["id"] in chain_heads else 0.0
         bonus = cue_bonus.get(cand["id"], 0.0)
-        score = round(max(0.0, base + bonus - penalty), 6)
+        score = round(max(0.0, base + bonus + boost - penalty), 6)
         scored.append((cand, parts, heat, lexical, prior, score))
 
     def _sort_key(item):
@@ -2066,7 +2088,9 @@ def forget_cold(conn: sqlite3.Connection, apply: bool = False, now=None,
 
     rows = [dict(r) for r in conn.execute(
         "SELECT * FROM records WHERE verified=0 AND type NOT IN ('RULE','CORRECTION')"
-        " AND confidence <= ? AND updated_at < ?",
+        " AND confidence <= ? AND updated_at < ?"
+        " AND id NOT IN (SELECT superseded_by FROM records"
+        "                WHERE superseded_by != '')",
         (floor + FORGET_FLOOR_SLACK, cutoff))]
 
     candidates = []

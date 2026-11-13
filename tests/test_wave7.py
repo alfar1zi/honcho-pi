@@ -118,5 +118,7 @@ def test_superseded_penalty_applies_in_recall(conn):
     hits = db.recall(conn, "deploy host prod", limit=5, full=True)
     scores = {h["id"]: h["score"] for h in hits}
     assert scores[rid] > scores[twin]
+    # head gets SUPERSEDED_BOOST on top of the loser's SUPERSEDED_PENALTY,
+    # so the margin is the sum
     assert scores[rid] - scores[twin] == pytest.approx(
-        db.SUPERSEDED_PENALTY, abs=1e-4)
+        db.SUPERSEDED_PENALTY + db.SUPERSEDED_BOOST, abs=1e-4)
