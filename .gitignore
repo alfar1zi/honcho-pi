@@ -17,3 +17,10 @@ audit.log
 # Bench runtime state: per-interpreter DB files and crash leftovers.
 bench/db/
 bench/out/*.err
+
+.rlcheck/
+.readmecheck/
+.auditcheck/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
