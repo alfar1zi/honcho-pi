@@ -234,6 +234,8 @@ def tool_remember(args: Dict[str, Any], user: str = "") -> str:
             session_id=str(args.get("session") or ""),
             project_id=str(args.get("project") or ""),
             about_peer=str(args.get("about_peer") or ""),
+            importance=float(args.get("importance") if args.get("importance") is not None else 0.5),
+            cue=str(args.get("cue") or ""),
         )
         rid = result["id"]
         rec = db.get_record(conn, rid) or {}
@@ -397,6 +399,9 @@ TOOLS: List[Dict[str, Any]] = [
                 "project": {"type": "string"},
                 "source": {"type": "string"},
                 "session": {"type": "string"},
+                "importance": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.5,
+                               "description": "How much this intent matters (INTENT records)."},
+                "cue": {"type": "string", "description": "Trigger phrase that surfaces an INTENT on recall."},
             },
             "required": ["content"],
         },
