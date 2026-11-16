@@ -448,7 +448,8 @@ TOOLS: List[Dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "op": {"type": "string",
-                       "enum": ["decay", "forget_cold", "promote", "capture"]},
+                       "enum": ["decay", "sleep", "forget_cold", "promote",
+                                "capture"]},
                 "apply": {"type": "boolean",
                           "description": "forget_cold: actually delete; capture: write"},
             },
