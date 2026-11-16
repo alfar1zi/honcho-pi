@@ -48,7 +48,11 @@ def question_exact(rows):
     """Content fragment -> is that record the top hit?"""
     cases = []
     for r in rows[:10]:
-        words = [w for w in r["content"].split() if len(w) > 4][:5]
+        if r.get("superseded_by"):
+            continue
+        other = {w for o in rows if o is not r
+                 for w in _terms(o["content"])}
+        words = sorted(_terms(r["content"]) - other)[:5]
         if len(words) >= 3:
             cases.append((" ".join(words), r["id"]))
     return cases
@@ -64,7 +68,10 @@ def question_update(rows):
     for key, group in seen.items():
         if len(group) >= 2:
             oldest, newest = group[-1], group[0]
-            words = [w for w in oldest["content"].split() if len(w) > 4][:4]
+            # query with the newest's own words: the oldest's unique
+            # tokens (us-west) only surface the oldest, so the update
+            # expectation is unmeasurable there.
+            words = [w for w in newest["content"].split() if len(w) > 4][:4]
             if len(words) >= 3:
                 cases.append((" ".join(words), newest["id"]))
     return cases
@@ -82,12 +89,16 @@ def question_supersede(rows):
     for r in rows:
         if not r.get("superseded_by"):
             continue
-        words = [w for w in r["content"].split() if len(w) > 4][:4]
-        if len(words) >= 3:
-            # The probe needs a query that hits both the loser and the
-            # winner: the loser's distinctive tokens (prod-02) only
-            # surface the loser, and the penalty is invisible there.
-            cases.append(("deploy host prod", r["superseded_by"]))
+        winner = next((w for w in rows if w["id"] == r["superseded_by"]), None)
+        if winner is None:
+            continue
+        # Query with the winner's own terms: the loser shares the topic
+        # vocabulary, so the penalty is what decides the ranking. The
+        # loser's distinctive tokens only surface the loser, and the
+        # penalty is invisible there.
+        words = [w for w in _terms(winner["content"]) if len(w) > 4][:6]
+        if len(words) >= 2:
+            cases.append((" ".join(sorted(words)), r["superseded_by"]))
     return cases
 
 
@@ -95,7 +106,13 @@ def question_temporal(rows):
     """Query = distinctive words; the window is the record's own week."""
     cases = []
     for r in rows[:6]:
-        words = [w for w in r["content"].split() if len(w) > 5][:3]
+        if r.get("superseded_by"):
+            # a penalized record loses to its replacement on any query
+            # they share; the expectation would measure the penalty.
+            continue
+        other = {w for o in rows if o is not r
+                 for w in _terms(o["content"])}
+        words = sorted(_terms(r["content"]) - other)[:3]
         if len(words) >= 2:
             cases.append((" ".join(words), r["id"]))
     return cases
@@ -121,10 +138,16 @@ def question_join(rows):
     """
     cases = []
     for i, a in enumerate(rows[:10]):
+        if a.get("superseded_by"):
+            # A superseded record is penalized by design; a probe that
+            # expects it in the top-3 measures the penalty, not the join.
+            continue
         ta = _terms(a["content"])
         if len(ta) < 2:
             continue
         for b in rows[i + 1:]:
+            if b.get("superseded_by"):
+                continue
             tb = _terms(b["content"])
             if len(tb) < 2 or len(ta & tb) < 2:
                 continue
