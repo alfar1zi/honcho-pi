@@ -17,11 +17,11 @@ Question types (Lin et al. 2025 retrieval split, Mem0 update case):
             neighbours, or does any shared token buy a hit?
 """
 import argparse
+from datetime import datetime
 import re
 import sqlite3
 import sys
 from pathlib import Path
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from omp_memory import db  # noqa: E402
 
@@ -103,19 +103,40 @@ def question_supersede(rows):
 
 
 def question_temporal(rows):
-    """Query = distinctive words; the window is the record's own week."""
+    """Two records on the same topic, written weeks apart: expect the
+    newer one at the top.
+
+    A real temporal probe: both records share topic vocabulary, so the
+    query cannot separate them by keywords. Only recency (heat) should
+    decide, which is what a time-sensitive memory must do when a fact
+    has two dated spellings.
+    """
     cases = []
-    for r in rows[:6]:
-        if r.get("superseded_by"):
-            # a penalized record loses to its replacement on any query
-            # they share; the expectation would measure the penalty.
+    for a in rows:
+        if a.get("superseded_by"):
             continue
-        other = {w for o in rows if o is not r
-                 for w in _terms(o["content"])}
-        words = sorted(_terms(r["content"]) - other)[:3]
-        if len(words) >= 2:
-            cases.append((" ".join(words), r["id"]))
+        ta = _terms(a["content"])
+        for b in rows:
+            if b is a or b.get("superseded_by"):
+                continue
+            if a["updated_at"] >= b["updated_at"]:
+                continue
+            tb = _terms(b["content"])
+            if len(ta & tb) < 2:
+                continue
+            days = (_ts(b["updated_at"]) - _ts(a["updated_at"])).days
+            if days < 7:
+                continue
+            query = " ".join(sorted(ta & tb)[:6])
+            cases.append((query, b["id"]))
+            break
+        if len(cases) >= 6:
+            break
     return cases
+
+
+def _ts(text):
+    return datetime.fromisoformat(text)
 
 
 def _terms(text):
