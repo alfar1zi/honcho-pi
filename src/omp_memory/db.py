@@ -47,7 +47,7 @@ def _restrict_to_owner(path: str) -> None:
 
 
 VALID_TYPES = {"FACT", "ASSUMPTION", "INFERENCE", "DECISION", "RULE", "CORRECTION",
-               "INTENT"}
+               "INTENT", "WORKFLOW"}
 VALID_SIGNALS = {"success", "failure", "correction", "reinforce", "decay"}
 SIGNAL_DELTAS = {
     "success": 0.1,
@@ -158,7 +158,7 @@ INTENT_CUE_BONUS = 0.10
 INTENT_DECAY_TAU_DAYS = 7.0
 
 PRE_COMPRESS_CHECKPOINT_API_VERSION = 2
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 # Recall reranking weights. Lexical is dominant (0.70) because recall is
 # primarily an inquiry of relevance. Heat is moderate (0.25) so stale yet
 # relevant records do not sink while breaking ties among equally relevant
@@ -171,6 +171,7 @@ TYPE_PRIOR = {
     "FACT": 1.0,
     "CORRECTION": 0.85,
     "DECISION": 0.60,
+    "WORKFLOW": 0.65,
     "INTENT": 0.50,
     "ASSUMPTION": 0.35,
     "INFERENCE": 0.25,
@@ -183,6 +184,7 @@ RECALL_POOL_MIN = 20
 TYPE_BM25_WEIGHTS = {
     "RULE": 1.4,
     "CORRECTION": 1.4,
+    "WORKFLOW": 1.2,
     "DECISION": 1.2,
     "INTENT": 1.0,
     "FACT": 1.0,
@@ -509,7 +511,7 @@ _RECORD_COLUMNS = (
 )
 _RECORDS_DDL = """CREATE TABLE IF NOT EXISTS records (
         id          TEXT PRIMARY KEY,
-        type        TEXT NOT NULL CHECK (type IN ('FACT','ASSUMPTION','INFERENCE','DECISION','RULE','CORRECTION','INTENT')),
+        type        TEXT NOT NULL CHECK (type IN ('FACT','ASSUMPTION','INFERENCE','DECISION','RULE','CORRECTION','INTENT','WORKFLOW')),
         content     TEXT NOT NULL,
         evidence    TEXT NOT NULL DEFAULT '',
         verified    INTEGER NOT NULL DEFAULT 0,
@@ -645,6 +647,46 @@ def _create_fts_triggers(conn: sqlite3.Connection):
     END;
     """)
 
+
+
+def _rebuild_records_check(conn: sqlite3.Connection) -> bool:
+    """Rebuild `records` when its CHECK constraint lacks a valid type.
+
+    SQLite cannot ALTER a CHECK, so adding a record type means rebuilding
+    the table. A new table is created, rows carry over, and the old table
+    is dropped. The rename would make FKs point at `records_old` and drop
+    the FTS triggers, so this is a new-table swap that keeps the name
+    `records`; `_reconcile_fts` recreates the trigger state afterwards.
+    The swap is one transaction: dying halfway would leave records
+    half-swapped and _migrate would never retry it. foreign_keys cannot
+    change inside a transaction, so the pragma calls bracket it.
+    """
+    check = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='records'"
+    ).fetchone()[0]
+    stale = bool(check) and any(
+        f"'{t}'" not in check for t in sorted(VALID_TYPES)
+    )
+    if not stale:
+        return False
+    conn.execute("PRAGMA foreign_keys=off")
+    conn.execute("BEGIN")
+    try:
+        conn.execute(_RECORDS_DDL.replace(
+            "CREATE TABLE IF NOT EXISTS records", "CREATE TABLE records_new"))
+        carry = [r[1] for r in conn.execute("PRAGMA table_info(records)").fetchall()]
+        shared = ",".join(c for c in carry if c in _RECORD_COLUMNS)
+        conn.execute(f"INSERT INTO records_new ({shared})"
+                     f" SELECT {shared} FROM records")
+        conn.execute("DROP TABLE records")
+        conn.execute("ALTER TABLE records_new RENAME TO records")
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys=on")
+    return True
 
 def _current_schema_version(conn: sqlite3.Connection) -> int:
     try:
@@ -835,39 +877,7 @@ def _migrate(conn: sqlite3.Connection):
             conn.execute("ALTER TABLE records ADD COLUMN event_id TEXT NOT NULL DEFAULT ''")
         if cols and "decay_exempt_until" not in cols:
             conn.execute("ALTER TABLE records ADD COLUMN decay_exempt_until TEXT NOT NULL DEFAULT ''")
-        # The v9 CHECK lacks 'INTENT'. SQLite cannot ALTER a CHECK, so the
-        # table is rebuilt when the live CHECK is stale, and rows carry over.
-        check = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='records'"
-        ).fetchone()[0]
-        if check and "'INTENT'" not in check:
-            # The rename makes every FK pointing at `records` (reinforcement)
-            # track `records_old` instead, and renaming the table drops the
-            # FTS triggers that keep records_fts in sync. So the rebuild is a
-            # new-table swap (the new table takes the name `records`, FKs
-            # keep pointing at the real name) and the triggers are recreated
-            # before any write can land. The swap is one transaction: dying
-            # halfway would leave records half-swapped and _migrate would
-            # never retry it. foreign_keys cannot change inside a
-            # transaction, so the pragma calls bracket it.
-            conn.execute("PRAGMA foreign_keys=off")
-            conn.execute("BEGIN")
-            try:
-                conn.execute(_RECORDS_DDL.replace(
-                    "CREATE TABLE IF NOT EXISTS records", "CREATE TABLE records_new"))
-                carry = [r[1] for r in conn.execute("PRAGMA table_info(records)").fetchall()]
-                shared = ",".join(c for c in carry if c in _RECORD_COLUMNS)
-                conn.execute(f"INSERT INTO records_new ({shared})"
-                             f" SELECT {shared} FROM records")
-                conn.execute("DROP TABLE records")
-                conn.execute("ALTER TABLE records_new RENAME TO records")
-                conn.execute("COMMIT")
-            except BaseException:
-                conn.execute("ROLLBACK")
-                raise
-            finally:
-                conn.execute("PRAGMA foreign_keys=on")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_records_event ON records(event_id)")
+        _rebuild_records_check(conn)
         conn.execute("DELETE FROM schema_version")
         conn.execute("INSERT INTO schema_version(version) VALUES (10)")
         conn.commit()
@@ -909,6 +919,19 @@ def _migrate(conn: sqlite3.Connection):
         conn.execute("UPDATE records SET cue='' WHERE cue IS NULL")
         conn.execute("DELETE FROM schema_version")
         conn.execute("INSERT INTO schema_version(version) VALUES (12)")
+        conn.commit()
+
+    if version < 13:
+        # v13: WORKFLOW record type (AMW 2409.07429, ExpeL 2308.10144).
+        # Step-by-step procedures the operator confirmed working, distinct
+        # from a DECISION (why) and a FACT (what): the workflow is the how.
+        # Databases that already reached v12 skip the v10 block, so the
+        # CHECK rebuild (SQLite cannot ALTER a CHECK) runs here too: the
+        # guard checks the live CHECK, not the schema version.
+        if _rebuild_records_check(conn):
+            _reconcile_fts(conn)
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version(version) VALUES (13)")
         conn.commit()
 
 
@@ -1646,7 +1669,8 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
                r.about_peer, r.superseded_by, r.importance, r.cue,
                bm25(records_fts) / CASE r.type
                    WHEN 'RULE' THEN 1.4 WHEN 'CORRECTION' THEN 1.4
-                   WHEN 'DECISION' THEN 1.2 WHEN 'INTENT' THEN 1.0 WHEN 'FACT' THEN 1.0
+                   WHEN 'DECISION' THEN 1.2 WHEN 'WORKFLOW' THEN 1.2
+                   WHEN 'INTENT' THEN 1.0 WHEN 'FACT' THEN 1.0
                    WHEN 'INFERENCE' THEN 0.8 WHEN 'ASSUMPTION' THEN 0.7
                    ELSE 1.0 END AS rank
         FROM records_fts
