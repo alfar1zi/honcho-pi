@@ -305,7 +305,8 @@ TOOLS: List[Dict[str, Any]] = [
     },
     {
         "name": "forget",
-        "description": "Delete a memory record that is provably wrong. Prefer reinforce(failure) when merely uncertain.",
+        "description": ("Delete a memory record that is provably wrong. "
+                       "Prefer reinforce(failure) when merely uncertain."),
         "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
     },
     {
