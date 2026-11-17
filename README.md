@@ -66,7 +66,7 @@ assumption next week. Three failures follow from that:
 
 ## Install
 
-Requires Python 3.9+ with the standard `sqlite3` module.
+Requires Python 3.10+ with the standard `sqlite3` module.
 
 ```bash
 # as an agent skill
@@ -74,6 +74,50 @@ npx skills add alfar1zi/honcho-pi
 
 # or as a python package
 pip install git+https://github.com/alfar1zi/honcho-pi
+```
+
+### Quick setup
+
+One command, no clone, no `cd`. `pipx` installs the CLI into its own environment, so it works the same on Linux,
+macOS, and Windows and never trips the "externally managed environment" block that plain `pip` hits on Debian and
+Ubuntu. The database defaults to `~/.omp/memory/memory.db`; set `OMP_MEMORY_DB` to move it.
+
+```bash
+pipx install "git+https://github.com/alfar1zi/honcho-pi"
+pipx ensurepath    # only if the shell cannot find `omp-memory` afterwards; reopen the shell
+```
+
+No `pipx`? Install it first (`apt install pipx`, `brew install pipx`, or the `pip install --user pipx` line for
+your interpreter), or fall back to a venv. Use `python3` on Linux, `python` on macOS and Windows:
+
+```bash
+python3 -m venv ~/.local/venvs/omp-memory
+~/.local/venvs/omp-memory/bin/python -m pip install "git+https://github.com/alfar1zi/honcho-pi"
+```
+
+Verify either install:
+
+```bash
+omp-memory health                          # pipx install
+~/.local/venvs/omp-memory/bin/omp-memory health   # venv install
+```
+
+The `omp-memory` console script and `python -m omp_memory` call the same `main()`. On Windows the venv path ends in
+`\Scripts\python.exe` instead of `bin/python`. The `bin/*` scripts and `install.sh` are bash shims for POSIX
+installs only.
+
+Paste this block into an agent to make it use the memory:
+
+```text
+You have a local memory CLI. Use it without being asked.
+- `omp-memory` is on PATH after a pipx install; `python -m omp_memory` is the same program if the shim is missing.
+- Before a non-trivial task: `omp-memory search "<keywords>"`, and `recap --session <id>` when you have one.
+- When a task ends: `omp-memory capture --task ... --outcome ... --evidence ...`. Add `--verified` only if you
+  observed the result, not if you assumed it.
+- When reality confirms or contradicts a record: `omp-memory reinforce <record_id> success|failure|correction`.
+- `omp-memory context "<keywords>"` prints a fenced block you can drop into the prompt.
+- Never capture secrets, credentials, or personal data. The CLI refuses secret-looking input; do not pass
+  `--allow-secrets` unless the operator explicitly asks.
 ```
 
 To install by hand into `~/.omp/memory`:
