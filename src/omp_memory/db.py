@@ -1609,7 +1609,8 @@ def _search_relaxed(conn: sqlite3.Connection, query: str, **kwargs) -> list:
 
 
 def _cue_pool(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = None,
-              project_id: str = None, verified_only: bool = False,
+              project_id: str = None, session_id: str = None,
+              verified_only: bool = False,
               min_confidence: float = 0.0, pool: int = None,
               about_peer: str = None) -> list:
     """INTENT records whose cue shares a token with the query.
@@ -1637,6 +1638,9 @@ def _cue_pool(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str 
     if project_id:
         sql += " AND r.project_id = ?"
         params.append(project_id)
+    if session_id:
+        sql += " AND r.session_id = ?"
+        params.append(session_id)
     if about_peer:
         sql += " AND r.about_peer = ?"
         params.append(about_peer)
@@ -1657,7 +1661,8 @@ def _cue_pool(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str 
 
 
 def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = None,
-                  project_id: str = None, verified_only: bool = False,
+                  project_id: str = None, session_id: str = None,
+                  verified_only: bool = False,
                   min_confidence: float = 0.0, pool: int = None,
                   about_peer: str = None):
     match = query if query.startswith('>') else _fts_query(query)
@@ -1684,6 +1689,9 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
     if project_id:
         sql += " AND r.project_id = ?"
         params.append(project_id)
+    if session_id:
+        sql += " AND r.session_id = ?"
+        params.append(session_id)
     if about_peer:
         sql += " AND r.about_peer = ?"
         params.append(about_peer)
@@ -1728,12 +1736,13 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
 
 
 def search(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = None,
-           project_id: str = None, verified_only: bool = False,
+           project_id: str = None, session_id: str = None,
+           verified_only: bool = False,
            min_confidence: float = 0.0, pool: int = None,
            about_peer: str = None):
     """Exact AND first, then typo-repaired, then best single-word match."""
     return _search_relaxed(conn, query, limit=limit, rtype=rtype,
-                           project_id=project_id,
+                           project_id=project_id, session_id=session_id,
                            verified_only=verified_only,
                            min_confidence=min_confidence, pool=pool,
                            about_peer=about_peer)
@@ -1782,7 +1791,8 @@ def _pool_query_terms(candidates: list) -> int:
 
 
 def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = False,
-           pool: int = None, rtype: str = None, project_id: str = None, now=None,
+           pool: int = None, rtype: str = None, project_id: str = None,
+           session_id: str = None, now=None,
            verified_only: bool = False, min_confidence: float = 0.0,
            about_peer: str = None) -> list:
     """Rerank candidate memories combining lexical match, heat and type prior.
@@ -1798,6 +1808,7 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
     pool_size = max(pool or 0, limit * RECALL_POOL_FACTOR, RECALL_POOL_MIN)
     candidates = search(conn, query, limit=pool_size, pool=pool_size,
                         rtype=rtype, project_id=project_id,
+                        session_id=session_id,
                         verified_only=verified_only, min_confidence=min_confidence,
                         about_peer=about_peer)
     if not candidates:

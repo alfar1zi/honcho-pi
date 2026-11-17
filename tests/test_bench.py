@@ -82,3 +82,26 @@ def test_bench_refuses_write(tmp_path, monkeypatch):
     )
     assert proc.returncode == 0, proc.stderr
     assert Path(db_path).read_bytes() == before
+
+
+def test_multisession_probe_scopes_recall(tmp_path):
+    """Session-scoped recall returns only the asked session's record; the
+    same query without the filter stays session-agnostic."""
+    db_path = str(tmp_path / "multi.db")
+    conn = memory_db.connect(db_path)
+    memory_db.init_db(conn)
+    memory_db.remember(conn, "FACT", "auth flow uses magic links in tenant A",
+                       session_id="sess-a", confidence=0.8)
+    memory_db.remember(conn, "FACT", "auth flow uses oauth codes in tenant B",
+                       session_id="sess-b", confidence=0.8)
+    rows = run.probe_rows(conn, 60)
+    cases = run.question_multisession(rows)
+    assert len(cases) == 2
+    for q, sid, expected in cases:
+        hits = memory_db.recall(conn, q, limit=3, session_id=sid)
+        assert hits, f"no hits for session {sid}"
+        assert hits[0]["id"] == expected
+    # without the filter both sessions are visible (session-agnostic default)
+    unscoped = memory_db.recall(conn, "auth flow", limit=5)
+    assert len(unscoped) == 2
+    conn.close()

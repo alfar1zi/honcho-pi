@@ -178,6 +178,7 @@ def tool_recall(args: Dict[str, Any], user: str = "") -> str:
         limit = max(1, min(limit, 50))
         rtype = args.get("type")
         project = args.get("project")
+        session = args.get("session")
         verified_only = bool(args.get("verified_only"))
         min_confidence = float(args.get("min_confidence") or 0.0)
         about_peer = args.get("about_peer")
@@ -186,6 +187,7 @@ def tool_recall(args: Dict[str, Any], user: str = "") -> str:
         # filtered queries to plain lexical order.
         rows = db.recall(conn, query, limit=limit, full=True,
                          rtype=rtype, project_id=project,
+                         session_id=session,
                          verified_only=verified_only,
                          min_confidence=min_confidence,
                          about_peer=about_peer)
@@ -374,8 +376,8 @@ TOOLS: List[Dict[str, Any]] = [
                 "limit": {"type": "integer", "description": "Max results (1-50).", "default": 8},
                 "type": {"type": "string", "enum": sorted(db.VALID_TYPES)},
                 "project": {"type": "string", "description": "Scope to a project id."},
+                "session": {"type": "string", "description": "Scope to one session's records."},
                 "verified_only": {"type": "boolean"},
-                "min_confidence": {"type": "number"},
             },
             "required": ["query"],
         },

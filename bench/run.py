@@ -36,11 +36,13 @@ def probe_rows(conn, n):
     columns = [r[1] for r in conn.execute(
         "PRAGMA table_info(records)").fetchall()]
     extra = ", superseded_by" if "superseded_by" in columns else ""
+    extra += ", session_id" if "session_id" in columns else ""
     rows = [dict(r) for r in conn.execute(
         f"SELECT id, content, created_at, updated_at, confidence{extra}"
         " FROM records ORDER BY updated_at DESC LIMIT ?", (n,))]
     for r in rows:
         r.setdefault("superseded_by", "")
+        r.setdefault("session_id", "")
     return rows
 
 
@@ -132,6 +134,33 @@ def question_temporal(rows):
             break
         if len(cases) >= 6:
             break
+    return cases
+
+
+def question_multisession(rows):
+    """Session-scoped recall: records from two sessions share a topic;
+    query with the session filter must return only that session's record.
+
+    A multi-session memory (LongMemEval's session-hopping split) must be
+    able to answer "what did session X conclude" without surfacing the
+    same conclusion recorded elsewhere. The probe needs rows carrying a
+    session id; rows without one are skipped.
+    """
+    cases = []
+    by_session = {}
+    for r in rows:
+        sid = r.get("session_id") or ""
+        if sid:
+            by_session.setdefault(sid, []).append(r)
+    for sid, group in by_session.items():
+        if len(group) < 1:
+            continue
+        # the query comes from this session's record only; the recall
+        # filter is what must exclude the other sessions' records
+        r = group[0]
+        words = [w for w in sorted(_terms(r["content"])) if len(w) > 4][:5]
+        if len(words) >= 3:
+            cases.append(((" ".join(words)), sid, r["id"]))
     return cases
 
 
@@ -237,7 +266,7 @@ def run(conn, report):
 
     results = {"exact": [0, 0], "update": [0, 0], "temporal": [0, 0],
                "abstain": [0, 0], "join": [0, 0], "topical": [0, 0],
-               "supersede": [0, 0]}
+               "supersede": [0, 0], "multisession": [0, 0]}
 
     for q, expected in question_exact(rows):
         hits = db.recall(conn, q, limit=3)
@@ -256,6 +285,12 @@ def run(conn, report):
         results["temporal"][1] += 1
         if hits and hits[0]["id"] == expected:
             results["temporal"][0] += 1
+
+    for q, sid, expected in question_multisession(rows):
+        hits = db.recall(conn, q, limit=3, session_id=sid)
+        results["multisession"][1] += 1
+        if hits and hits[0]["id"] == expected:
+            results["multisession"][0] += 1
 
     for q, expected in question_supersede(rows):
         hits = db.recall(conn, q, limit=3)
@@ -284,7 +319,7 @@ def run(conn, report):
     print(f"corpus: {len(rows)} probe records")
     total_hit = total_n = 0
     for name in ("exact", "update", "temporal", "abstain", "join", "topical",
-                 "supersede"):
+                 "supersede", "multisession"):
         hit, n = results[name]
         total_hit += hit
         total_n += n
