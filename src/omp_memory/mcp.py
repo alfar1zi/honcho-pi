@@ -378,6 +378,7 @@ TOOLS: List[Dict[str, Any]] = [
                 "project": {"type": "string", "description": "Scope to a project id."},
                 "session": {"type": "string", "description": "Scope to one session's records."},
                 "verified_only": {"type": "boolean"},
+                "min_confidence": {"type": "number"},
             },
             "required": ["query"],
         },

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark harness: 4 question types against a live memory database.
+"""Benchmark harness: 8 question types against a live memory database.
 
 Read-only: the database is opened with sqlite3 mode=ro, so a benchmark run
 can never write a memory. Probes are derived from the records themselves
@@ -9,12 +9,20 @@ without a curated answer key.
 Question types (Lin et al. 2025 retrieval split, Mem0 update case):
   exact     content words -> expect that record at the top
   update    query for a superseded fact -> expect the newest spelling
-  temporal  query restricted to a time window -> expect a record from it
+  temporal  two records share topic vocabulary, >=7 days apart; the query
+            is the shared terms, expect the newer record: does recency
+            break the lexical tie?
   abstention  query for a topic with no record -> expect recall to abstain
   join      query spanning two records -> expect both in the top hits
   topical       query from record B's words -> record A (sharing B's topic
             vocabulary) must not surface: does recall discriminate
             neighbours, or does any shared token buy a hit?
+  supersede query for a superseded fact's original wording -> expect the
+            correction: does the supersede chain downrank the old row?
+  multisession query built from one session's record, scoped to that
+            session -> expect that record at top-1 even when another
+            session's record is the stronger unscoped match: is the
+            filter a real scope, not a rerank?
 """
 import argparse
 from datetime import datetime
@@ -153,12 +161,10 @@ def question_multisession(rows):
         if sid:
             by_session.setdefault(sid, []).append(r)
     for sid, group in by_session.items():
-        if len(group) < 1:
-            continue
         # the query comes from this session's record only; the recall
         # filter is what must exclude the other sessions' records
         r = group[0]
-        words = [w for w in sorted(_terms(r["content"])) if len(w) > 4][:5]
+        words = sorted(_terms(r["content"]))[:5]
         if len(words) >= 3:
             cases.append(((" ".join(words)), sid, r["id"]))
     return cases
