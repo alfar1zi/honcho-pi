@@ -311,3 +311,29 @@ def test_profile_context_is_isolated(conn):
     assert memory_db.get_profile_context(conn, "work") == {"key": "value"}
     assert memory_db.get_profile_context(conn, "other") is None
     memory_db.clear_profile()
+
+
+# --- Portability: a failing chmod must not abort a backup or a repair ------
+
+def test_backup_survives_chmod_failure(conn, db_path, monkeypatch):
+    """Windows chmod only toggles the read-only bit and can raise; a backup is still valid."""
+    monkeypatch.setattr(memory_db, "BACKUP_DIR", str(db_path.parent / "backups"))
+    memory_db.upsert_record(conn, "FACT", "portable lesson", session_id="s1")
+
+    def _boom(path, mode):
+        raise OSError("chmod not supported here")
+
+    monkeypatch.setattr(memory_db.os, "chmod", _boom)
+    bak = memory_db.backup_db(str(db_path))
+    assert bak and os.path.exists(bak), "a chmod failure aborted the backup"
+
+
+def test_restrict_to_owner_is_a_noop_when_chmod_fails(tmp_path, monkeypatch):
+    target = tmp_path / "probe.txt"
+    target.write_text("x", encoding="utf-8")
+
+    def _boom(path, mode):
+        raise NotImplementedError
+
+    monkeypatch.setattr(memory_db.os, "chmod", _boom)
+    memory_db._restrict_to_owner(str(target))

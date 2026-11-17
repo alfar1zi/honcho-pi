@@ -327,6 +327,11 @@ def test_context_no_match_prints_nothing(env):
 
 # --- shims keep working ---------------------------------------------------
 
+# The bin/ shims are bash scripts; they exist for POSIX installs only.
+on_posix = os.name == "posix"
+
+
+@pytest.mark.skipif(not on_posix, reason="bin/ shims are bash scripts")
 @pytest.mark.parametrize("shim,args", [
     ("health-check.sh", []),
     ("disk-check.sh", ["1"]),
@@ -338,6 +343,7 @@ def test_bin_shims_run(env, shim, args):
     assert r.returncode == 0, r.stderr
 
 
+@pytest.mark.skipif(not on_posix, reason="bin/ shims are bash scripts")
 def test_analyze_shim_dispatches(env):
     r = subprocess.run([str(REPO_ROOT / "bin" / "analyze-session.sh"), "stats"],
                        capture_output=True, text=True, env=env, timeout=60)
@@ -345,12 +351,14 @@ def test_analyze_shim_dispatches(env):
     assert "total" in r.stdout
 
 
+@pytest.mark.skipif(not on_posix, reason="bin/ shims are bash scripts")
 def test_analyze_shim_rejects_unknown_mode(env):
     r = subprocess.run([str(REPO_ROOT / "bin" / "analyze-session.sh"), "bogus"],
                        capture_output=True, text=True, env=env, timeout=60)
     assert r.returncode == 2
 
 
+@pytest.mark.skipif(not on_posix, reason="bin/ shims are bash scripts")
 def test_capture_shim_round_trip(env):
     r = subprocess.run(
         [str(REPO_ROOT / "bin" / "capture-session.sh"),

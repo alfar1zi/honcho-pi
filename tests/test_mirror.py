@@ -3,6 +3,7 @@ import hashlib
 import json
 import re
 import subprocess
+import os
 from pathlib import Path
 
 import pytest
@@ -159,7 +160,10 @@ def test_symlink_escape_is_rejected(conn, tmp_path):
     outside_target = tmp_path / "outside_target.txt"
     outside_target.write_text("escaped content", encoding="utf-8")
 
-    (out_dir / "fact.md").symlink_to(outside_target)
+    try:
+        (out_dir / "fact.md").symlink_to(outside_target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable: Windows needs Developer Mode or admin rights")
     memory_db.remember(conn, rtype="FACT", content="Should fail due to escape.", confidence=0.9, verified=1)
 
     with pytest.raises(ValueError):

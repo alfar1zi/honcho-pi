@@ -33,6 +33,16 @@ BACKUP_DIR = os.environ.get("OMP_MEMORY_BACKUP_DIR", str(Path.home() / ".omp/mem
 MAX_BACKUPS = int(os.environ.get("OMP_MEMORY_MAX_BACKUPS", "10"))
 BUSY_TIMEOUT_MS = int(os.environ.get("OMP_MEMORY_BUSY_TIMEOUT_MS", "30000"))
 
+
+def _restrict_to_owner(path: str) -> None:
+    """Best-effort 0600. POSIX honours it; Windows has no such mode bits and chmod only touches
+    the read-only flag, so a failure or a no-op there must not abort a backup or a repair."""
+    try:
+        os.chmod(path, 0o600)
+    except (OSError, NotImplementedError):
+        pass
+
+
 VALID_TYPES = {"FACT", "ASSUMPTION", "INFERENCE", "DECISION", "RULE", "CORRECTION"}
 VALID_SIGNALS = {"success", "failure", "correction", "reinforce", "decay"}
 SIGNAL_DELTAS = {
@@ -248,7 +258,7 @@ def backup_db(src: str) -> str:
                 conn.execute("VACUUM INTO ?", (dst,))
             finally:
                 conn.close()
-            os.chmod(dst, 0o600)
+            _restrict_to_owner(dst)
             rotate_backups()
             return dst
         except sqlite3.Error:
@@ -286,7 +296,7 @@ def repair_from_backup(db_path: str = DB_PATH) -> bool:
                 src.close()
             if not usable:
                 continue
-            os.chmod(tmp, 0o600)
+            _restrict_to_owner(tmp)
             os.replace(tmp, db_path)
             for ext in ("-wal", "-shm"):
                 stale = db_path + ext
@@ -1359,6 +1369,8 @@ def _git_run(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except subprocess.CalledProcessError as exc:
         err = exc.stderr.strip() if exc.stderr else exc.stdout.strip()
@@ -1493,6 +1505,8 @@ def sync_mirror(out_dir, message: str = None, init: bool = False) -> dict:
         cwd=out_path,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if proc_top.returncode == 0:
         top_level = Path(proc_top.stdout.strip()).resolve()

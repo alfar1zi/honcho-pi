@@ -7,7 +7,7 @@ name = "omp-memory"
 version = "0.2.0"
 description = "Local-first SQLite memory for coding agents: capture, search, reinforce, recap."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { file = "LICENSE.md" }
 authors = [{ name = "alfar1zi", email = "f.alfarizii10@gmail.com" }]
 keywords = ["agent", "memory", "sqlite", "fts5", "llm", "context", "opencode", "claude-code"]
