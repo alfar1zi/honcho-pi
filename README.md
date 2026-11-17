@@ -373,7 +373,8 @@ integrity.
   accuracy beyond the ordering rules above.
 - **Rerank is unproven against the baseline.** Every arm of group B in `bench/RESULTS.md` scores 1.0, so that dataset
   cannot separate reranking variants. The numbers show no regression and sub-millisecond latency, nothing more.
-- **pytest runs on Python 3.12 only.** On 3.10 and 3.13 the evidence is `py_compile`, an import, and harness output.
+- **No coverage number is reported.** The suite asserts behaviour; it does not measure line coverage, and no
+  accuracy claim rests on it.
 - **The mirror never pushes, and has no CLI.** `sync_mirror` makes a local commit and stops there.
 - **`capture` uses the old identity rule.** Two projects that record the same lesson get two rows, so dedup does not
   cross project boundaries.
