@@ -1,474 +1,386 @@
-# honcho — persistent, self-correcting memory for MCP agents
+# honcho-pi
 
-[![test](https://github.com/alfar1zi/honcho-pi/actions/workflows/test.yml/badge.svg)](https://github.com/alfar1zi/honcho-pi/actions/workflows/test.yml)
+Local memory for coding agents: one SQLite file that stores what worked, so the next session starts where the last
+one stopped.
 
-Memory that an agent **queries and updates**, not a Markdown file that grows and is never read.
+```bash
+npx skills add alfar1zi/honcho-pi
+```
 
-| Layer | File | Role |
-|---|---|---|
-| Storage | `memory_db.py` | SQLite + FTS5, quarantine-based recovery, decay |
-| **Runtime** | `honcho_mcp.py` | **MCP server** — the layer that makes memory actually get used |
-| Import | `migrate_md.py` | One-shot import of legacy Markdown memory |
-| Reclaim | `reclaim.py` | Move memory files into SQLite, then archive them |
-| Budget | `budget.py` | Measure what actually consumes the context window |
-| Guard | `guard.py` | Compact oversized memory files on a schedule |
-| **Setup** | `agent_registry.py` + `agent_config.py` + `setup.py` | **Multi-agent install** — one data registry, every MCP client |
+That command installs honcho-pi as an agent skill. There is no server, no API key, and no embedding model. The
+database is one file you can copy with `cp`.
 
-Without `honcho_mcp.py` the database is inert. A storage layer answers *where*
-memories live; it does not make an agent use them. The MCP server closes that
-gap — the agent gets `recall`, `remember` and `reinforce` as real tools in every
-session.
+## What it does
 
-## Works with any MCP client
+An agent finishes a task and stores the lesson:
 
-The server speaks plain MCP over stdio (and Streamable HTTP), so it is not tied
-to one harness: Claude Code, Codex, OpenCode, Cursor, omp/pi, and anything else
-that can launch a stdio server.
+```python
+m.remember(conn, "FACT", "Install dependencies with uv, not pip", verified=1, source="s1")
+# {"id": "7b087cacbcd14536", "applied": "inserted", "action": "create", "reason": "novel", ...}
+```
 
-It serves **both protocol eras** — `server/discover` for the 2026-07-28 revision
-(per-request `_meta`) and the classic `initialize` handshake for everything
-older. A server supporting only one era is invisible to half the ecosystem.
+A later session writes the same lesson with different casing and a new source:
 
-Data lives in `~/.honcho` by default. Set `HONCHO_HOME` to put it anywhere.
+```python
+m.remember(conn, "FACT", "install dependencies with UV, not pip", source="s2")
+# same id, "applied": "updated", "reason": "identical", source becomes "s1,s2"
+```
 
----
+When a new turn needs context, recall ranks the stored rows and returns the best ones:
 
-## What makes it "learning" and not just storage
+```python
+m.recall(conn, "install dependencies", limit=2)
+# [{"id": "7b087cacbcd14536", "type": "FACT", "confidence": 0.5, "verified": 1,
+#   "score": 0.81875, "heat": 0.475, "snippet": "install dependencies with UV, not pip"}]
+```
 
-1. **Recall before work.** The agent searches memory with keywords from the task.
-2. **Honest typing.** `FACT` only when verified; `INFERENCE`/`ASSUMPTION`
-   otherwise. A guess must not enter the store wearing a fact's weight.
-3. **Reinforcement.** After reality tests a memory, `success`/`failure`/
-   `correction` moves its confidence.
-4. **Decay.** Unverified records drift toward a 0.15 floor on a 30-day
-   half-life. Stale claims lose to verified ones instead of competing forever.
-5. **Ranking by relevance first.** bm25 weighted 0.85, confidence 0.15. A
-   well-reinforced but irrelevant memory cannot bulldoze the real hit.
+All three calls ran against an empty temporary database, and the output above is what they printed.
 
----
+## Contents
+
+- [What it does](#what-it-does)
+- [Why it exists](#why-it-exists)
+- [Install](#install)
+- [CLI](#cli)
+- [How it works](#how-it-works)
+- [Recall](#recall)
+- [Mirror](#mirror)
+- [Reliability](#reliability)
+- [Configuration](#configuration)
+- [Agent integration](#agent-integration)
+- [MCP server](#mcp-server)
+- [Development](#development)
+- [Limits](#limits)
+- [License](#license)
+
+## Why it exists
+
+An agent forgets every lesson at session end. It re-learns the same build command and repeats the same wrong
+assumption next week. Three failures follow from that:
+
+1. **Memory that lies.** A note written once and never re-checked becomes confidently wrong. Each record tracks
+   `verified`, `confidence`, and an append-only signal log, so a lesson that fails loses ground instead of hardening.
+2. **Memory that vanishes.** Compression and context resets erase recent lessons. Capture commits the DB row first,
+   then appends a line to a JSONL file. Checkpoint and restore move a session payload through a compression.
+3. **Memory that corrupts.** A raw copy of a live database can capture a half-written state. Some repair tools delete
+   the file when it fails to open. honcho-pi snapshots with `VACUUM INTO` and never deletes a database it cannot open.
 
 ## Install
+
+Requires Python 3.10+ with the standard `sqlite3` module.
+
+```bash
+# as an agent skill
+npx skills add alfar1zi/honcho-pi
+
+# or as a python package
+pip install git+https://github.com/alfar1zi/honcho-pi
+```
+
+### Quick setup
+
+One command, no clone, no `cd`. `pipx` installs the CLI into its own environment, so it works the same on Linux,
+macOS, and Windows and never trips the "externally managed environment" block that plain `pip` hits on Debian and
+Ubuntu. The database defaults to `~/.omp/memory/memory.db`; set `OMP_MEMORY_DB` to move it.
+
+```bash
+pipx install "git+https://github.com/alfar1zi/honcho-pi"
+pipx ensurepath    # only if the shell cannot find `omp-memory` afterwards; reopen the shell
+```
+
+No `pipx`? Install it first (`apt install pipx`, `brew install pipx`, or the `pip install --user pipx` line for
+your interpreter), or fall back to a venv. Use `python3` on Linux, `python` on macOS and Windows:
+
+```bash
+python3 -m venv ~/.local/venvs/omp-memory
+~/.local/venvs/omp-memory/bin/python -m pip install "git+https://github.com/alfar1zi/honcho-pi"
+```
+
+Verify either install:
+
+```bash
+omp-memory health                          # pipx install
+~/.local/venvs/omp-memory/bin/omp-memory health   # venv install
+```
+
+The `omp-memory` console script and `python -m omp_memory` call the same `main()`. On Windows the venv path ends in
+`\Scripts\python.exe` instead of `bin/python`. The `bin/*` scripts and `install.sh` are bash shims for POSIX
+installs only.
+
+Paste this block into an agent to make it use the memory:
+
+```text
+You have a local memory CLI. Use it without being asked.
+- `omp-memory` is on PATH after a pipx install; `python -m omp_memory` is the same program if the shim is missing.
+- Before a non-trivial task: `omp-memory search "<keywords>"`, and `recap --session <id>` when you have one.
+- When a task ends: `omp-memory capture --task ... --outcome ... --evidence ...`. Add `--verified` only if you
+  observed the result, not if you assumed it.
+- When reality confirms or contradicts a record: `omp-memory reinforce <record_id> success|failure|correction`.
+- `omp-memory context "<keywords>"` prints a fenced block you can drop into the prompt.
+- Never capture secrets, credentials, or personal data. The CLI refuses secret-looking input; do not pass
+  `--allow-secrets` unless the operator explicitly asks.
+```
+
+To install by hand into `~/.omp/memory`:
 
 ```bash
 git clone https://github.com/alfar1zi/honcho-pi
 cd honcho-pi
-python3 setup.py detect                 # what is on PATH, and how far honcho can go
-python3 setup.py install --agent claude # write the entry (add --dry-run to preview)
+bash install.sh
+source ~/.omp/memory/env.sh
+omp-memory health
 ```
 
-No dependency, no `pip install`, Python 3.10–3.13.
+`install.sh` generates `env.sh` on the first run, so that file does not exist in the repo. Re-running the installer
+replaces the code and the `bin/` shims. Your database, backups, capture logs, and audit log stay untouched.
+`--dry-run` shows what would change.
 
-### 45 agents, one data table
-
-`agent_registry.py` holds every agent as a row — binary, aliases, extra
-requirements, runtime exclusions, config path, config format and MCP style —
-instead of a branch per agent in an installer. Detection fields are seeded
-from [stablyai/orca](https://github.com/stablyai/orca) (MIT) for
-binary/detection fields; config fields were researched per agent from vendor
-documentation. Adding an agent is a one-line change and every command learns
-about it at once: `setup.py` has no agent-specific code.
-
-Each agent gets an integration level:
-
-| Level | Meaning | What `install` does |
-|---|---|---|
-| `full` | path and shape both verified | merges the entry into the file |
-| `print-only` | shape unknown, path unknown, or the vendor CLI owns the file | prints a pasteable snippet, writes nothing |
-| `none` | the agent has no MCP support | says so |
-
-```
-$ python3 setup.py detect
-runtime : linux  (Linux-...-x86_64-with-glibc2.39)
-registry: 45 agents  (Seeded from stablyai/orca (MIT) for binary/detection fields)
-levels  : full=21, none=1, print-only=23
-
-agent               binary   style            level       note
-------------------  -------  ---------------  ----------  -----------------------------------------
-claude              claude   json-mcpServers  full
-copilot             copilot  json-mcpServers  full
-hermes              hermes   yaml             full
-claude-agent-teams  orca     unknown          print-only  MCP config location/shape unverified -...
-omp                 omp      unknown          print-only  MCP config location/shape unverified -...
-
-5 installed agent(s) detected, 3 writable automatically.
-```
-
-The `agent` rows are whatever is on *your* PATH; the counts on the `levels`
-line are the registry's and do not depend on what is installed.
-
-`python3 setup.py status` prints a table of all 45: agent, installed?,
-level, configured?, config path. `python3 setup.py print --agent ID` prints a
-complete minimal file (or CLI command) for any agent, including the ones honcho
-deliberately does not write — useful when you want to add the server to a
-project config or inspect the shape.
-
-### Shapes are per-agent, not "the JSON one"
-
-Writing the same `{"command", "args", "env"}` block everywhere breaks most
-clients. The writers follow each vendor's documented shape. The differences
-that actually matter:
-
-| Agent | Where the server goes | Trap |
-|---|---|---|
-| Claude, Cursor, Gemini, Copilot, Cline, Antigravity, … | `mcpServers.<name>` | Cline disables with `disabled: true`, Antigravity too |
-| Codex | `[mcp_servers.<name>]` in TOML | `env` must be the child table `[mcp_servers.<name>.env]` |
-| opencode v1, Kilo | `mcp.<name>` | `command` is an **array** (no `args`), env is `environment`, needs `type: "local"` |
-| zcode | `mcp.servers.<name>` | two levels deep; the switch is `enable: false` |
-| muse | `mcp_servers.<name>` | file must carry `"schema_version": 1` or every command fails |
-| amp | the literal dotted key `"amp.mcpServers"` | not a nested `amp` object |
-| openclaw | `mcp` root key | layout beyond the root key is inferred, so snippet only |
-| hermes | `mcp_servers.<name>` in YAML | — |
-| goose | `extensions.<name>` in YAML | fields are `cmd` / `envs`; goose's config also holds providers, so it is **print-only** |
-| crush | no file | `crush mcp add …`, printed for you to run |
-
-`opencode` is written in the v1 schema only. If `opencode --version` reports
-v2, `install` says so: v2 moved servers to `mcp.servers` and flipped the switch
-to `disabled: true`, and silently writing v1 would make the server vanish.
-
-### What install guarantees
-
-- **Merges, never replaces.** Only the server object is added. Your other
-  servers, keys, TOML tables and YAML comments stay.
-- **Comments survive.** A JSONC file (kilo, opencode `.jsonc`) with `//` or
-  `/* */` comments is edited *in its own text* — the entry is spliced in, not
-  reserialised, so comments and formatting stay. If the container key is
-  missing there is no comment-safe insertion point, so the write is refused
-  and a snippet is printed instead.
-- **Symlinks are followed, not replaced.** Dotfile managers (stow, chezmoi,
-  Nix home-manager) link configs into a repo. honcho resolves the link and
-  writes to the target; the link stays a link. A dangling link is refused.
-- **Only a missing file is created.** A file that exists but is empty,
-  whitespace-only or unparseable is refused and left byte-for-byte untouched.
-  honcho never "repairs" a file it cannot read.
-- **Backup before writing.** `<file>.honcho-backup-<timestamp>`, mode `0600`,
-  containing the original bytes. At most 10 are kept per config; older ones
-  are pruned so the directory cannot fill up.
-- **Atomic.** Temp file in the same directory, `fsync`, original permissions,
-  `os.replace`. A crash leaves the old file or the new one.
-- **Idempotent.** An identical entry reports `already configured` and the file
-  is not touched. A *different* entry under the same name is a conflict, not
-  overwritten: that entry is yours until you remove it. `--name` registers
-  under a different name instead, and `status`/`detect` look for that name.
-- **One writer at a time.** Each write takes an exclusive advisory lock, held
-  on a lock *directory* `<file>.lock/` (a plain lock file cannot be deleted
-  safely: unlinking it lets a waiter and a newcomer both hold "the lock").
-  The directory is removed on release, so nothing is left behind. The file is
-  re-read under the lock before writing; if it changed in the meantime the
-  write is refused rather than clobbering the newer content.
-- **Read-only configs are left alone.** Write permission is checked under the
-  lock, immediately before the write, so a file revoked mid-run is not
-  rewritten through its directory.
-- **One agent cannot break the rest.** An unexpected error is caught per
-  agent and reported as that agent's failure, so `install --all` completes.
-- **Dry run touches nothing.** `--dry-run` computes and verifies the merged
-  document, then prints a diff and stops.
-- **Env overrides honoured.** `CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
-  `COPILOT_HOME`, `HERMES_HOME`, `DSH_HOME`, `GEMINI_CLI_HOME`,
-  `CLINE_MCP_SETTINGS_PATH`, `XDG_CONFIG_HOME`.
-
-Parsing uses honcho's own parsers: JSON with comments (comment stripping and
-the splice both respect string literals and escapes), `tomllib` on 3.11+ with a
-subset parser on 3.10, and a YAML block-mapping/block-sequence parser for the
-goose/hermes/dsh/vibe subset. YAML outside that subset — anchors, block
-scalars, flow mappings — is refused rather than rewritten.
-
-### Which agents are written, and which only get a snippet
-
-Verified location and shape, so `install` writes the file (21):
-
-```
-claude  qoder  gemini  antigravity  amp  kiro  aug  cline  cursor  droid
-kimi  qwen-code  copilot  devin          (mcpServers / amp.mcpServers)
-codex                                    (TOML [mcp_servers.<name>])
-opencode  kilo                           (mcp.<name>, command array)
-zcode  muse                              (mcp.servers / mcp_servers)
-hermes                                   (YAML mcp_servers, text-merged)
-dsh                                      (YAML plugins: sequence, id mcp-honcho)
-```
-
-`install` prints a snippet and writes nothing (23):
-
-| Reason | Agents |
-|---|---|
-| MCP location unverified — sources conflict or no documented user path | `grok`, `pi`, `continue`, `codebuddy`, `qoder-cn`, `opencode2`, `openclaude`, `autohand`, `ante`, `trae`, `mimo-code`, `omp`, `prime-agent`, `freebuff`, `codebuff`, `command-code`, `mistral-vibe`, `rovo`, `jcode`, `claude-agent-teams` |
-| Root key evidenced, server-object layout inferred | `openclaw` |
-| Config is owned by the vendor CLI (also holds providers/model) | `goose` |
-| No stable config file; a CLI subcommand adds the server | `crush` (`crush mcp add honcho …`) |
-
-`aider` has no MCP support at all.
-
-Two cases are worth stating plainly:
-
-- **`grok` is unverified, not missing.** `docs.x.ai` describes a TOML file and
-  `agentsync` a JSON one, referring to different CLIs. Ignoring that would mean
-  writing into a file the agent never reads.
-- **`claude-agent-teams` is not a separate agent.** It is the
-  `orca claude-teams` launch mode, detected through the `orca` binary plus a
-  required `claude`.
-
-### How the safety claims are checked
-
-Destructive bugs in an installer are not caught by reading the code, so each
-guarantee above has a test that fails when the behaviour is removed, verified
-by mutation (delete the symlink resolution, the comment splice, or the
-empty-file refusal, and the matching test goes red). The explicit scenarios:
-
-| Scenario | Expected, and tested |
-|---|---|
-| config is a symlink into a dotfiles repo | link stays a link, repo target updated |
-| JSONC with `//` and `/* */` | every comment still present after install |
-| 5 bytes of whitespace | refused, file byte-identical |
-| valid config holding other servers | every other server and key intact, backup = original bytes |
-| garbage text | refused, file byte-identical |
-| leftover temp files after a write | none; mode preserved |
-| `--dry-run` | no file created or modified |
-| conflict with an existing `honcho` entry | refused, file unchanged |
-
-`install.sh` is still there for copying the runtime files to another directory
-(`./install.sh --dir DIR`); it is no longer how config gets registered.
-
-Then import memory that already exists as Markdown:
+## CLI
 
 ```bash
-python3 migrate_md.py <file.md> --db ~/.honcho/memory.db --project myproject
-python3 reclaim.py --all --dry-run    # preview what moves
-python3 reclaim.py --all              # import, verify, archive
+omp-memory capture --task "fix WAL corruption" --outcome "set busy_timeout" --verified
+omp-memory search "wal corruption" --json
+omp-memory recap --session sess-20261029T101500Z
+omp-memory context "sqlite backup"
+omp-memory reinforce <record_id> success        # success, failure, correction, reinforce, decay
+omp-memory promote --threshold 0.85             # copies verified rows at that confidence into RULE
+omp-memory checkpoint --session sess-20261029T101500Z
+omp-memory restore <checkpoint_id>
 ```
 
-Restart the client. The agent gains `recall`, `remember`, `reinforce`, `forget`
-and `stats`.
+More subcommands: `analyze`, `health`, `stats`, `backup`, `repair`, `disk`, `scan`. Pass `--json` to `search`,
+`recap`, `health`, or `disk` for machine-readable output.
 
----
+`capture` joins `--task` and `--outcome` into one line of the form `task -> outcome`. It scans that line and
+`--evidence` for secrets before it stores anything, and `--allow-secrets` turns that scan off.
 
-## Self-hosted, many users (HTTP)
+## How it works
 
-One process, one token per user, one database per user.
+```
+capture -> sessions + records -> records_fts (FTS5, trigger-synced)
+      |             |
+      |             +-> reinforcement (append-only signal log)
+      +-> sessions/*.jsonl (append-only)
+
+records -> checkpoint payload (JSON) -> restore after compression
+records -> export_markdown -> sync_mirror (git commit, never push)
+```
+
+Each **record** stores a `type` (FACT, ASSUMPTION, INFERENCE, DECISION, RULE, CORRECTION) plus `evidence`,
+`verified`, `confidence`, `source`, `tags`, `session_id`, `project_id`, `project_ids`, `parent_id`, and
+`last_decay_at`.
+
+The library and the CLI decide "same record" in different ways, and both paths ship on purpose:
+
+| | `remember()` (library) | `upsert_record()` (CLI) |
+|---|---|---|
+| Identity | the normalised text alone: NFKC, whitespace collapsed, casefolded | type, content, source, and project |
+| Provenance | `source` and `project_ids` merge into `s1,s2` style lists | a second source writes a second row |
+| Used by | the Python API | `omp-memory capture` |
+| Auto-merge | identical text, or `upsert=True` with 0.85 similarity | exact match on all four key fields |
+
+**Similarity** compares two texts by the words they share (Jaccard). A score of 0.50 or more only gets reported.
+An automatic merge needs 0.85 plus identical numbers, because measured paraphrases land at 0.40 to 0.64 and
+adversarial near-misses reach 0.82.
+
+**Heat** is one number between 0 and 1 that ranks a record for recall. It combines `confidence` (0.45), recency
+(0.25), and past success signals (0.30), and recency halves every 30 days. Without a success signal, heat tops out at
+0.70.
+
+**Promotion** (`promote_hot`) turns a hot INFERENCE or ASSUMPTION into a FACT. It needs heat of 0.80 or more and
+success signals from two different sources. It never changes `verified`.
+
+**Forgetting** (`forget_cold`) runs as a dry run unless you pass `apply=True`. A record qualifies only if it is
+unverified, not a RULE or CORRECTION, at or below confidence 0.16, older than 180 days, and untouched for 365 days.
+Applying writes a graveyard row before the delete.
+
+**Decay** (`apply_decay`) pulls stale confidence down toward 0.15, halving every 30 days. It anchors on the last decay
+time, so calling it twice at the same moment changes nothing.
+
+**Search** (`records_fts`) is a SQLite FTS5 index kept in sync by triggers. Every query term is quoted before it
+reaches FTS5, so a query containing `"`, `*`, `-`, or `NEAR(` is searched as text.
+
+**Profiles** keep separate memories under one database, keyed by `(profile, key)`. **Sessions** link to their
+predecessor through `parent_id`, so a recap can walk back across a compression.
+
+## Recall
+
+`recall()` scores at least 20 candidates (or `limit * 4` when that is larger, or `pool`) and returns the top `limit`:
+
+```
+score = 0.60 * lexical + 0.10 * confidence + 0.25 * heat + 0.05 * type_prior
+```
+
+`lexical` measures how well the text matched the query (normalised BM25 rank), and `type_prior` is a fixed bonus by
+type: 1.0 for RULE and FACT, 0.85 CORRECTION, 0.60 DECISION, 0.35 ASSUMPTION, 0.25 INFERENCE. When two scores tie,
+verified rows come first, then higher confidence, then newer `updated_at`, then `id`.
+
+The default result is compact: `{id, type, confidence, verified, score, heat, snippet}`, where `snippet` is one line
+of at most 120 characters cut with `...`. Pass `full=True` to swap `snippet` for `content` and `evidence`, and to add
+`lexical`, `type_prior`, `age_days`, and `successes`.
+
+```python
+import omp_memory as m
+
+conn = m.connect()
+m.init_db(conn)
+
+out = m.remember(conn, "FACT", "Install dependencies with uv, not pip", verified=1, source="s1")
+print(out["id"], out["applied"])            # 7b087cacbcd14536 inserted
+
+again = m.remember(conn, "FACT", "install dependencies with UV, not pip", source="s2")
+print(again["id"] == out["id"], again["applied"])   # True updated
+print(m.get_record(conn, out["id"])["source"])      # s1,s2
+print(m.get_record(conn, out["id"])["confidence"])  # 0.5
+
+for hit in m.recall(conn, "install dependencies", limit=2):
+    print(hit["score"], hit["snippet"])
+# 0.81875 install dependencies with UV, not pip
+
+for hit in m.recall(conn, "install dependencies", limit=2, full=True):
+    print(hit["type_prior"], hit["successes"])   # 1.0 0
+```
+
+The printed output comes from a fresh `.rlcheck/db.sqlite` created for this check. Note that `confidence` stayed at
+0.5: the merge takes the confidence of the last write, and the second call passed none.
+
+## Mirror
+
+Two functions turn the database into Markdown and commit that directory to a git repository. Neither has a CLI
+subcommand.
+
+`export_markdown(conn, out_dir, types=None)` writes `INDEX.md` and one `<type>.md` per record type. It records a
+sha256 for each file in `.honcho-mirror.json` and returns `{written, removed, unchanged, out_dir}`.
+
+The output holds no timestamps. A second export therefore produces identical bytes and reports nothing written.
+Missing `out_dir` is an error, because the function does not create directories. A symlink that points outside
+`out_dir` is an error too. Each run deletes only files listed in the previous manifest, so your own notes in that
+directory survive.
+
+`sync_mirror(out_dir, message=None, init=False)` stages exactly the manifest files and commits when the staged tree is
+dirty. It returns `{committed, sha, files}` or `{committed: False, reason: "clean"}`. It refuses a directory that is
+not a git repository unless you pass `init=True`. It refuses when the repository root is not `out_dir`, when this
+package sits inside `out_dir`, when the manifest is missing, and when a manifest path resolves outside `out_dir`.
+
+```python
+m.export_markdown(conn, "/path/to/mirror")
+m.sync_mirror("/path/to/mirror", message="chore(memory): nightly export")
+```
+
+It commits locally and stops. It never pushes.
+
+## Reliability
+
+| Concern | Behaviour |
+|---|---|
+| Concurrent writers | WAL journal mode; lock wait from `OMP_MEMORY_BUSY_TIMEOUT_MS` (default 30 s) |
+| Backup | `VACUUM INTO` snapshot with mode 0600, rotated to `OMP_MEMORY_MAX_BACKUPS` |
+| Corrupt database | `quick_check`, then `integrity_check`; a failure raises and leaves the file in place |
+| Repair | newest backup that passes `quick_check`, copied over the target file |
+| Capture durability | the DB write commits first, then the JSONL line is appended |
+| Secret leakage | capture scans task, outcome, and evidence before storing; `--allow-secrets` opts out |
+| Disk exhaustion | capture refuses below `--min-free-mb` (default 100) |
+
+## Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OMP_MEMORY_DB` | `~/.omp/memory/memory.db` | database file, read at import |
+| `OMP_MEMORY_BACKUP_DIR` | `~/.omp/memory/backups` | snapshot directory, read at import |
+| `OMP_MEMORY_MAX_BACKUPS` | `10` | snapshots kept, read at import |
+| `OMP_MEMORY_BUSY_TIMEOUT_MS` | `30000` | SQLite lock wait, read at import |
+| `OMP_MEMORY_HOME` | `~/.omp/memory` | install target for `install.sh`, exported in `env.sh` |
+
+## Agent integration
+
+`MemoryProvider` is an abstract base class. A subclass must define `name`, `is_available`, and `initialize`:
+
+```python
+from omp_memory import MemoryProvider, build_memory_context_block, sanitize_context
+
+class MyMemory(MemoryProvider):
+    @property
+    def name(self) -> str:
+        return "honcho-pi"
+
+    def is_available(self) -> bool:
+        return True
+
+    def initialize(self, session_id: str, **kwargs) -> None:
+        self.session_id = session_id
+
+    def prefetch(self, query: str, *, session_id: str = "") -> str:
+        # wrap your recall results with build_memory_context_block(...)
+        return ""
+```
+
+`build_memory_context_block` wraps recalled text in a `<memory-context>` fence with a system note.
+`sanitize_context` and `StreamingContextScrubber` remove that fence from anything that leaves the agent, including a
+fence split across streaming deltas.
+
+## MCP server
+
+`MemoryProvider` needs code inside the agent. For any agent that speaks Model Context Protocol, run the server
+instead; it is one process per session over stdio, and it exposes the same five operations as tools.
 
 ```bash
-HONCHO_HOME=/srv/honcho \
-HONCHO_TRANSPORT=http \
-HONCHO_HOST=0.0.0.0 \
-HONCHO_PORT=8765 \
-HONCHO_TOKENS="alice=$(openssl rand -hex 24),bob=$(openssl rand -hex 24)" \
-python3 honcho_mcp.py
+omp-memory-mcp                                  # stdio, MCP default
+python3 -m omp_memory.mcp                       # same, without the console script
+HONCHO_TRANSPORT=http HONCHO_PORT=8765 \
+  HONCHO_TOKENS=t1,t2 omp-memory-mcp            # self-hosted, one database per token
 ```
-
-**Isolation is structural.** Each bearer token hashes to its own directory:
-
-```
-/srv/honcho/users/<sha256(token)[:16]>/memory.db
-```
-
-Two tokens never share a database — verified by writing as one and recalling as
-the other.
-
-**Auth is not optional when public.** The server refuses to bind a non-loopback
-address with an empty `HONCHO_TOKENS`.
-
-Client config from any machine:
 
 ```json
 {
   "mcpServers": {
     "mem": {
-      "type": "http",
-      "url": "https://honcho.example.com/",
-      "headers": { "Authorization": "Bearer <token>" }
+      "command": "omp-memory-mcp",
+      "env": {"OMP_MEMORY_DB": "/home/me/.local/share/omp-memory/memory.db"}
     }
   }
 }
 ```
 
-`GET /health` returns `{"ok": true, ...}` for load balancers. Terminate TLS at
-nginx or Caddy; the server speaks plain HTTP on purpose. Do not expose the port
-directly.
+| Tool | What it does |
+| --- | --- |
+| `recall` | Ranked search before acting: lexical match, confidence, heat, type prior. |
+| `remember` | Persist a fact, decision or correction; reports `inserted` vs `updated`. |
+| `reinforce` | `success`, `failure`, `correction`, `reinforce` or `decay` after observing reality. |
+| `forget` | Delete a wrong record, after writing it to `forgotten_graveyard`. |
+| `stats` | Counts by type, plus verified totals. |
 
----
+`remember` refuses content that matches a known secret pattern (API keys, bearer tokens, private keys) rather than
+storing it. `recall` accepts `type`, `project`, `verified_only` and `min_confidence`; the filtered path uses plain
+`search()` ranking, everything else goes through the `recall()` reranker.
 
-## Tools
+Environment: `OMP_MEMORY_DB` (exact path, wins over everything), `HONCHO_HOME` (data root), `HONCHO_MAX_RECALL`
+(default 8), `HONCHO_EXTRA_TOOLS` (directories of optional `local_*`/`adapter_*` tool modules).
 
-| Tool | Purpose | Key arguments |
-|---|---|---|
-| `recall` | Search memory before acting | `query`, `limit`, `type`, `project`, `verified_only`, `min_confidence` |
-| `remember` | Persist something durable | `content`, `type`, `evidence`, `verified`, `confidence`, `tags`, `project` |
-| `reinforce` | Calibrate after reality | `id`, `signal` (`success`/`failure`/`correction`/`decay`) |
-| `forget` | Delete a provably wrong record | `id` |
-| `stats` | Counts by type | — |
-
-Record types: `FACT`, `ASSUMPTION`, `INFERENCE`, `DECISION`, `RULE`, `CORRECTION`.
-
----
-
-## Reliability guarantees
-
-**The database is never deleted.** A corrupt file is quarantined to
-`memory.db.corrupt.<timestamp>` (**preserved**, not unlinked), then the newest
-backup that passes `integrity_check` is restored. Only if no backup is usable
-does a fresh database start at the same path — the damaged file still exists
-for forensics.
-
-**FTS cannot desync.** `records_fts` is maintained by `AFTER INSERT/UPDATE/
-DELETE` triggers on `records`, so no writer can leave the index stale.
-`rebuild_fts()` repairs databases created before those triggers existed.
-
-**Backups rotate** (10 max, mode 0600) and are written through the SQLite
-backup API, not `cp`, so a snapshot is consistent even while the database is in
-use.
-
-**No secrets.** `remember` refuses content matching API-key, bearer-token or
-private-key shapes. An agent that stores a secret has written it into a file it
-will later quote back into a prompt.
-
----
-
-## Tests
-
-Runs on Python 3.10–3.13 via GitHub Actions on every push and pull request.
-Both suites run on every version; no pytest, no network, no third-party
-packages. Everything that touches a config file uses a temp `HOME`, so a test
-run never reads or writes the real one.
+## Development
 
 ```bash
-python3 test_honcho.py -v    # memory storage + MCP protocol   (16)
-python3 test_agents.py -v    # multi-agent registry + writers   (54)
+python -m pytest          # 176 tests, no network, no shared state
+bash bin/clean-code.sh    # secrets, eval, markers, em dashes, line length
+python bench/verify.py    # PASS/FAIL over the benchmark harness
 ```
 
-`test_honcho.py` — each test corresponds to a defect that reached usage:
+Tests use a temporary database per test. `bench/RESULTS.md` reports dedup, retrieval, token payload, staleness, and
+integrity.
 
-```
-storage     ranking with uniform confidence, hostile FTS queries, dedup,
-            index sync under direct SQL, reinforce clamping, decay exemptions
-recovery    corrupted database quarantined and restored with no rows lost
-mcp         handshake, tool cycle, secret refusal, cross-process persistence,
-            both protocol eras, harness-neutral default path
-migration   importing the same Markdown twice inserts zero rows
-```
+## Limits
 
-`test_agents.py` — each test proves one claim made above:
-
-```
-registry    45 agents, unique ids, resolve by id/alias/binary, required_cmds,
-            unsupported runtimes (win32/wsl), levels derived not guessed,
-            printed-only reasons agree with what install() does
-parsers     JSONC stripped without touching string literals; TOML subset
-            parser vs tomllib on the same input; YAML subset round-trip
-            including block sequences, nested plugin items, block scalars,
-            unindented lists and next-line `[]`; each parser refuses
-            constructs it cannot represent
-writers     one test per shape family (mcpServers, opencode/kilo array
-            command, amp dotted key, muse schema_version, zcode nesting +
-            legacy lift, codex TOML child env table, hermes YAML)
-safety      user servers/keys/tables/comments preserved; dsh plugins written
-            or refused, never crashing; --name honoured by every writer;
-            _verify is load-bearing; is_configured distinguishes "no" from
-            "unreadable"; 4 parallel processes keep every edit; no lock left
-            behind after success, failure or dry run; backups capped at 10
-            over 15 writes; read-only files untouched; BOM preserved;
-            symlink followed,
-            not replaced (and a dangling link refused); JSONC comments
-            survive the write; whitespace-only and unparsable files refused
-            and byte-identical; backup equals the original bytes; dry run
-            writes nothing; mode preserved, no temp files left behind;
-            conflicting entry refused; env overrides honoured
-cli         detect/status/print/install --dry-run/install against a fake HOME
-```
-
----
-
-## Environment
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `HONCHO_HOME` | `~/.honcho` | Data root (all harnesses) |
-| `HONCHO_DB` | `<HONCHO_HOME>/memory.db` | Database path |
-| `HONCHO_BACKUP_DIR` | `<HONCHO_HOME>/backups` | Backup rotation |
-| `HONCHO_TRANSPORT` | `stdio` | `stdio` or `http` |
-| `HONCHO_HOST` / `HONCHO_PORT` | `127.0.0.1` / `8765` | HTTP bind |
-| `HONCHO_TOKENS` | empty | Comma-separated bearer tokens |
-| `HONCHO_MAX_RECALL` | `8` | Default recall limit |
-| `HONCHO_EXTRA_TOOLS` | empty | Directories with `local_*.py` / `adapter_*.py` |
-| `PI_CODING_AGENT_DIR` | unset | omp/pi agent dir, honoured for its per-profile data |
-| `OMP_MEMORY_DB` / `OMP_MEMORY_BACKUP_DIR` | unset | Legacy names, still accepted |
-
----
-
-## Optional tools
-
-The five tools above work everywhere. Anything inherently harness-specific —
-a session-transcript reader, for example — belongs outside the package, because
-the formats it depends on are undocumented and change without notice.
-
-```bash
-export HONCHO_EXTRA_TOOLS="$HOME/.honcho/local"
-```
-
-Each module there named `local_*.py` or `adapter_*.py` may expose:
-
-```python
-TOOLS = [{"name": "handoff", "description": "...", "inputSchema": {}}]
-
-def call(args, user=""):
-    return "text returned to the model"
-```
-
-The tool merges into the server at startup. A module that raises is reported on
-stderr and skipped; a name that collides with a core tool is ignored. Modules
-without those prefixes are never imported, so helper files in the same
-directory are not executed.
-
----
-
-## Context budget
-
-A memory system that injects too much is worse than none. Measured on a real
-profile before this work:
-
-| Source | Tokens | Share |
-|---|---|---|
-| `memories/*.md` (397 KB) | 99,431 | 56% |
-| 207 MCP tool schemas | 63,600 | 36% |
-| template + append | 16,038 | 9% |
-| **Total** | **179,069** | **140% of 128K** |
-
-At 140% the provider truncates silently: instructions vanish, the model
-invents, and nothing in the transcript explains why.
-
-**Fix 1 — memory belongs in SQLite.** `reclaim.py` imports every
-`memories/*.md`, verifies the record count, then archives the file and leaves a
-pointer stub. Re-running is safe: content hashes prevent duplicates.
-
-```
-140% -> 65% of the window    (94k tokens recovered)
-```
-
-**Fix 2 — measure, don't guess.** `budget.py` reports per-component tokens and
-probes each stdio MCP server for its real tool count. In that profile a single
-server exposing 207 tools cost more than every memory file combined.
-
-**Fix 3 — bound the growth.** `guard.py compact --threshold-bytes 20000`
-archives anything oversized, delegating to `reclaim.py` so the
-import-verify-archive guarantees still apply.
-
----
-
-## Known limits
-
-- **No cross-model handoff in the published build.** A model taking over a
-  session sees the message history but not a structured brief. Every harness
-  stores transcripts in a different, undocumented format; shipping an adapter
-  that breaks silently is worse than shipping none. Use the extension hook
-  above when the format is one you control.
-- **`guard.py` and `reclaim.py` are omp/pi specific.** They read `memories/*.md`,
-  where those harnesses keep lessons. Others never write those files, so both
-  tools find nothing to do.
-- **Not tested against every MCP client.** The protocol is verified against the
-  specification and exercised locally over stdio and HTTP in both the 2025-11-25
-  and 2026-07-28 revisions; real-world client behaviour is not covered.
-- **No schema migration path.** The schema is stable today; a future change
-  would need a migration that does not exist yet.
-
----
+- **Heat and recall weights are policy, not fitted numbers.** This repo has no labelled dataset, so it claims no
+  accuracy beyond the ordering rules above.
+- **Rerank is unproven against the baseline.** Every arm of group B in `bench/RESULTS.md` scores 1.0, so that dataset
+  cannot separate reranking variants. The numbers show no regression and sub-millisecond latency, nothing more.
+- **No coverage number is reported.** The suite asserts behaviour; it does not measure line coverage, and no
+  accuracy claim rests on it.
+- **The mirror never pushes, and has no CLI.** `sync_mirror` makes a local commit and stops there.
+- **`capture` uses the old identity rule.** Two projects that record the same lesson get two rows, so dedup does not
+  cross project boundaries.
+- **There is no supersession marker.** Group D of `bench/RESULTS.md` finds no such column, so an older verified record
+  outranks a newer unverified one.
 
 ## License
 
-MIT.
+MIT. See [LICENSE.md](LICENSE.md).

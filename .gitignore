@@ -1,40 +1,26 @@
-# Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-env/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
 venv/
-.env
-.venv
-pip-log.txt
-pip-delete-this-directory.txt
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Memory DB
 *.db
 *.db-wal
 *.db-shm
 backups/
 sessions/
+audit.log
+.DS_Store
 
-# Node
-node_modules/
-build/
-dist/
+# Bench runtime state: per-interpreter DB files and crash leftovers.
+bench/db/
+bench/out/*.err
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
+.rlcheck/
+.readmecheck/
+.auditcheck/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

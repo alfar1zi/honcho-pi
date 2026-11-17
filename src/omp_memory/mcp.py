@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-honcho-mcp - Model Context Protocol server for the honcho memory system.
+honcho-mcp - Model Context Protocol server for the omp-memory system.
 
 One codebase, two transports:
 
-    stdio  (default)   omp spawns this per session; single-user local.
+    stdio  (default)   an agent spawns this per session; single-user local.
     http               self-hosted; many users, bearer-token auth, per-token
                        database isolation under <data-dir>/users/<hash>/.
 
@@ -13,7 +13,8 @@ server is what makes an agent actually *use* them. Without it, memories are a
 file that grows and is never read.
 
 Tools
-    recall      Search memory before acting. Ranked by relevance+confidence.
+    recall      Search memory before acting. Ranked by lexical match,
+                confidence, heat and type prior.
     remember    Persist a fact/decision/correction learned this session.
     reinforce   Confirm or refute an existing memory after observing reality.
     forget      Retire a memory that is provably wrong.
@@ -25,9 +26,9 @@ Environment
     HONCHO_TRANSPORT       stdio | http            (default stdio)
     HONCHO_HOST/PORT       http bind               (default 127.0.0.1:8765)
     HONCHO_TOKENS          comma-separated bearer tokens for http mode
-    HONCHO_MAX_RECALL      default recall limit   (default 8)
+    HONCHO_MAX_RECALL      default recall limit     (default 8)
+    HONCHO_EXTRA_TOOLS     os.pathsep list of adapter directories
 """
-
 from __future__ import annotations
 
 import json
@@ -39,10 +40,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-_HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE))
-
-import memory_db as db  # noqa: E402
+from . import db
 
 SERVER_NAME = "honcho"
 SERVER_VERSION = "2.0.0"
@@ -92,13 +90,9 @@ def get_conn(user: str = ""):
         if conn is not None:
             return conn
         path.parent.mkdir(parents=True, exist_ok=True)
-        old_db = db.DB_PATH
-        db.DB_PATH = key
-        try:
-            conn = db.connect(key)
-            conn = db.init_db(conn, key)
-        finally:
-            db.DB_PATH = old_db
+        conn = db.connect(key)
+        # init_db() returns None in this API; it migrates in place.
+        db.init_db(conn, key)
         _conns[key] = conn
         return conn
 
@@ -119,15 +113,22 @@ def tool_recall(args: Dict[str, Any], user: str = "") -> str:
         return "recall: query is required"
     limit = int(args.get("limit") or MAX_RECALL_DEFAULT)
     limit = max(1, min(limit, 50))
-    rows = db.search(
-        conn,
-        query,
-        limit=limit,
-        rtype=args.get("type"),
-        project_id=args.get("project"),
-        verified_only=bool(args.get("verified_only")),
-        min_confidence=float(args.get("min_confidence") or 0.0),
-    )
+    rtype = args.get("type")
+    project = args.get("project")
+    verified_only = bool(args.get("verified_only"))
+    min_confidence = float(args.get("min_confidence") or 0.0)
+    # recall() reranks (lexical + confidence + heat + type prior) but takes no
+    # confidence filters; search() takes the filters but ranks lexically only.
+    # Filtered queries are precision queries, so plain search is the right rank
+    # there; everything else goes through the reranker.
+    if verified_only or min_confidence > 0:
+        rows = db.search(
+            conn, query, limit=limit, rtype=rtype, project_id=project,
+            verified_only=verified_only, min_confidence=min_confidence,
+        )
+    else:
+        rows = db.recall(conn, query, limit=limit, full=True,
+                         rtype=rtype, project_id=project)
     if not rows:
         return f"No memory matched: {query!r}"
     out = [f"Recalled {len(rows)} memory record(s) for {query!r}:"]
@@ -152,7 +153,7 @@ def tool_remember(args: Dict[str, Any], user: str = "") -> str:
     leaked = _scan_secret(content + " " + str(args.get("evidence") or ""))
     if leaked:
         return f"remember: refused, possible secret detected ({leaked})"
-    rid = db.upsert_record(
+    result = db.remember(
         conn,
         rtype=rtype,
         content=_clip(content),
@@ -164,11 +165,16 @@ def tool_remember(args: Dict[str, Any], user: str = "") -> str:
         session_id=str(args.get("session") or ""),
         project_id=str(args.get("project") or ""),
     )
+    rid = result["id"]
     rec = db.get_record(conn, rid) or {}
-    return (
+    out = (
         f"Stored {rtype} id={rid} confidence={float(rec.get('confidence', 0)):.2f} "
-        f"verified={'yes' if rec.get('verified') else 'no'}"
+        f"verified={'yes' if rec.get('verified') else 'no'} ({result['applied']})"
     )
+    # Near-duplicates were reported, not merged; the caller should read this.
+    if result.get("advisory"):
+        out += f"\n{result['advisory']}"
+    return out
 
 
 def tool_reinforce(args: Dict[str, Any], user: str = "") -> str:
@@ -183,7 +189,11 @@ def tool_reinforce(args: Dict[str, Any], user: str = "") -> str:
         new_conf = db.reinforce(conn, rid, signal, source=str(args.get("source") or "agent"))
     except ValueError as exc:
         return f"reinforce: {exc}"
-    return f"Reinforced {rid} with {signal} -> confidence {new_conf:.2f}"
+    out = f"Reinforced {rid} with {signal} -> confidence {new_conf:.2f}"
+    promo = db.last_promotion()
+    if promo:
+        out += f"\nPromoted to {promo['to_type']} (heat {float(promo['heat']):.2f})"
+    return out
 
 
 def tool_forget(args: Dict[str, Any], user: str = "") -> str:
@@ -195,7 +205,14 @@ def tool_forget(args: Dict[str, Any], user: str = "") -> str:
     if not rec:
         return f"forget: no record {rid}"
     # reinforcement rows hold an FK to records; delete children first or the
-    # parent delete fails with FOREIGN KEY constraint failed.
+    # parent delete fails with FOREIGN KEY constraint failed. The graveyard
+    # row is written before the delete so a crash leaves an audit trail
+    # instead of a silently missing record, matching forget_cold().
+    conn.execute(
+        "INSERT INTO forgotten_graveyard (id, type, content, reason, ts)"
+        " SELECT id, type, content, 'forgotten via MCP', ? FROM records WHERE id=?",
+        (db.now_iso(), rid),
+    )
     conn.execute("DELETE FROM reinforcement WHERE record_id=?", (rid,))
     conn.execute("DELETE FROM records WHERE id=?", (rid,))
     conn.commit()
@@ -224,7 +241,7 @@ def _scan_secret(text: str) -> Optional[str]:
             return label
     return None
 
-TOOLS = [
+TOOLS: List[Dict[str, Any]] = [
     {
         "name": "recall",
         "description": (
@@ -288,7 +305,8 @@ TOOLS = [
     },
     {
         "name": "forget",
-        "description": "Delete a memory record that is provably wrong. Prefer reinforce(failure) when merely uncertain.",
+        "description": ("Delete a memory record that is provably wrong. "
+                       "Prefer reinforce(failure) when merely uncertain."),
         "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
     },
     {
@@ -298,13 +316,14 @@ TOOLS = [
     },
 ]
 
-_HANDLERS = {
+_HANDLERS: Dict[str, Any] = {
     "recall": tool_recall,
     "remember": tool_remember,
     "reinforce": tool_reinforce,
     "forget": tool_forget,
     "stats": tool_stats,
 }
+
 
 def _load_extensions() -> None:
     """Merge optional tools from HONCHO_EXTRA_TOOLS directories.
@@ -463,7 +482,7 @@ def serve_stdio() -> None:
 class _Handler(BaseHTTPRequestHandler):
     tokens: set = set()
 
-    def log_message(self, fmt, *args):  # quieter default logging
+    def log_message(self, fmt: str, *args) -> None:  # quieter default logging
         sys.stderr.write("[honcho-http] " + (fmt % args) + "\n")
 
     def _user(self) -> Optional[str]:
