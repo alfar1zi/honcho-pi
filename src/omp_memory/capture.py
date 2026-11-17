@@ -66,6 +66,14 @@ MAX_FILES_STORED = 30
 MAX_FAIL_REPORTED = 8
 MAX_FILE_REPORTED = 30
 
+# Event segmentation (Wave F, EM-LLM 2407.9450): a session log is not one
+# memory episode. Split on time gaps or topic shifts so a failure in a
+# midnight deploy session does not inherit the tags of the refactor that
+# followed at breakfast.
+EVENT_GAP_MINUTES = 30.0
+EVENT_TOPIC_OVERLAP = 0.2
+EVENT_TAG_PREFIX = "event:"
+
 
 # Secret-shape patterns, shared by the CLI capture guard and the auto-capture
 # pipeline. Patterns run in Python so the payload never reaches a shell.
@@ -152,6 +160,69 @@ def _clip(s: str, n: int) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+def _entry_ts(entry: dict) -> float | None:
+    """ISO timestamp of an entry as epoch seconds, None when absent/unparseable."""
+    raw = str(entry.get("timestamp") or "")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _tokens_of(text: str) -> set:
+    return set(_TOKEN_RE.findall(text.lower()))
+
+
+def _segments(entries: list[dict]) -> list[dict]:
+    """Split a session log into events at time gaps and topic shifts.
+
+    Boundary when consecutive entries sit more than EVENT_GAP_MINUTES apart
+    (from entry timestamps), or when a user turn's token overlap with the
+    running event drops below EVENT_TOPIC_OVERLAP (jaccard, db._tokens
+    vocabulary). Entries without timestamps follow the current segment.
+    """
+    segments: list[dict] = []
+    cur: dict | None = None
+    last_ts: float | None = None
+    last_turn_tokens: set | None = None
+    for e in entries:
+        ts = _entry_ts(e)
+        is_user_turn = e.get("type") == "message" and \
+            (e.get("message") or {}).get("role") == "user"
+        turn_tokens: set | None = None
+        if is_user_turn:
+            txt = _text_of(e.get("message") or {}).strip()
+            if txt and not _CONTENT_SKIP.search(txt):
+                turn_tokens = _tokens_of(txt)
+        boundary = cur is None
+        if not boundary and ts is not None and last_ts is not None:
+            if ts - last_ts > EVENT_GAP_MINUTES * 60.0:
+                boundary = True
+        if not boundary and turn_tokens and last_turn_tokens and \
+                len(turn_tokens | last_turn_tokens):
+            overlap = len(turn_tokens & last_turn_tokens) / \
+                len(turn_tokens | last_turn_tokens)
+            if overlap < EVENT_TOPIC_OVERLAP:
+                boundary = True
+        if turn_tokens is not None:
+            last_turn_tokens = turn_tokens
+        # The entry that opens a new event belongs to it; without this the
+        # boundary user turn is dropped and the next overlap check compares
+        # against the previous event's last turn again.
+        if boundary:
+            cur = {"entries": [e], "start": ts, "end": ts, "index": len(segments)}
+            segments.append(cur)
+        else:
+            cur["entries"].append(e)
+            if ts is not None:
+                cur["end"] = ts
+        if cur is not None and ts is not None:
+            last_ts = ts
+    return segments
+
+
 def _failure_line(raw: str) -> str:
     """Distil a toolResult body into the one line that says what failed.
 
@@ -170,27 +241,20 @@ def _failure_line(raw: str) -> str:
     return priority[0]
 
 
-def extract_lessons(
-    entries: list[dict],
-    session_path: Path | None = None,
-    max_failures: int = MAX_FAILURES_STORED,
-    max_files: int = MAX_FILES_STORED,
-) -> list[dict]:
-    """Turn a session log into a list of candidate memory records.
+def _event_candidates(seg: dict, session_id: str, project_id: str,
+                      max_failures: int, max_files: int) -> list[dict]:
+    """Extraction rules for one event segment.
 
-    Each candidate is a dict with the keys that db.remember() needs:
-        rtype, content, evidence, confidence, source, session_id, project_id, tags.
-
-    The caller decides whether to write them (apply=True) or just inspect them.
+    Mirrors the original per-session rules, but scoped to the segment's
+    entries: failures, files, and decision keywords inside this event only.
+    Each candidate carries the event id and an event tag so replay can
+    filter one episode without re-parsing the log.
     """
     user_turns: list[str] = []
     failures: list[str] = []
     files: "OrderedDict[str, int]" = OrderedDict()
 
-    session_id = session_path.stem if session_path else ""
-    project_id = session_path.parent.name if session_path else ""
-
-    for e in entries:
+    for e in seg["entries"]:
         t = e.get("type")
         if t == "message":
             msg = e.get("message") or {}
@@ -226,9 +290,11 @@ def extract_lessons(
                     if isinstance(p, str) and "/" in p:
                         files[p] = files.get(p, 0) + 1
 
+    event_id = f"{session_id}#e{seg['index']}"
+    event_tag = f"{EVENT_TAG_PREFIX}{seg['index']}"
     candidates: list[dict] = []
 
-    # Failure patterns → INFERENCE (what went wrong, with confidence floor)
+    # Failure patterns -> INFERENCE (what went wrong, with confidence floor)
     for failure in failures[:max_failures]:
         lesson = _failure_line(failure)
         candidates.append({
@@ -239,10 +305,11 @@ def extract_lessons(
             "source": "auto-capture",
             "session_id": session_id,
             "project_id": project_id,
-            "tags": "failure,auto-capture",
+            "tags": f"failure,auto-capture,{event_tag}",
+            "event_id": event_id,
         })
 
-    # File patterns → ASSUMPTION (which files were worked on)
+    # File patterns -> ASSUMPTION (which files were worked on)
     if files:
         top_files = list(sorted(files.items(), key=lambda kv: -kv[1]))[:max_files]
         file_list = ", ".join(f"{p}({n}x)" for p, n in top_files)
@@ -254,7 +321,8 @@ def extract_lessons(
             "source": "auto-capture",
             "session_id": session_id,
             "project_id": project_id,
-            "tags": "files,auto-capture",
+            "tags": f"files,auto-capture,{event_tag}",
+            "event_id": event_id,
         })
 
     # Decision patterns in user turns (heuristic)
@@ -276,8 +344,39 @@ def extract_lessons(
                 "source": "auto-capture",
                 "session_id": session_id,
                 "project_id": project_id,
-                "tags": "decision,auto-capture",
+                "tags": f"decision,auto-capture,{event_tag}",
+                "event_id": event_id,
             })
+    return candidates
+
+
+def extract_lessons(
+    entries: list[dict],
+    session_path: Path | None = None,
+    max_failures: int = MAX_FAILURES_STORED,
+    max_files: int = MAX_FILES_STORED,
+) -> list[dict]:
+    """Turn a session log into a list of candidate memory records.
+
+    The log is first segmented into events (time gap or topic shift, see
+    _segments); each event yields its own candidates carrying that event's
+    id and tag, so a midnight deploy failure does not inherit the memory
+    tags of the refactor that followed at breakfast.
+
+    Each candidate is a dict with the keys that db.upsert_record() needs:
+        rtype, content, evidence, confidence, source, session_id,
+        project_id, tags, event_id.
+
+    The caller decides whether to write them (apply=True) or just inspect them.
+    """
+    session_id = session_path.stem if session_path else ""
+    project_id = session_path.parent.name if session_path else ""
+
+    candidates: list[dict] = []
+    for seg in _segments(entries):
+        candidates.extend(
+            _event_candidates(seg, session_id, project_id,
+                              max_failures, max_files))
 
     # Never persist a candidate whose content or evidence carries a secret:
     # toolResult bodies can contain env dumps, tokens in tracebacks, etc.
@@ -368,6 +467,7 @@ def capture_session(
             tags=cand["tags"],
             session_id=cand["session_id"],
             project_id=cand["project_id"],
+            event_id=cand.get("event_id") or "",
         )
         written += 1
     conn.commit()

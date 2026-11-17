@@ -968,7 +968,7 @@ def init_db(conn: sqlite3.Connection, db_path: str = None, auto_repair: bool = T
 def upsert_record(conn: sqlite3.Connection, rtype: str, content: str, evidence: str = "",
                   verified: int = 0, confidence: float = 0.5, source: str = "",
                   tags: str = "", session_id: str = "", project_id: str = "",
-                  parent_id: str = "") -> str:
+                  parent_id: str = "", event_id: str = "") -> str:
     if rtype not in VALID_TYPES:
         raise ValueError(f"invalid type: {rtype}")
     if not content:
@@ -988,18 +988,19 @@ def upsert_record(conn: sqlite3.Connection, rtype: str, content: str, evidence: 
         record_id = existing["id"]
         conn.execute(
             "UPDATE records SET updated_at=?, evidence=?, verified=?, confidence=?,"
-            " tags=?, session_id=?, parent_id=? WHERE id=?",
+            " tags=?, session_id=?, parent_id=?, event_id=? WHERE id=?",
             (now_iso(), evidence or "", 1 if verified else 0, confidence,
-             tags or "", session_key, parent_id or "", record_id)
+             tags or "", session_key, parent_id or "", event_id or "", record_id)
         )
     else:
         conn.execute("""
             INSERT INTO records
                 (id,type,content,evidence,verified,confidence,source,tags,
-                 created_at,updated_at,session_id,project_id,parent_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 created_at,updated_at,session_id,project_id,parent_id,event_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (record_id, rtype, content, evidence or "", 1 if verified else 0, confidence,
-              source or "", tags or "", now_iso(), now_iso(), session_key, project_key, parent_id or ""))
+              source or "", tags or "", now_iso(), now_iso(), session_key, project_key,
+              parent_id or "", event_id or ""))
 
     conn.commit()
     return record_id
