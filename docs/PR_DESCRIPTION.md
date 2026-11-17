@@ -15,15 +15,17 @@
 ## Commits
 | Commit | What it does |
 |---|---|
-| `0c81c26` | Normalizes content identity to deduplicate facts and merges project provenance into project_ids. |
-| `10541b0` | Merges source provenance on duplicate saves and locks return contracts for similarity matching. |
-| `f87bd83` | Restores StreamingContextScrubber to __all__ so public exports remain intact. |
-| `5701c48` | Implements heat scoring, multi-source inference promotion, monotonic decay, and cold archiving. |
-| `636a00b` | Measures deduplication across all write modes (upsert_record and remember paths) in benchmark group A. |
-| `b75ec72` | Reranks recall candidates on lexical match, confidence, heat, and type priors. |
-| `df40641` | Implements deterministic export_markdown with SHA-256 manifests and push-free git sync_mirror. |
-| `5378e0e` | Exports heat, decay, and retention policy constants in __all__ with verifying unit tests. |
-| `1128e5c` | Documents measured benchmark results, hardware conditions, and harness limitations in bench/RESULTS.md. |
+| `1f45fa4` | Rewrites the memory system as an installable package with verified semantics. |
+| `d1390ae` | Identifies records by content, merges identical records, and unions provenance. |
+| `f223c8b` | Implements heat scoring, promotion, monotonic decay, cold archiving, and policy constants. |
+| `ed7e9d3` | Measures deduplication across all write modes in benchmark group A. |
+| `8daab81` | Reranks recall candidates on lexical match, confidence, heat, and type priors. |
+| `e2e4f32` | Implements deterministic export_markdown with SHA-256 manifests and push-free git sync_mirror. |
+| `64eb156` | Documents measured benchmark results, hardware conditions, and harness limitations in bench/RESULTS.md. |
+| `90e515f` | Rewrites the README around real examples and current behaviour. |
+| `cb60205` | Adds the PR description and v0.2.0 release notes. |
+| `600dc5d` | Corrects the recall pool size and the example call count in the README. |
+| `ef9b191` | Ignores verification databases created inside the repo. |
 
 ## What a reviewer should check
 - Does `remember()` still union source and project provenance on a merge? See `tests/test_identity.py`.
