@@ -28,6 +28,11 @@
 | `cb60205` | Adds the PR description and v0.2.0 release notes. |
 | `600dc5d` | Corrects the recall pool size and the example call count in the README. |
 | `ef9b191` | Ignores verification databases created inside the repo. |
+| `94c561a` | Points the PR description at the rebuilt commit hashes. |
+| `6440efb` | Adopts the published main as an ancestor so the branch shares history. |
+| `28eb61a` | Runs CI on Python 3.10 instead of 3.9. |
+| `01d21ee` | Keeps backups and git output working on Windows. |
+| `c07624a` | Adds a cross-platform pipx quick setup for agents. |
 
 ## What a reviewer should check
 - Does `remember()` still union source and project provenance on a merge? See `tests/test_identity.py`.
