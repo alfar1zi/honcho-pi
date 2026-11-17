@@ -1891,6 +1891,7 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
                 "age_days": parts["age_days"],
                 "successes": parts["successes"],
                 "about_peer": c.get("about_peer", ""),
+                "session_id": c.get("session_id", ""),
                 "superseded_by": c.get("superseded_by", ""),
                 "importance": c.get("importance", 0.5),
                 "cue": c.get("cue", ""),
@@ -1907,6 +1908,7 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
                 "heat": heat,
                 "abstained": abstained,
                 "snippet": _snippet(c.get("content") or "", query),
+                "session_id": c.get("session_id", ""),
                 "about_peer": c.get("about_peer", ""),
             })
     return out

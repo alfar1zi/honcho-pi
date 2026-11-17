@@ -85,23 +85,22 @@ def test_bench_refuses_write(tmp_path, monkeypatch):
 
 
 def test_multisession_probe_scopes_recall(tmp_path):
-    """Session-scoped recall returns only the asked session's record; the
-    same query without the filter stays session-agnostic."""
+    """The scoped query must pick the asked session's record even when the
+    other session's record is the stronger unscoped match. A probe whose
+    target already wins without the filter proves nothing about scoping."""
     db_path = str(tmp_path / "multi.db")
     conn = memory_db.connect(db_path)
     memory_db.init_db(conn)
-    memory_db.remember(conn, "FACT", "auth flow uses magic links in tenant A",
-                       session_id="sess-a", confidence=0.8)
-    memory_db.remember(conn, "FACT", "auth flow uses oauth codes in tenant B",
-                       session_id="sess-b", confidence=0.8)
-    rows = run.probe_rows(conn, 60)
-    cases = run.question_multisession(rows)
-    assert len(cases) == 2
-    for q, sid, expected in cases:
-        hits = memory_db.recall(conn, q, limit=3, session_id=sid)
-        assert hits, f"no hits for session {sid}"
-        assert hits[0]["id"] == expected
-    # without the filter both sessions are visible (session-agnostic default)
-    unscoped = memory_db.recall(conn, "auth flow", limit=5)
-    assert len(unscoped) == 2
+    # sess-b carries the query words with higher confidence: it wins the
+    # unscoped ranking, so only the session filter can put sess-a on top
+    b = memory_db.remember(conn, "FACT", "auth links magic tenant codes rotated",
+                           session_id="sess-b", confidence=0.9, verified=1)
+    a = memory_db.remember(conn, "FACT", "auth links magic tenant alpha note",
+                           session_id="sess-a", confidence=0.6)
+    q = "auth links magic tenant"
+    unscoped = memory_db.recall(conn, q, limit=3, full=True)
+    assert [h["id"] for h in unscoped] == [b["id"], a["id"]]
+    scoped = memory_db.recall(conn, q, limit=3, session_id="sess-a", full=True)
+    assert [h["id"] for h in scoped] == [a["id"]]
+    assert all(h["session_id"] == "sess-a" for h in scoped)
     conn.close()

@@ -93,7 +93,7 @@ def test_compact_reports_no_evidence_and_is_smaller_than_full(conn):
     c_item = compact[0]
     f_item = full[0]
 
-    assert set(c_item.keys()) == {"id", "type", "confidence", "verified", "score", "heat", "snippet", "abstained", "about_peer"}
+    assert set(c_item.keys()) == {"id", "type", "confidence", "verified", "score", "heat", "snippet", "abstained", "about_peer", "session_id"}
     assert "evidence" not in c_item
     assert "snippet" in c_item
     assert "snippet" not in f_item
@@ -101,7 +101,7 @@ def test_compact_reports_no_evidence_and_is_smaller_than_full(conn):
         "id", "type", "confidence", "verified", "score", "heat", "abstained",
         "content", "evidence", "lexical", "matched_terms", "type_prior",
         "superseded_by",
-        "age_days", "successes", "about_peer", "importance", "cue",
+        "age_days", "successes", "about_peer", "session_id", "importance", "cue",
         "cue_triggered",
     }
     # intent fields ride on the full payload; a non-INTENT record reports

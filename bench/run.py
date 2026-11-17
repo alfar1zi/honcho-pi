@@ -289,7 +289,10 @@ def run(conn, report):
     for q, sid, expected in question_multisession(rows):
         hits = db.recall(conn, q, limit=3, session_id=sid)
         results["multisession"][1] += 1
-        if hits and hits[0]["id"] == expected:
+        # the filter is a scope, not a rerank: every hit must carry the
+        # asked session, and the queried record must sit at top-1
+        if hits and hits[0]["id"] == expected and \
+                all(h.get("session_id") == sid for h in hits):
             results["multisession"][0] += 1
 
     for q, expected in question_supersede(rows):
