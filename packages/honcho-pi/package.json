@@ -1,0 +1,29 @@
+{
+  "name": "honcho-pi",
+  "version": "0.1.0",
+  "description": "One-command installer and auto-updater for honcho-pi: local-first SQLite memory for coding agents.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alfar1zi/honcho-pi.git",
+    "directory": "packages/honcho-pi"
+  },
+  "bin": {
+    "honcho-pi": "bin/honcho-pi.js"
+  },
+  "files": [
+    "bin/",
+    "lib/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "agent",
+    "memory",
+    "sqlite",
+    "mcp",
+    "installer"
+  ],
+  "type": "module"
+}
