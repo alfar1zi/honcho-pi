@@ -169,9 +169,9 @@ records -> checkpoint payload (JSON) -> restore after compression
 records -> export_markdown -> sync_mirror (git commit, never push)
 ```
 
-Each **record** stores a `type` (FACT, ASSUMPTION, INFERENCE, DECISION, RULE, CORRECTION) plus `evidence`,
-`verified`, `confidence`, `source`, `tags`, `session_id`, `project_id`, `project_ids`, `parent_id`, and
-`last_decay_at`.
+Each **record** stores a `type` (RULE, FACT, CORRECTION, DECISION, WORKFLOW, INTENT, PROCEDURAL,
+REFLECTIVE, ASSUMPTION, INFERENCE) plus `evidence`, `verified`, `confidence`, `source`, `tags`,
+`session_id`, `project_id`, `project_ids`, `parent_id`, `event_id`, and `last_decay_at`.
 
 The library and the CLI decide "same record" in different ways, and both paths ship on purpose:
 
@@ -211,12 +211,13 @@ predecessor through `parent_id`, so a recap can walk back across a compression.
 `recall()` scores at least 20 candidates (or `limit * 4` when that is larger, or `pool`) and returns the top `limit`:
 
 ```
-score = 0.60 * lexical + 0.10 * confidence + 0.25 * heat + 0.05 * type_prior
+score = 0.70 * lexical + 0.25 * heat + 0.05 * type_prior
 ```
 
 `lexical` measures how well the text matched the query (normalised BM25 rank), and `type_prior` is a fixed bonus by
-type: 1.0 for RULE and FACT, 0.85 CORRECTION, 0.60 DECISION, 0.35 ASSUMPTION, 0.25 INFERENCE. When two scores tie,
-verified rows come first, then higher confidence, then newer `updated_at`, then `id`.
+type: 1.0 for RULE and FACT, 0.85 CORRECTION, 0.65 WORKFLOW, 0.60 DECISION, 0.55 PROCEDURAL, 0.50 INTENT, 0.45
+REFLECTIVE, 0.35 ASSUMPTION, 0.25 INFERENCE. When two scores tie, verified rows come first, then higher confidence,
+then newer `updated_at`, then `id`.
 
 The default result is compact: `{id, type, confidence, verified, score, heat, snippet}`, where `snippet` is one line
 of at most 120 characters cut with `...`. Pass `full=True` to swap `snippet` for `content` and `evidence`, and to add

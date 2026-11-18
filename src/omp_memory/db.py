@@ -1016,11 +1016,17 @@ def upsert_record(conn: sqlite3.Connection, rtype: str, content: str, evidence: 
 
     if existing:
         record_id = existing["id"]
+        # event_id merges rather than overwrites: a re-capture of the same
+        # lesson in a later event keeps the earlier grouping.
+        if not event_id:
+            row = conn.execute("SELECT event_id FROM records WHERE id=?",
+                               (record_id,)).fetchone()
+            event_id = row["event_id"] if row else ""
         conn.execute(
             "UPDATE records SET updated_at=?, evidence=?, verified=?, confidence=?,"
             " tags=?, session_id=?, parent_id=?, event_id=? WHERE id=?",
             (now_iso(), evidence or "", 1 if verified else 0, confidence,
-             tags or "", session_key, parent_id or "", event_id or "", record_id)
+             tags or "", session_key, parent_id or "", event_id, record_id)
         )
     else:
         conn.execute("""
