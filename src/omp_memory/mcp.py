@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 import threading
 import traceback
@@ -88,6 +89,21 @@ _writer_lock = threading.RLock()
 _local = threading.local()
 
 
+def _stale_schema(conn) -> bool:
+    """True when the cached connection is pinned to a dead schema.
+
+    A migration rebuilds the records table (new inode on some filesystems),
+    but the already-open connection keeps the old schema in its schema
+    cookie, so every later statement fails with "malformed database schema".
+    A cheap probe statement is the detection: it costs a parse, not a scan.
+    """
+    try:
+        conn.execute("SELECT 1 FROM records LIMIT 1").fetchone()
+        return False
+    except sqlite3.DatabaseError as exc:
+        return "malformed" in str(exc).lower()
+
+
 def get_conn(user: str = ""):
     """Open one sqlite connection per calling thread.
 
@@ -97,6 +113,11 @@ def get_conn(user: str = ""):
     thread opens its own connection; WAL plus the busy timeout lets them
     coexist. init_db() runs under the writer lock so concurrent first touches
     cannot race the migration.
+
+    A cached connection whose schema cookie is stale (the file was migrated
+    by another process while this one held the old handle) is closed and
+    reopened once: the old handle would otherwise fail every tool call
+    forever, because the error lives in the connection, not the file.
     """
     conns = getattr(_local, "conns", None)
     if conns is None:
@@ -104,7 +125,14 @@ def get_conn(user: str = ""):
     key = str(resolve_db_path(user))
     conn = conns.get(key)
     if conn is not None:
-        return conn
+        if _stale_schema(conn):
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+            conns.pop(key, None)
+        else:
+            return conn
     path = Path(key)
     path.parent.mkdir(parents=True, exist_ok=True)
     with _writer_lock:

@@ -129,3 +129,47 @@ def test_procedure_probe_needs_same_topic_competitor(tmp_path):
     hits = memory_db.recall(conn, cases[0][0], limit=3)
     assert hits and hits[0]["id"] == cases[0][1]
     conn.close()
+
+
+def test_get_conn_recovers_from_stale_schema(tmp_path, monkeypatch):
+    """A cached connection pinned to a dead schema is reopened, not fatal.
+
+    Observed live (2026-11-20): a server process that opened its connection
+    before another process migrated the records table failed every later
+    tool call with "malformed database schema" while fresh connections
+    worked fine. The error lives in the connection's schema cache, not the
+    file, so get_conn must drop and reopen on that signature.
+    """
+    import sqlite3
+    from omp_memory import mcp
+    key = str(tmp_path / "m.db")
+    monkeypatch.setenv("OMP_MEMORY_DB", key)
+    c1 = mcp.get_conn()
+
+    # Simulate the observed failure: the cached handle now raises the
+    # malformed-schema error on every statement (schema cache stale after
+    # an external migration). Real sqlite does this after a foreign rebuild;
+    # we poison the handle directly to test get_conn's recovery, not
+    # sqlite's internals.
+    class Poison:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def close(self):
+            self._inner.close()
+
+        def execute(self, sql, *a):
+            if "records" in sql:
+                raise sqlite3.DatabaseError("malformed database schema (RULE)")
+            return self._inner.execute(sql, *a)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    poisoned = Poison(c1)
+    mcp._local.conns[key] = poisoned
+    c2 = mcp.get_conn()
+    assert c2 is not poisoned
+    assert c2.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 0
+    # and the new handle is cached for later calls
+    assert mcp.get_conn() is c2
