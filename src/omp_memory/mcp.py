@@ -367,6 +367,10 @@ def tool_maintenance(args: Dict[str, Any], user: str = "") -> str:
             return json.dumps(report, indent=2, sort_keys=True)
         if op == "promote":
             return json.dumps({"promotion": db.promote_hot(conn)}, indent=2, sort_keys=True)
+        if op == "reflect":
+            from . import experience
+            report = experience.reflect(conn, apply=bool(args.get("apply", True)))
+            return json.dumps(report, indent=2, sort_keys=True)
         if op == "capture":
             # Lazy import: capture reads harness session logs, which are not
             # the storage layer's concern.
