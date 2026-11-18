@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark harness: 8 question types against a live memory database.
+"""Benchmark harness: 9 question types against a live memory database.
 
 Read-only: the database is opened with sqlite3 mode=ro, so a benchmark run
 can never write a memory. Probes are derived from the records themselves
@@ -23,6 +23,9 @@ Question types (Lin et al. 2025 retrieval split, Mem0 update case):
             session -> expect that record at top-1 even when another
             session's record is the stronger unscoped match: is the
             filter a real scope, not a rerank?
+  procedure query built from a PROCEDURAL record's steps -> expect that
+            record at the top over same-topic non-procedural records:
+            does the type weight (how-to bindingness) break lexical ties?
 """
 import argparse
 from datetime import datetime
@@ -45,9 +48,12 @@ def probe_rows(conn, n):
         "PRAGMA table_info(records)").fetchall()]
     extra = ", superseded_by" if "superseded_by" in columns else ""
     extra += ", session_id" if "session_id" in columns else ""
+    extra += ", type" if "type" in columns else ""
     rows = [dict(r) for r in conn.execute(
         f"SELECT id, content, created_at, updated_at, confidence{extra}"
         " FROM records ORDER BY updated_at DESC LIMIT ?", (n,))]
+    for r in rows:
+        r.setdefault("type", "")
     for r in rows:
         r.setdefault("superseded_by", "")
         r.setdefault("session_id", "")
@@ -250,6 +256,28 @@ def question_topical_abstention(rows):
     return cases
 
 
+def question_procedure(rows):
+    """Query built from a PROCEDURAL record's distinctive terms.
+
+    The probe measures the type weight: a how-to that shares topic
+    vocabulary with other records must still surface at the top because
+    its bm25 rank is divided by a larger weight. Requires a PROCEDURAL
+    record and a same-topic competitor in the corpus; otherwise no case
+    is emitted (a probe that cannot fail measures nothing).
+    """
+    procs = [r for r in rows if r.get("type") == "PROCEDURAL"]
+    cases = []
+    for p in procs:
+        others = [r for r in rows if r["id"] != p["id"]
+                  and set(_terms(p["content"])) & set(_terms(r["content"]))]
+        if not others:
+            continue
+        words = sorted(_terms(p["content"]))[:6]
+        if len(words) >= 3:
+            cases.append((" ".join(words), p["id"]))
+    return cases
+
+
 def question_abstention(conn):
     """Tokens with zero hits in the corpus: real abstention probes.
 
@@ -272,7 +300,8 @@ def run(conn, report):
 
     results = {"exact": [0, 0], "update": [0, 0], "temporal": [0, 0],
                "abstain": [0, 0], "join": [0, 0], "topical": [0, 0],
-               "supersede": [0, 0], "multisession": [0, 0]}
+               "supersede": [0, 0], "multisession": [0, 0],
+               "procedure": [0, 0]}
 
     for q, expected in question_exact(rows):
         hits = db.recall(conn, q, limit=3)
@@ -325,10 +354,16 @@ def run(conn, report):
         if not hits or all(h["id"] != expected for h in hits):
             results["topical"][0] += 1
 
+    for q, expected in question_procedure(rows):
+        hits = db.recall(conn, q, limit=3)
+        results["procedure"][1] += 1
+        if hits and hits[0]["id"] == expected:
+            results["procedure"][0] += 1
+
     print(f"corpus: {len(rows)} probe records")
     total_hit = total_n = 0
     for name in ("exact", "update", "temporal", "abstain", "join", "topical",
-                 "supersede", "multisession"):
+                 "supersede", "multisession", "procedure"):
         hit, n = results[name]
         total_hit += hit
         total_n += n

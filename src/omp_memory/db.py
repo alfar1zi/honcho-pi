@@ -47,7 +47,7 @@ def _restrict_to_owner(path: str) -> None:
 
 
 VALID_TYPES = {"FACT", "ASSUMPTION", "INFERENCE", "DECISION", "RULE", "CORRECTION",
-               "INTENT", "WORKFLOW"}
+               "INTENT", "WORKFLOW", "PROCEDURAL", "REFLECTIVE"}
 VALID_SIGNALS = {"success", "failure", "correction", "reinforce", "decay"}
 SIGNAL_DELTAS = {
     "success": 0.1,
@@ -158,7 +158,7 @@ INTENT_CUE_BONUS = 0.10
 INTENT_DECAY_TAU_DAYS = 7.0
 
 PRE_COMPRESS_CHECKPOINT_API_VERSION = 2
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 # Recall reranking weights. Lexical is dominant (0.70) because recall is
 # primarily an inquiry of relevance. Heat is moderate (0.25) so stale yet
 # relevant records do not sink while breaking ties among equally relevant
@@ -173,6 +173,8 @@ TYPE_PRIOR = {
     "DECISION": 0.60,
     "WORKFLOW": 0.65,
     "INTENT": 0.50,
+    "PROCEDURAL": 0.55,
+    "REFLECTIVE": 0.45,
     "ASSUMPTION": 0.35,
     "INFERENCE": 0.25,
 }
@@ -187,6 +189,8 @@ TYPE_BM25_WEIGHTS = {
     "WORKFLOW": 1.2,
     "DECISION": 1.2,
     "INTENT": 1.0,
+    "PROCEDURAL": 1.2,
+    "REFLECTIVE": 0.9,
     "FACT": 1.0,
     "INFERENCE": 0.8,
     "ASSUMPTION": 0.7,
@@ -511,7 +515,7 @@ _RECORD_COLUMNS = (
 )
 _RECORDS_DDL = """CREATE TABLE IF NOT EXISTS records (
         id          TEXT PRIMARY KEY,
-        type        TEXT NOT NULL CHECK (type IN ('FACT','ASSUMPTION','INFERENCE','DECISION','RULE','CORRECTION','INTENT','WORKFLOW')),
+        type        TEXT NOT NULL CHECK (type IN ('FACT','ASSUMPTION','INFERENCE','DECISION','RULE','CORRECTION','INTENT','WORKFLOW','PROCEDURAL','REFLECTIVE')),
         content     TEXT NOT NULL,
         evidence    TEXT NOT NULL DEFAULT '',
         verified    INTEGER NOT NULL DEFAULT 0,
@@ -932,6 +936,32 @@ def _migrate(conn: sqlite3.Connection):
             _reconcile_fts(conn)
         conn.execute("DELETE FROM schema_version")
         conn.execute("INSERT INTO schema_version(version) VALUES (13)")
+        conn.commit()
+
+    if version < 13:
+        # v13: WORKFLOW record type (AMW 2409.07429, ExpeL 2308.10144).
+        # Step-by-step procedures the operator confirmed working, distinct
+        # from a DECISION (why) and a FACT (what): the workflow is the how.
+        # Databases that already reached v12 skip the v10 block, so the
+        # CHECK rebuild (SQLite cannot ALTER a CHECK) runs here too: the
+        # guard checks the live CHECK, not the schema version.
+        if _rebuild_records_check(conn):
+            _reconcile_fts(conn)
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version(version) VALUES (13)")
+        conn.commit()
+
+    if version < 14:
+        # v14: PROCEDURAL + REFLECTIVE types (MemBench 2506.21605).
+        # PROCEDURAL is a repeatable how-to the operator executed (steps,
+        # commands, worked sequence); REFLECTIVE is a distilled lesson
+        # about process or judgment (what worked, what to do differently).
+        # Same CHECK-rebuild pattern as v13: the guard checks the live
+        # CHECK, so a v12 database replays v13 and v14 blocks in order.
+        if _rebuild_records_check(conn):
+            _reconcile_fts(conn)
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version(version) VALUES (14)")
         conn.commit()
 
 
@@ -1676,7 +1706,8 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
                bm25(records_fts) / CASE r.type
                    WHEN 'RULE' THEN 1.4 WHEN 'CORRECTION' THEN 1.4
                    WHEN 'DECISION' THEN 1.2 WHEN 'WORKFLOW' THEN 1.2
-                   WHEN 'INTENT' THEN 1.0 WHEN 'FACT' THEN 1.0
+                   WHEN 'PROCEDURAL' THEN 1.2 WHEN 'INTENT' THEN 1.0
+                   WHEN 'FACT' THEN 1.0 WHEN 'REFLECTIVE' THEN 0.9
                    WHEN 'INFERENCE' THEN 0.8 WHEN 'ASSUMPTION' THEN 0.7
                    ELSE 1.0 END AS rank
         FROM records_fts

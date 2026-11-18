@@ -104,3 +104,28 @@ def test_multisession_probe_scopes_recall(tmp_path):
     assert [h["id"] for h in scoped] == [a["id"]]
     assert all(h["session_id"] == "sess-a" for h in scoped)
     conn.close()
+
+
+def test_procedure_probe_needs_same_topic_competitor(tmp_path):
+    """A PROCEDURAL record with no same-topic competitor emits no probe case.
+
+    A probe that cannot fail without the type weight measures nothing.
+    With a competitor sharing vocabulary, the case exists and the
+    procedure record is the expected top hit.
+    """
+    conn = memory_db.connect(str(tmp_path / "m.db"))
+    memory_db.init_db(conn)
+    memory_db.remember(conn, "PROCEDURAL",
+                       "rebuild the records check with rebuild_records_check swap",
+                       verified=1)
+    rows = run.probe_rows(conn, 60)
+    assert run.question_procedure(rows) == []
+    # competitor shares vocabulary but is not the procedure
+    memory_db.remember(conn, "INFERENCE",
+                       "the rebuild_records_check swap keeps the table name")
+    rows = run.probe_rows(conn, 60)
+    cases = run.question_procedure(rows)
+    assert len(cases) == 1
+    hits = memory_db.recall(conn, cases[0][0], limit=3)
+    assert hits and hits[0]["id"] == cases[0][1]
+    conn.close()

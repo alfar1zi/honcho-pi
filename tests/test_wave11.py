@@ -180,3 +180,68 @@ def test_capture_session_still_compatible_with_monkeypatched_extract(tmp_path):
     assert report["written"] == 1
     assert seen["event_id"] == "a#e0"
     conn.close()
+
+
+# --- Wave G: PROCEDURAL / REFLECTIVE types -----------------------------------
+
+def test_procedural_reflective_are_valid_types():
+    from omp_memory import db as d
+    assert "PROCEDURAL" in d.VALID_TYPES
+    assert "REFLECTIVE" in d.VALID_TYPES
+    assert set(d.TYPE_PRIOR.keys()) == d.VALID_TYPES
+    assert set(d.TYPE_BM25_WEIGHTS.keys()) == d.VALID_TYPES
+
+
+def test_procedural_reflective_roundtrip(tmp_path):
+    from omp_memory import db as d
+    conn = d.connect(str(tmp_path / "m.db"))
+    d.init_db(conn)
+    assert d.SCHEMA_VERSION == 14
+    r1 = d.remember(conn, "PROCEDURAL",
+                    "migrate with rebuild_records_check swap then reconcile fts",
+                    verified=1)
+    r2 = d.remember(conn, "REFLECTIVE",
+                    "jaccard boundary needs the turn tokens kept across events",
+                    verified=1)
+    hits = d.recall(conn, "rebuild records check swap", limit=3)
+    assert hits and hits[0]["id"] == r1["id"]
+    hits2 = d.recall(conn, "jaccard boundary turn tokens", limit=3)
+    assert hits2 and hits2[0]["id"] == r2["id"]
+    # the CHECK accepts the new types; a bad type still raises
+    import pytest
+    with pytest.raises(ValueError):
+        d.remember(conn, "NOT_A_TYPE", "x")
+    conn.close()
+
+
+def test_migration_v13_to_v14_rebuilds_check(tmp_path):
+    """A database already at v13 (or v12) replays the rebuild on upgrade."""
+    from omp_memory import db as d
+    conn = d.connect(str(tmp_path / "m.db"))
+    d.init_db(conn)
+    # force the live CHECK back to the v13 spelling, keep version 13
+    conn.execute("DROP TABLE records")
+    conn.execute("""CREATE TABLE records (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL CHECK (type IN ('FACT','ASSUMPTION','INFERENCE',
+            'DECISION','RULE','CORRECTION','INTENT','WORKFLOW')),
+        content TEXT NOT NULL, evidence TEXT NOT NULL DEFAULT '',
+        verified INTEGER NOT NULL DEFAULT 0, confidence REAL NOT NULL DEFAULT 0.5,
+        source TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        session_id TEXT NOT NULL DEFAULT '', project_id TEXT NOT NULL DEFAULT '',
+        parent_id TEXT NOT NULL DEFAULT '', project_ids TEXT NOT NULL DEFAULT '',
+        last_decay_at TEXT NOT NULL DEFAULT '', about_peer TEXT NOT NULL DEFAULT '',
+        event_id TEXT NOT NULL DEFAULT '',
+        decay_exempt_until TEXT NOT NULL DEFAULT '',
+        superseded_by TEXT NOT NULL DEFAULT '',
+        importance REAL NOT NULL DEFAULT 0.5, cue TEXT NOT NULL DEFAULT '')""")
+    conn.execute("DELETE FROM schema_version")
+    conn.execute("INSERT INTO schema_version(version) VALUES (13)")
+    conn.commit()
+    d.init_db(conn)  # replays v14: rebuild + reconcile
+    v = conn.execute("SELECT version FROM schema_version").fetchone()[0]
+    assert v == 14
+    rid = d.remember(conn, "PROCEDURAL", "procedure after rebuild", verified=1)
+    assert rid
+    conn.close()
