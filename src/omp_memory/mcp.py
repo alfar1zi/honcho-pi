@@ -101,7 +101,11 @@ def _stale_schema(conn) -> bool:
         conn.execute("SELECT 1 FROM records LIMIT 1").fetchone()
         return False
     except sqlite3.DatabaseError as exc:
-        return "malformed" in str(exc).lower()
+        # Only the stale-cache signature. "database disk image is malformed"
+        # (page corruption) also contains "malformed" but is a file problem:
+        # a reopen fixes nothing, and init_db's auto-repair would swap the
+        # live DB for a backup on every call.
+        return str(exc).lower().startswith("malformed database schema")
 
 
 def get_conn(user: str = ""):

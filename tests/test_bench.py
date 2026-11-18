@@ -173,3 +173,38 @@ def test_get_conn_recovers_from_stale_schema(tmp_path, monkeypatch):
     assert c2.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 0
     # and the new handle is cached for later calls
     assert mcp.get_conn() is c2
+
+
+def test_stale_schema_rejects_page_corruption(tmp_path, monkeypatch):
+    """A corrupt file is not a stale cache: get_conn must not swap it.
+
+    "database disk image is malformed" contains "malformed" too, but that
+    is page corruption. Reopening cannot heal it, and the reopen path runs
+    init_db with auto_repair, which would replace the live DB with a
+    backup on every tool call.
+    """
+    import sqlite3
+    from omp_memory import mcp
+    key = str(tmp_path / "c.db")
+    monkeypatch.setenv("OMP_MEMORY_DB", key)
+    c1 = mcp.get_conn()
+
+    class Corrupt:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def close(self):
+            self.closed = True
+
+        def execute(self, sql, *a):
+            if "records" in sql:
+                raise sqlite3.DatabaseError("database disk image is malformed")
+            return self._inner.execute(sql, *a)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    corrupted = Corrupt(c1)
+    mcp._local.conns[key] = corrupted
+    c2 = mcp.get_conn()
+    assert c2 is corrupted  # same handle kept: corruption is not staleness
