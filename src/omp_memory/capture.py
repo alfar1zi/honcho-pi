@@ -475,7 +475,7 @@ def capture_session(
         written += 1
     conn.commit()
     reflected = None
-    if reflect:
+    if reflect and apply:
         from . import experience
         reflected = experience.reflect(conn, apply=True)
     report = {
