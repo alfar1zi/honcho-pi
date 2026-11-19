@@ -1,8 +1,10 @@
 """Idle watcher: capture session lessons after inactivity.
 
 Polls the newest session log; when it has been quiet for IDLE_SECONDS
-and not yet captured, runs capture_session(apply=True). The state file
-records the last captured mtime so a quiet session is only captured once.
+and not yet captured, runs capture_session(apply=True, reflect=True):
+the capture writes the lessons and the reflect pass abstracts them
+into patterns in the same connection. The state file records the last
+captured mtime so a quiet session is only captured once.
 """
 
 from __future__ import annotations
@@ -10,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -77,7 +80,8 @@ def capture_once(db_mod, conn, now: float | None = None) -> dict:
 
     from . import capture
 
-    summary = capture.capture_session(db_mod, conn, session_path=session, apply=True)
+    summary = capture.capture_session(db_mod, conn, session_path=session,
+                                      apply=True, reflect=True)
     save_state({**state, "captured_mtime": mtime, "captured_at": now})
     return {
         "action": "captured",
@@ -85,6 +89,27 @@ def capture_once(db_mod, conn, now: float | None = None) -> dict:
         "project": _session_project(session),
         **{k: v for k, v in summary.items() if k != "candidates"},
     }
+
+
+def _notify(summary: dict) -> None:
+    """Desktop notification so a capture is visible, not just silent.
+
+    Best-effort: no DISPLAY or no notify-send means no notification,
+    which must never break the capture itself. opt-in via
+    OMP_MEMORY_NOTIFY=1.
+    """
+    if os.environ.get("OMP_MEMORY_NOTIFY") != "1":
+        return
+    refl = summary.get("reflect") or {}
+    body = (f"{summary.get('written', 0)} lessons, "
+            f"{refl.get('written', 0)} patterns")
+    try:
+        subprocess.run(
+            ["notify-send", "-a", "honcho-pi", "Memory saved", body],
+            timeout=10, check=False,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def main(argv=None) -> int:
@@ -116,6 +141,7 @@ def main(argv=None) -> int:
                 result = capture_once(db, conn)
                 if result["action"] != "none":
                     print(f"[watch] {json.dumps(result)}", flush=True)
+                    _notify(result)
                 if time.time() - last_sleep >= SLEEP_INTERVAL:
                     report = db.sleep_pass(conn, apply=True)
                     last_sleep = time.time()

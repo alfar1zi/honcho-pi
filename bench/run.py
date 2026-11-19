@@ -43,22 +43,32 @@ def open_readonly(path: str) -> sqlite3.Connection:
     return conn
 
 
-def probe_rows(conn, n):
-    """Newest n records by creation time.
+def probe_rows(conn, n, cutoff=None):
+    """Newest n records by creation time, optionally before a cutoff.
 
-    created_at is immutable, so the probe slice is stable across
-    reflect/update passes that touch updated_at; ordering by updated_at
-    would resample the slice whenever a pass rewrites records, making
-    runs on the same corpus non-comparable.
+    created_at is immutable, so ordering by it keeps an INSERT-only
+    corpus stable (two runs with no writes between them report
+    identical numbers). It is still a moving window: any pass that
+    inserts rows (capture, reflect, remember) grows the corpus and
+    slides the slice. Cross-pass comparisons must therefore pin the
+    corpus (--cutoff), or be read as "the corpus changed, not the
+    ranker". Ordering by updated_at would resample on every rewrite,
+    which is never comparable.
     """
     columns = [r[1] for r in conn.execute(
         "PRAGMA table_info(records)").fetchall()]
     extra = ", superseded_by" if "superseded_by" in columns else ""
     extra += ", session_id" if "session_id" in columns else ""
     extra += ", type" if "type" in columns else ""
-    rows = [dict(r) for r in conn.execute(
-        f"SELECT id, content, created_at, updated_at, confidence{extra}"
-        " FROM records ORDER BY created_at DESC LIMIT ?", (n,))]
+    sql = (f"SELECT id, content, created_at, updated_at, confidence{extra}"
+           " FROM records")
+    params: list = []
+    if cutoff:
+        sql += " WHERE created_at <= ?"
+        params.append(cutoff)
+    sql += " ORDER BY created_at DESC LIMIT ?"
+    params.append(n)
+    rows = [dict(r) for r in conn.execute(sql, params)]
     for r in rows:
         r.setdefault("type", "")
     for r in rows:
@@ -315,8 +325,8 @@ def question_pattern(rows):
     return cases
 
 
-def run(conn, report):
-    rows = probe_rows(conn, 60)
+def run(conn, report, cutoff=None):
+    rows = probe_rows(conn, 60, cutoff=cutoff)
     if len(rows) < 5:
         print("corpus too small to benchmark (need >= 5 records)")
         return 1
@@ -406,9 +416,12 @@ def run(conn, report):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--db", default=db.DB_PATH, help="path to memory.db (read-only)")
+    ap.add_argument("--cutoff", default=None,
+                    help="only probe records created before this ISO timestamp;"
+                         " pins the slice so runs on a growing corpus stay comparable")
     args = ap.parse_args()
     conn = open_readonly(args.db)
-    return run(conn, print)
+    return run(conn, print, cutoff=args.cutoff)
 
 
 if __name__ == "__main__":

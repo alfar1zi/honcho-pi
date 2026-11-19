@@ -376,7 +376,8 @@ def tool_maintenance(args: Dict[str, Any], user: str = "") -> str:
             # the storage layer's concern.
             from . import capture
             report = capture.capture_session(
-                db, conn, apply=bool(args.get("apply")))
+                db, conn, apply=bool(args.get("apply")),
+                reflect=bool(args.get("reflect")))
             return json.dumps(report, indent=2, sort_keys=True)
         return f"maintenance: unknown op {op}; use decay | sleep | forget_cold | promote | capture"
     return with_conn(user, body)

@@ -9,7 +9,7 @@ independent of any particular harness while the extraction quality matches.
 Usage (MCP):
     maintenance {"op": "capture"}
     maintenance {"op": "capture", "apply": true}    # write to DB
-    maintenance {"op": "capture", "dry_run": true}  # return candidates without writing
+    maintenance {"op": "capture", "reflect": true}  # + reflect pass
 
 The harness's session log lives in:
     ~/.omp/profiles/<profile>/agent/sessions/<project-slug>/<ts>_<id>.jsonl
@@ -396,6 +396,7 @@ def capture_session(
     session_path: Path | None = None,
     apply: bool = False,
     dry_run: bool = False,
+    reflect: bool = False,
 ) -> dict:
     """Run extraction and optionally write candidates to the DB.
 
@@ -404,6 +405,8 @@ def capture_session(
     session_path: path to the session .jsonl; default = latest_session().
     apply: write candidates to DB (default False = dry_run mode).
     dry_run: alias for apply=False (explicit).
+    reflect: after writing, run the experience pass so new lessons are
+        abstracted into patterns in the same transaction.
 
     Returns a summary dict.
     """
@@ -471,9 +474,16 @@ def capture_session(
         )
         written += 1
     conn.commit()
-    return {
+    reflected = None
+    if reflect:
+        from . import experience
+        reflected = experience.reflect(conn, apply=True)
+    report = {
         "session": str(session_path),
         "candidates": len(candidates),
         "written": written,
         "apply": True,
     }
+    if reflected is not None:
+        report["reflect"] = reflected
+    return report

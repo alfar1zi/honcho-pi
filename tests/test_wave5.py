@@ -213,6 +213,25 @@ def test_maintenance_unknown_op_lists_capture(tmp_path):
         srv.close()
 
 
+def test_capture_reflect_runs_experience_pass(conn, session_dir):
+    """reflect=True abstracts the captured lessons in the same call.
+
+    The captured session's failure and the rule-like decision both land
+    in the store; the reflect pass links them by event_id and reports
+    the summary under the capture report's 'reflect' key.
+    """
+    _write_session(session_dir, "a.jsonl", _session_entries())
+    report = capture.capture_session(db, conn, apply=True, reflect=True)
+    assert report["written"] > 0
+    assert "reflect" in report
+    assert set(report["reflect"]) == {"procedural", "reflective", "pairs",
+                                      "links", "patterns", "written"}
+    assert report["reflect"]["links"] >= 0
+    # default (reflect off) keeps the old shape: no 'reflect' key
+    plain = capture.capture_session(db, conn, apply=True)
+    assert "reflect" not in plain
+
+
 # --- failure matcher precision (audit: keyword matching captured doc text) ---
 
 def test_read_result_mentioning_error_is_not_a_failure(session_dir):
