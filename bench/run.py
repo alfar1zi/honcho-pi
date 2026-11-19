@@ -44,6 +44,13 @@ def open_readonly(path: str) -> sqlite3.Connection:
 
 
 def probe_rows(conn, n):
+    """Newest n records by creation time.
+
+    created_at is immutable, so the probe slice is stable across
+    reflect/update passes that touch updated_at; ordering by updated_at
+    would resample the slice whenever a pass rewrites records, making
+    runs on the same corpus non-comparable.
+    """
     columns = [r[1] for r in conn.execute(
         "PRAGMA table_info(records)").fetchall()]
     extra = ", superseded_by" if "superseded_by" in columns else ""
@@ -51,7 +58,7 @@ def probe_rows(conn, n):
     extra += ", type" if "type" in columns else ""
     rows = [dict(r) for r in conn.execute(
         f"SELECT id, content, created_at, updated_at, confidence{extra}"
-        " FROM records ORDER BY updated_at DESC LIMIT ?", (n,))]
+        " FROM records ORDER BY created_at DESC LIMIT ?", (n,))]
     for r in rows:
         r.setdefault("type", "")
     for r in rows:
