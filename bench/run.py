@@ -290,6 +290,22 @@ def question_abstention(conn):
         "SELECT term FROM records_fts_vocab")}
     probes = ["zorblax", "flumpkin", "qwiblish"]
     return [p for p in probes if p not in vocab]
+def question_pattern(rows):
+    """Query built from a REFLECTIVE lesson's terms.
+
+    The probe measures whether abstraction survives recall: a lesson
+    distilled from many records shares vocabulary with its sources, so
+    it must beat them when the query names the lesson's topic. Requires
+    a REFLECTIVE record with 3+ distinctive terms; otherwise no case is
+    emitted (a probe that cannot fail measures nothing).
+    """
+    refls = [r for r in rows if r.get("type") == "REFLECTIVE"]
+    cases = []
+    for p in refls:
+        words = sorted(_terms(p["content"]))[:6]
+        if len(words) >= 3:
+            cases.append((" ".join(words), p["id"]))
+    return cases
 
 
 def run(conn, report):
@@ -301,7 +317,7 @@ def run(conn, report):
     results = {"exact": [0, 0], "update": [0, 0], "temporal": [0, 0],
                "abstain": [0, 0], "join": [0, 0], "topical": [0, 0],
                "supersede": [0, 0], "multisession": [0, 0],
-               "procedure": [0, 0]}
+               "procedure": [0, 0], "pattern": [0, 0]}
 
     for q, expected in question_exact(rows):
         hits = db.recall(conn, q, limit=3)
@@ -360,10 +376,16 @@ def run(conn, report):
         if hits and hits[0]["id"] == expected:
             results["procedure"][0] += 1
 
+    for q, expected in question_pattern(rows):
+        hits = db.recall(conn, q, limit=3)
+        results["pattern"][1] += 1
+        if hits and hits[0]["id"] == expected:
+            results["pattern"][0] += 1
+
     print(f"corpus: {len(rows)} probe records")
     total_hit = total_n = 0
     for name in ("exact", "update", "temporal", "abstain", "join", "topical",
-                 "supersede", "multisession", "procedure"):
+                 "supersede", "multisession", "procedure", "pattern"):
         hit, n = results[name]
         total_hit += hit
         total_n += n
