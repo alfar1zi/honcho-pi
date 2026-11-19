@@ -94,19 +94,23 @@ def capture_once(db_mod, conn, now: float | None = None) -> dict:
 def _notify(summary: dict) -> None:
     """Desktop notification so a capture is visible, not just silent.
 
-    Best-effort: no DISPLAY or no notify-send means no notification,
-    which must never break the capture itself. opt-in via
-    OMP_MEMORY_NOTIFY=1.
+    Best-effort: a systemd unit has no session bus unless one is
+    exported, so fall back to the well-known /run/user path; without
+    it, or without notify-send, nothing fires and capture still works.
+    Opt-in via OMP_MEMORY_NOTIFY=1.
     """
     if os.environ.get("OMP_MEMORY_NOTIFY") != "1":
         return
     refl = summary.get("reflect") or {}
     body = (f"{summary.get('written', 0)} lessons, "
             f"{refl.get('written', 0)} patterns")
+    env = dict(os.environ)
+    if "DBUS_SESSION_BUS_ADDRESS" not in env and "DISPLAY" not in env:
+        env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{os.getuid()}/bus"
     try:
         subprocess.run(
             ["notify-send", "-a", "honcho-pi", "Memory saved", body],
-            timeout=10, check=False,
+            timeout=10, check=False, env=env,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         pass
