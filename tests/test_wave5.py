@@ -390,3 +390,22 @@ def test_scan_text_shared_by_cli_and_capture():
     assert cli.scan_text is capture.scan_text
     findings = capture.scan_text("password=hunter22")
     assert findings and findings[0][0] == "assignment"
+
+
+def test_self_echo_tool_output_is_not_a_lesson(session_dir):
+    """A toolResult echoing a past capture line is not a new failure.
+
+    Capture output can land back in the session log (an agent printing
+    candidates, a benchmark run); without this guard each run nests one
+    more 'Observed failure' level into the store.
+    """
+    entries = [
+        {"type": "message", "timestamp": "2026-11-18T08:00:00.000Z",
+         "message": {"role": "toolResult", "toolName": "bash",
+                     "content": "bash: - INFERENCE : Observed failure: "
+                                "bash: FileNotFoundError: [Errno 2] No such file"}},
+    ]
+    _write_session(session_dir, "2026-11-18T08-00-00-000Z_echo.jsonl", entries)
+    p = session_dir / "2026-11-18T08-00-00-000Z_echo.jsonl"
+    cands = capture.extract_lessons(capture._read_entries(p), p)
+    assert [c for c in cands if "Observed failure" in c["content"]] == []

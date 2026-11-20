@@ -61,7 +61,8 @@ _NOISE_RE = re.compile(r"(?:^|\b\w+:\s)\s*(?:except|raise)\s+\S*?(?:Error|Except
 # an error is not a failure. Only execution tools can fail.
 _READ_TOOLS = {"read", "grep", "glob", "view", "search"}
 _CONTENT_SKIP = re.compile(
-    r"^\[(?:HANDOFF|System note)\]|\brecalled memory context\b", re.I
+    r"^\[(?:HANDOFF|System note)\]|\brecalled memory context\b"
+    r"|\bObserved failure:", re.I
 )
 _TOKEN_RE = re.compile(r"\w{3,}")
 _DEFAULT_SESSIONS = ""  # empty = auto from env
@@ -284,7 +285,8 @@ def _event_candidates(seg: dict, session_id: str, project_id: str,
             elif role == "toolResult":
                 name = str(msg.get("toolName") or "")
                 body = _text_of(msg)
-                if name not in _READ_TOOLS and _FAILURE_RE.search(body):
+                if (name not in _READ_TOOLS and _FAILURE_RE.search(body)
+                        and not _CONTENT_SKIP.search(body)):
                     failures.append(f"{name}: {_clip(_failure_line(body), 200)}")
                 # track file tool calls
                 if name in ("bash", "shell"):
