@@ -10,7 +10,7 @@ from omp_memory import web
 def graph_env(tmp_path, monkeypatch):
     db_file = tmp_path / "memory.db"
     monkeypatch.setenv("OMP_MEMORY_DB", str(db_file))
-    monkeypatch.setattr(web, "GRAPH_FILE", tmp_path / "graph.json")
+    monkeypatch.setattr(db, "DB_PATH", str(db_file))
     conn = db.connect(str(db_file))
     db.init_db(conn)
     yield conn

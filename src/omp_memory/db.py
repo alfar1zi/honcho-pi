@@ -442,8 +442,9 @@ def repair_from_backup(db_path: str = DB_PATH) -> bool:
 
 # --- connections -------------------------------------------------------------
 
-def connect(db_path: str = DB_PATH) -> sqlite3.Connection:
+def connect(db_path: str | None = None) -> sqlite3.Connection:
     """Open a connection. Raises on failure; the file is never removed."""
+    db_path = db_path or DB_PATH
     ensure_dirs()
     conn = sqlite3.connect(db_path, timeout=BUSY_TIMEOUT_MS / 1000.0)
     conn.row_factory = sqlite3.Row
