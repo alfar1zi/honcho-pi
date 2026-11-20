@@ -45,6 +45,18 @@ _FAILURE_RE = re.compile(
     r"|\berror:)"
     , re.I
 )
+# A failure line is a lesson only when it names the error type. Bare
+# "Command exited with code N", parse-error fragments, and echoed error
+# text from a script under test are noise, not knowledge.
+_LESSON_RE = re.compile(
+    r"(?i:(?<!except )(?<!raise )\b(?!isError\b)(?!STATUS_)\w+(?:Error|Exception)\b\s*:)"
+    r"|\bFAILED\s+\S+"
+    r"|\bE\s+[A-Z]\w+"
+    r"|\bTraceback"
+)
+# Lines that merely name an exception (except clauses, raise statements)
+# are source code under test, not an outcome.
+_NOISE_RE = re.compile(r"(?:^|\b\w+:\s)\s*(?:except|raise)\s+\S*?(?:Error|Exception)\b", re.I)
 # Tools whose output is content, not an outcome: reading a file that mentions
 # an error is not a failure. Only execution tools can fail.
 _READ_TOOLS = {"read", "grep", "glob", "view", "search"}
@@ -111,11 +123,17 @@ def sessions_dir() -> Path:
     return _agent_dir() / "sessions"
 
 
+_SESSION_FILE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T.*\.jsonl$")
+
+
 def latest_session() -> Path | None:
     root = sessions_dir()
     if not root.is_dir():
         return None
-    files = [p for p in root.rglob("*.jsonl") if p.is_file()]
+    files = [
+        p for p in root.rglob("*.jsonl")
+        if p.is_file() and _SESSION_FILE_RE.match(p.name)
+    ]
     if not files:
         return None
     return max(files, key=lambda p: p.stat().st_mtime)
@@ -297,6 +315,12 @@ def _event_candidates(seg: dict, session_id: str, project_id: str,
     # Failure patterns -> INFERENCE (what went wrong, with confidence floor)
     for failure in failures[:max_failures]:
         lesson = _failure_line(failure)
+        # The matcher catches any line mentioning an error; only a line
+        # that names the error type carries a lesson. Bare "Command
+        # exited with code N" or a parse-error fragment is shell noise,
+        # and a typo session must not become permanent memory.
+        if _NOISE_RE.search(lesson) or not _LESSON_RE.search(lesson):
+            continue
         candidates.append({
             "rtype": CAPTURE_DEFAULT_TYPE,
             "content": f"Observed failure: {lesson}",

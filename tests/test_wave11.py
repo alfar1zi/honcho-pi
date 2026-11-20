@@ -22,7 +22,7 @@ def _two_event_entries():
     return [
         _msg("user", "deploy to prod failed with docker buildx error",
              "2026-11-18T08:00:00.000Z"),
-        _msg("toolResult", "pytest exited with code 1",
+        _msg("toolResult", "pytest: TypeError: cannot unpack non-iterable NoneType",
              "2026-11-18T08:01:00.000Z"),
         _msg("user", "refactor the grafana dashboard to use recharts",
              "2026-11-18T08:02:00.000Z"),
@@ -120,7 +120,7 @@ def _write_jsonl(p, entries):
 
 
 def test_recapture_is_idempotent_across_events(conn, session_dir):
-    p = _write_jsonl(session_dir / "a.jsonl", _two_event_entries())
+    p = _write_jsonl(session_dir / "2026-11-18T08-00-00-000Z_a.jsonl", _two_event_entries())
     first = capture.capture_session(db, conn, apply=True)
     assert first["written"] > 0
     second = capture.capture_session(db, conn, apply=True)

@@ -63,8 +63,8 @@ def _session_entries() -> list[dict]:
 
 
 def test_extract_lessons_shapes_candidates(session_dir):
-    _write_session(session_dir, "a.jsonl", _session_entries())
-    p = session_dir / "a.jsonl"
+    _write_session(session_dir, "2026-11-18T08-00-00-000Z_a.jsonl", _session_entries())
+    p = session_dir / "2026-11-18T08-00-00-000Z_a.jsonl"
     cands = capture.extract_lessons(capture._read_entries(p), p)
     types = {c["rtype"] for c in cands}
     assert "INFERENCE" in types
@@ -72,7 +72,7 @@ def test_extract_lessons_shapes_candidates(session_dir):
     for c in cands:
         assert c["source"] == "auto-capture"
         assert c["confidence"] <= 0.5
-        assert c["session_id"] == "a"
+        assert c["session_id"] == "2026-11-18T08-00-00-000Z_a"
         assert c["project_id"] == "proj"
 
 
@@ -84,8 +84,8 @@ def test_extract_lessons_skips_control_text(session_dir):
         {"type": "message", "timestamp": "2026-11-18T08:00:01.000Z",
          "message": {"role": "user", "content": "real request"}},
     ]
-    _write_session(session_dir, "a.jsonl", entries)
-    p = session_dir / "a.jsonl"
+    _write_session(session_dir, "2026-11-18T08-00-00-000Z_a.jsonl", entries)
+    p = session_dir / "2026-11-18T08-00-00-000Z_a.jsonl"
     cands = capture.extract_lessons(capture._read_entries(p), p)
     for c in cands:
         assert "decided to skip this" not in c["content"]
@@ -95,7 +95,7 @@ def test_extract_lessons_skips_control_text(session_dir):
 
 
 def test_capture_dry_run_writes_nothing(conn, session_dir):
-    _write_session(session_dir, "a.jsonl", _session_entries())
+    _write_session(session_dir, "2026-11-18T08-00-00-000Z_a.jsonl", _session_entries())
     report = capture.capture_session(db, conn, apply=False)
     assert report["written"] == 0
     assert report["apply"] is False
@@ -104,7 +104,7 @@ def test_capture_dry_run_writes_nothing(conn, session_dir):
 
 
 def test_capture_apply_writes_records(conn, session_dir):
-    _write_session(session_dir, "a.jsonl", _session_entries())
+    _write_session(session_dir, "2026-11-18T08-00-00-000Z_a.jsonl", _session_entries())
     report = capture.capture_session(db, conn, apply=True)
     assert report["apply"] is True
     assert report["written"] > 0
@@ -117,7 +117,7 @@ def test_capture_apply_writes_records(conn, session_dir):
 
 
 def test_capture_is_idempotent(conn, session_dir):
-    _write_session(session_dir, "a.jsonl", _session_entries())
+    _write_session(session_dir, "2026-11-18T08-00-00-000Z_a.jsonl", _session_entries())
     first = capture.capture_session(db, conn, apply=True)
     second = capture.capture_session(db, conn, apply=True)
     assert first["written"] > 0
@@ -182,7 +182,7 @@ class Server:
 def test_maintenance_capture_op_end_to_end(tmp_path):
     sessions = tmp_path / "sessions" / "proj"
     sessions.mkdir(parents=True)
-    (sessions / "a.jsonl").write_text(
+    (sessions / "2026-11-18T08-00-00-000Z_a.jsonl").write_text(
         "\n".join(json.dumps(e) for e in _session_entries()), encoding="utf-8")
     srv = Server(tmp_path, env_extra={"OMP_MEMORY_SESSIONS": str(tmp_path / "sessions")})
     try:
@@ -220,7 +220,7 @@ def test_capture_reflect_runs_experience_pass(conn, session_dir):
     in the store; the reflect pass links them by event_id and reports
     the summary under the capture report's 'reflect' key.
     """
-    _write_session(session_dir, "a.jsonl", _session_entries())
+    _write_session(session_dir, "2026-11-18T08-00-00-000Z_a.jsonl", _session_entries())
     report = capture.capture_session(db, conn, apply=True, reflect=True)
     assert report["written"] > 0
     assert "reflect" in report
@@ -246,21 +246,21 @@ def test_read_result_mentioning_error_is_not_a_failure(session_dir):
          "message": {"role": "toolResult", "toolName": "read",
                      "content": "Traceback (most recent call last): ValueError: x"}},
     ]
-    _write_session(session_dir, "a.jsonl", entries)
-    p = session_dir / "a.jsonl"
+    _write_session(session_dir, "2026-11-18T08-00-00-000Z_a.jsonl", entries)
+    p = session_dir / "2026-11-18T08-00-00-000Z_a.jsonl"
     cands = capture.extract_lessons(capture._read_entries(p), p)
     assert [c for c in cands if "Observed failure" in c["content"]] == []
 
 
 def test_bash_failure_lines_still_captured(session_dir):
-    """Genuine execution failures still produce one failure candidate."""
+    """Genuine error-shaped failures still produce one failure candidate."""
     entries = [
         {"type": "message", "timestamp": "2026-11-18T08:00:00.000Z",
          "message": {"role": "toolResult", "toolName": "bash",
-                     "content": "pytest exited with code 1"}},
+                     "content": "TypeError: unsupported operand type(s)"}},
     ]
-    _write_session(session_dir, "a.jsonl", entries)
-    p = session_dir / "a.jsonl"
+    _write_session(session_dir, "2026-11-18T08-00-00-000Z_a.jsonl", entries)
+    p = session_dir / "2026-11-18T08-00-00-000Z_a.jsonl"
     cands = capture.extract_lessons(capture._read_entries(p), p)
     fails = [c for c in cands if "Observed failure" in c["content"]]
     assert len(fails) == 1
@@ -273,8 +273,47 @@ def test_passing_report_is_not_a_failure(session_dir):
          "message": {"role": "toolResult", "toolName": "bash",
                      "content": '{"passed": 10, "failed": 0, "status": "ok"}'}},
     ]
-    _write_session(session_dir, "a.jsonl", entries)
-    p = session_dir / "a.jsonl"
+    _write_session(session_dir, "2026-11-18T08-00-00-000Z_a.jsonl", entries)
+    p = session_dir / "2026-11-18T08-00-00-000Z_a.jsonl"
+    cands = capture.extract_lessons(capture._read_entries(p), p)
+    assert [c for c in cands if "Observed failure" in c["content"]] == []
+
+
+def test_bash_echoing_source_is_not_a_failure(session_dir):
+    """A bash run that echoes source code mentioning errors is not an outcome."""
+    entries = [
+        {"type": "message", "timestamp": "2026-11-18T08:00:00.000Z",
+         "message": {"role": "toolResult", "toolName": "bash",
+                     "content": "bash: except json.JSONDecodeError:"}},
+    ]
+    _write_session(session_dir, "2026-11-18T08-00-00-000Z_a.jsonl", entries)
+    p = session_dir / "2026-11-18T08-00-00-000Z_a.jsonl"
+    cands = capture.extract_lessons(capture._read_entries(p), p)
+    assert [c for c in cands if "Observed failure" in c["content"]] == []
+
+
+def test_bare_exit_code_is_not_a_lesson(session_dir):
+    """'Command exited with code 1' alone is noise, not a lesson."""
+    entries = [
+        {"type": "message", "timestamp": "2026-11-18T08:00:00.000Z",
+         "message": {"role": "toolResult", "toolName": "bash",
+                     "content": "Command exited with code 1"}},
+    ]
+    _write_session(session_dir, "2026-11-18T08-00-00-000Z_a.jsonl", entries)
+    p = session_dir / "2026-11-18T08-00-00-000Z_a.jsonl"
+    cands = capture.extract_lessons(capture._read_entries(p), p)
+    assert [c for c in cands if "Observed failure" in c["content"]] == []
+
+
+def test_parse_error_is_not_a_lesson(session_dir):
+    """A tool parse-error fragment is noise, not a lesson."""
+    entries = [
+        {"type": "message", "timestamp": "2026-11-18T08:00:00.000Z",
+         "message": {"role": "toolResult", "toolName": "vibe_list",
+                     "content": "Parse Error: Unexpected trailing characters at position 27"}},
+    ]
+    _write_session(session_dir, "2026-11-18T08-00-00-000Z_a.jsonl", entries)
+    p = session_dir / "2026-11-18T08-00-00-000Z_a.jsonl"
     cands = capture.extract_lessons(capture._read_entries(p), p)
     assert [c for c in cands if "Observed failure" in c["content"]] == []
 
@@ -289,13 +328,39 @@ def test_lesson_is_the_message_line_not_the_traceback(session_dir):
         {"type": "message", "timestamp": "2026-11-18T08:00:00.000Z",
          "message": {"role": "toolResult", "toolName": "bash", "content": body}},
     ]
-    _write_session(session_dir, "a.jsonl", entries)
-    p = session_dir / "a.jsonl"
+    _write_session(session_dir, "2026-11-18T08-00-00-000Z_a.jsonl", entries)
+    p = session_dir / "2026-11-18T08-00-00-000Z_a.jsonl"
     cands = capture.extract_lessons(capture._read_entries(p), p)
     fails = [c for c in cands if "Observed failure" in c["content"]]
     assert len(fails) == 1
     assert "ValueError: min() iterable argument is empty" in fails[0]["content"]
     assert "Traceback" not in fails[0]["content"]
+
+
+def test_error_line_containing_raise_mid_message_is_a_lesson(session_dir):
+    """A real error whose prose happens to say 'raise' is not noise."""
+    entries = [
+        {"type": "message", "timestamp": "2026-11-18T08:00:00.000Z",
+         "message": {"role": "toolResult", "toolName": "bash",
+                     "content": "RuntimeError: please raise the limit before retrying"}},
+    ]
+    _write_session(session_dir, "2026-11-18T08-00-00-000Z_a.jsonl", entries)
+    p = session_dir / "2026-11-18T08-00-00-000Z_a.jsonl"
+    cands = capture.extract_lessons(capture._read_entries(p), p)
+    fails = [c for c in cands if "Observed failure" in c["content"]]
+    assert len(fails) == 1
+    assert "RuntimeError" in fails[0]["content"]
+
+
+def test_latest_session_ignores_sidecars(session_dir):
+    """__advisor.jsonl and changes.jsonl are not session logs."""
+    (session_dir / "2026-11-18T08-00-00-000Z_a.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in _session_entries()), encoding="utf-8")
+    (session_dir / "__advisor.jsonl").write_text("{}", encoding="utf-8")
+    (session_dir / "changes.jsonl").write_text("{}", encoding="utf-8")
+    picked = capture.latest_session()
+    assert picked is not None
+    assert picked.name == "2026-11-18T08-00-00-000Z_a.jsonl"
 
 
 # --- secret scanning in the auto-capture pipeline ---------------------------
@@ -311,8 +376,8 @@ def test_capture_never_stores_secret_looking_tool_output(session_dir):
          "message": {"role": "toolResult", "toolName": "bash",
                      "content": "Traceback... auth failed: sk-abcdefghijklmnop1234"}},
     ]
-    _write_session(session_dir, "a.jsonl", entries)
-    p = session_dir / "a.jsonl"
+    _write_session(session_dir, "2026-11-18T08-00-00-000Z_a.jsonl", entries)
+    p = session_dir / "2026-11-18T08-00-00-000Z_a.jsonl"
     cands = capture.extract_lessons(capture._read_entries(p), p)
     assert cands == []
     for c in cands:
