@@ -395,7 +395,7 @@ def backup_db(src: str) -> str:
     return ""
 
 
-def repair_from_backup(db_path: str = DB_PATH) -> bool:
+def repair_from_backup(db_path: str | None = None) -> bool:
     """Restore db_path from the newest usable backup. Never deletes db_path.
 
     VACUUM INTO reads a source database and writes a compacted image, so the
@@ -403,6 +403,7 @@ def repair_from_backup(db_path: str = DB_PATH) -> bool:
     then replaced atomically, so a failure mid-repair cannot leave the database
     missing.
     """
+    db_path = db_path or os.environ.get("OMP_MEMORY_DB", DB_PATH)
     backups = sorted(glob.glob(os.path.join(BACKUP_DIR, "memory.db.bak.*")),
                      key=os.path.getmtime, reverse=True)
     for bak in backups:
@@ -444,7 +445,7 @@ def repair_from_backup(db_path: str = DB_PATH) -> bool:
 
 def connect(db_path: str | None = None) -> sqlite3.Connection:
     """Open a connection. Raises on failure; the file is never removed."""
-    db_path = db_path or DB_PATH
+    db_path = db_path or os.environ.get("OMP_MEMORY_DB", DB_PATH)
     ensure_dirs()
     conn = sqlite3.connect(db_path, timeout=BUSY_TIMEOUT_MS / 1000.0)
     conn.row_factory = sqlite3.Row
