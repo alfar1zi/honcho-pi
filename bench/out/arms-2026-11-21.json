@@ -1,0 +1,36 @@
+{
+  "adopt": false,
+  "arms": {
+    "heat_heavy": {
+      "hit_at_1": 0.54,
+      "mrr": 0.5474,
+      "n": 200
+    },
+    "incumbent": {
+      "hit_at_1": 0.54,
+      "mrr": 0.5474,
+      "n": 200
+    },
+    "lexical_heavy": {
+      "hit_at_1": 0.54,
+      "mrr": 0.5474,
+      "n": 200
+    },
+    "no_ppr": {
+      "hit_at_1": 0.53,
+      "mrr": 0.5356,
+      "n": 200
+    },
+    "ppr_heavy": {
+      "hit_at_1": 0.54,
+      "mrr": 0.5474,
+      "n": 200
+    }
+  },
+  "best": "incumbent",
+  "corpus": {
+    "n": 2000,
+    "seed": 7
+  },
+  "incumbent": "incumbent"
+}

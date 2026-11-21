@@ -490,6 +490,48 @@ def group_integrity(mod, api):
     finally:
         conn.close()
 
+def group_update_correctness(mod, api):
+    """The probe the leaders fail (Zep 8/24 updates, mem0 ADD-only):
+    after a correction, does recall serve the NEW fact, is the old one
+    gone, and does the system abstain on never-stored facts?
+    Synchronous write means freshness latency is ~0 by construction;
+    we measure it anyway so the number is evidence, not architecture.
+    """
+    conn = fresh_conn(mod)
+    out = {}
+    try:
+        write = getattr(mod, "remember")
+        reinforce = getattr(mod, "reinforce")
+        recall = getattr(mod, "recall")
+        old = write(conn, "FACT", "gateway timeout budget is 250 ms under load",
+                    verified=1, confidence=0.9, source="ops", project_id="p1")
+        old_id = old["id"] if isinstance(old, dict) else old
+        t0 = time.perf_counter()
+        reinforce(conn, old_id, "correction",
+                  content="gateway timeout budget is 1500 ms under load",
+                  evidence="load test run 88", source="ops")
+        hits = recall(conn, "gateway timeout budget load", limit=3)
+        latency_ms = (time.perf_counter() - t0) * 1000
+        out["freshness_ms"] = round(latency_ms, 3)
+        out["correction_serves_new"] = bool(
+            hits and "1500" in (hits[0].get("content") or hits[0].get("snippet") or ""))
+        out["old_content_gone"] = all(
+            "250 ms" not in (h.get("content") or h.get("snippet") or "") for h in hits)
+        ghost = recall(conn, "quixotic zebra furnace calibration", limit=3)
+        out["abstains_on_unknown"] = (not ghost) or bool(ghost[0].get("abstained"))
+        reinforce(conn, old_id, "correction",
+                  content="gateway timeout budget is 3000 ms under load",
+                  evidence="load test run 89", source="ops")
+        hits2 = recall(conn, "gateway timeout budget load", limit=3)
+        out["second_update_wins"] = bool(
+            hits2 and "3000" in (hits2[0].get("content") or hits2[0].get("snippet") or ""))
+        out["score"] = sum([out["correction_serves_new"], out["old_content_gone"],
+                            out["abstains_on_unknown"], out["second_update_wins"]])
+        out["score_max"] = 4
+        return out
+    finally:
+        conn.close()
+
 
 # --- driver -----------------------------------------------------------------
 
@@ -499,6 +541,7 @@ GROUPS = (
     ("C_token", group_token),
     ("D_staleness", group_staleness),
     ("E_integrity", group_integrity),
+    ("F_update_correctness", group_update_correctness),
 )
 
 
@@ -579,6 +622,12 @@ def summarize(report, stream=sys.stderr):
                      % (e["records"], e["fts"], e["quick_check"],
                         "ok" if e["rule_intact"] else "LOST",
                         "ok" if e["verified_intact"] else "LOST"))
+    f = report["groups"].get("F_update_correctness", {}).get("data")
+    if f:
+        stream.write("  F update=%s/4 freshness=%sms (new=%s old_gone=%s abstain=%s second=%s)\n"
+                     % (f.get("score"), f.get("freshness_ms"),
+                        f.get("correction_serves_new"), f.get("old_content_gone"),
+                        f.get("abstains_on_unknown"), f.get("second_update_wins")))
 
 
 if __name__ == "__main__":
