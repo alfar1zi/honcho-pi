@@ -62,6 +62,21 @@ _PYTEST_RE = re.compile(r"\bFAILED\s+(?:\./)?(?:tests?|test)/\S+")
 # Lines that merely name an exception (except clauses, raise statements)
 # are source code under test, not an outcome.
 _NOISE_RE = re.compile(r"(?:^|\b\w+:\s)\s*(?:except|raise)\s+\S*?(?:Error|Exception)\b", re.I)
+# Anti-hoarding (ported from hermes-agent _DO_NOT_CAPTURE_BLOCK, itself
+# distilled from production issues): environment-dependent failures and
+# unfixed complaints are not lessons. "command not found" is a missing
+# install, not knowledge; "X does not work" without a verified fix is a
+# complaint that would decay into confidently-wrong memory.
+_ENV_FAILURE_RE = re.compile(
+    r"(?i)\b(?:command not found|no such file or directory|not recognized as|"
+    r"permission denied|connection refused|network is unreachable|"
+    r"could not resolve host|module not found|no module named|"
+    r"credential|not logged in|unauthorized|econnrefused|enotfound)\b"
+)
+_UNFIXED_COMPLAINT_RE = re.compile(
+    r"(?i)\b(?:does not work|doesn't work|is broken|still failing|still broken|"
+    r"not working|keeps failing)\b"
+)
 # Tools whose output is content, not an outcome: reading a file that mentions
 # an error is not a failure. Only execution tools can fail.
 _READ_TOOLS = {"read", "grep", "glob", "view", "search"}
@@ -333,6 +348,14 @@ def _event_candidates(seg: dict, session_id: str, project_id: str,
             continue
         if _PYTEST_RE.search(lesson):
             continue
+        # Environment failures are setup problems, not lessons; an unfixed
+        # complaint is only a lesson when the same event also shows the fix
+        # (a later success line in the failure text).
+        if _ENV_FAILURE_RE.search(lesson):
+            continue
+        if _UNFIXED_COMPLAINT_RE.search(lesson) and \
+                not re.search(r"(?i)\b(?:fixed|resolved|works now|solution|fix:)\b", failure):
+            continue
         candidates.append({
             "rtype": CAPTURE_DEFAULT_TYPE,
             "content": f"Observed failure: {lesson}",
@@ -433,6 +456,7 @@ def capture_session(
     apply: bool = False,
     dry_run: bool = False,
     reflect: bool = False,
+    staging: bool = False,
 ) -> dict:
     """Run extraction and optionally write candidates to the DB.
 
@@ -485,6 +509,7 @@ def capture_session(
 
     # Write each candidate that doesn't already exist (content-identity dedup)
     written = 0
+    staged = 0
     for cand in candidates:
         existing = db_mod.find_record(
             conn,
@@ -494,6 +519,13 @@ def capture_session(
             cand["project_id"],
         )
         if existing:
+            continue
+        if staging:
+            # Write approval: candidates wait for the operator instead of
+            # landing directly. The agent never changes your memory
+            # without an approve.
+            db_mod.stage_write(conn, cand)
+            staged += 1
             continue
         db_mod.upsert_record(
             conn,
@@ -518,6 +550,7 @@ def capture_session(
         "session": str(session_path),
         "candidates": len(candidates),
         "written": written,
+        "staged": staged,
         "apply": True,
     }
     if reflected is not None:

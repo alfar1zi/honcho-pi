@@ -167,7 +167,7 @@ INTENT_CUE_BONUS = 0.10
 INTENT_DECAY_TAU_DAYS = 7.0
 
 PRE_COMPRESS_CHECKPOINT_API_VERSION = 2
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 # Recall reranking weights. Lexical is dominant (0.70) because recall is
 # primarily an inquiry of relevance. Heat is moderate (0.25) so stale yet
 # relevant records do not sink while breaking ties among equally relevant
@@ -631,6 +631,22 @@ def _create_schema(conn: sqlite3.Connection):
         reason      TEXT NOT NULL DEFAULT '',
         ts          TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS pending_writes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        rtype TEXT NOT NULL,
+        content TEXT NOT NULL,
+        evidence TEXT NOT NULL DEFAULT '',
+        confidence REAL NOT NULL DEFAULT 0.35,
+        source TEXT NOT NULL DEFAULT '',
+        tags TEXT NOT NULL DEFAULT '',
+        session_id TEXT NOT NULL DEFAULT '',
+        project_id TEXT NOT NULL DEFAULT '',
+        event_id TEXT NOT NULL DEFAULT '',
+        content_hash TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL,
+        decided_at TEXT NOT NULL DEFAULT ''
+    );
     CREATE INDEX IF NOT EXISTS idx_promotion_record ON promotion_log(record_id);
     CREATE INDEX IF NOT EXISTS idx_graveyard_ts     ON forgotten_graveyard(ts);
     """)
@@ -1003,6 +1019,32 @@ def _migrate(conn: sqlite3.Connection):
                 conn.execute(ddl)
         conn.execute("DELETE FROM schema_version")
         conn.execute("INSERT INTO schema_version(version) VALUES (15)")
+        conn.commit()
+
+    if version < 16:
+        # v16: write staging (hermes write_approval). Auto-capture candidates
+        # below the trust threshold wait here for approve/reject instead of
+        # landing in records directly. content_hash pins the candidate at
+        # staging time: apply refuses if the payload changed since review.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pending_writes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rtype TEXT NOT NULL,
+                content TEXT NOT NULL,
+                evidence TEXT NOT NULL DEFAULT '',
+                confidence REAL NOT NULL DEFAULT 0.35,
+                source TEXT NOT NULL DEFAULT '',
+                tags TEXT NOT NULL DEFAULT '',
+                session_id TEXT NOT NULL DEFAULT '',
+                project_id TEXT NOT NULL DEFAULT '',
+                event_id TEXT NOT NULL DEFAULT '',
+                content_hash TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                decided_at TEXT NOT NULL DEFAULT ''
+            )""")
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version(version) VALUES (16)")
         conn.commit()
 
 
@@ -2083,6 +2125,62 @@ def check_anchors(conn: sqlite3.Connection, apply: bool = False) -> dict:
     return {"checked": checked, "flagged": flagged, "cleared": cleared,
             "apply": bool(apply)}
 
+def stage_write(conn: sqlite3.Connection, cand: dict) -> int:
+    """Park a low-trust candidate for review (hermes write_approval).
+    The content hash pins what was reviewed; decide refuses a changed payload.
+    Duplicate pending content is not staged twice.
+    """
+    h = hashlib.sha256(normalize_content(cand["content"]).encode()).hexdigest()
+    dup = conn.execute(
+        "SELECT id FROM pending_writes WHERE content_hash=? AND status='pending'",
+        (h,)).fetchone()
+    if dup:
+        return dup[0]
+    cur = conn.execute(
+        "INSERT INTO pending_writes (rtype, content, evidence, confidence, source,"
+        " tags, session_id, project_id, event_id, content_hash, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (cand["rtype"], cand["content"], cand.get("evidence", ""),
+         cand.get("confidence", 0.35), cand.get("source", ""),
+         cand.get("tags", ""), cand.get("session_id", ""),
+         cand.get("project_id", ""), cand.get("event_id", ""), h, now_iso()))
+    conn.commit()
+    return cur.lastrowid
+
+
+def list_pending(conn: sqlite3.Connection, status: str = "pending") -> list:
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM pending_writes WHERE status=? ORDER BY created_at", (status,))]
+
+
+def decide_pending(conn: sqlite3.Connection, pending_id: int, approve: bool) -> dict:
+    """Approve -> upsert into records; reject -> mark rejected. The hash is
+    re-checked at decision time so an edited payload cannot ride an old approval.
+    """
+    row = conn.execute("SELECT * FROM pending_writes WHERE id=?",
+                       (pending_id,)).fetchone()
+    if not row:
+        raise KeyError(pending_id)
+    row = dict(row)
+    if row["status"] != "pending":
+        return {"id": pending_id, "status": row["status"], "noop": True}
+    h = hashlib.sha256(normalize_content(row["content"]).encode()).hexdigest()
+    if h != row["content_hash"]:
+        raise ValueError("pending content changed since staging; re-review required")
+    if approve:
+        rid = upsert_record(
+            conn, rtype=row["rtype"], content=row["content"],
+            evidence=row["evidence"], verified=0, confidence=row["confidence"],
+            source=row["source"], tags=row["tags"], session_id=row["session_id"],
+            project_id=row["project_id"], event_id=row["event_id"])
+        status = "approved"
+    else:
+        rid = ""
+        status = "rejected"
+    conn.execute("UPDATE pending_writes SET status=?, decided_at=? WHERE id=?",
+                 (status, now_iso(), pending_id))
+    conn.commit()
+    return {"id": pending_id, "status": status, "record_id": rid}
 
 def _snippet(content: str, query: str, width: int = SNIPPET_CHARS) -> str:
     """A window onto the first query-term match, not the content's head.

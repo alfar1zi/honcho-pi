@@ -425,9 +425,48 @@ def tool_maintenance(args: Dict[str, Any], user: str = "") -> str:
             from . import capture
             report = capture.capture_session(
                 db, conn, apply=bool(args.get("apply")),
-                reflect=bool(args.get("reflect")))
+                reflect=bool(args.get("reflect")),
+                staging=bool(args.get("staging")))
             return json.dumps(report, indent=2, sort_keys=True)
-        return f"maintenance: unknown op {op}; use decay | sleep | reflect | forget_cold | promote | capture"
+        if op == "review":
+            # Hermes background-review without our own LLM: return the
+            # review contract + recent candidates; the host agent (already
+            # an LLM) executes it and writes back via remember/correction.
+            from . import capture
+            report = capture.capture_session(db, conn, apply=False)
+            prompt = (
+                "Review these candidate lessons from the session. For each: "
+                "(1) GROUNDING: is it supported by what actually happened, "
+                "not by what the agent wished happened? "
+                "(2) ROUTING: durable knowledge -> remember (FACT only if "
+                "verified, else INFERENCE); user preference -> about_peer; "
+                "one-off noise -> drop. "
+                "(3) DO NOT CAPTURE: environment failures (command not "
+                "found, missing credentials), unfixed complaints, secrets, "
+                "or anything already in memory (recall first, read before "
+                "write). "
+                "(4) If a candidate corrects an existing record, use "
+                "reinforce correction with evidence, not a new row."
+            )
+            return json.dumps({"review_prompt": prompt,
+                               "candidates": report.get("candidates", [])},
+                              indent=2, sort_keys=True)
+        if op == "pending":
+            rows = db.list_pending(conn)
+            return json.dumps(rows, indent=2, sort_keys=True)
+        if op in ("approve", "reject"):
+            pid = args.get("pending_id")
+            if pid is None:
+                return f"maintenance: {op} needs pending_id (see op=pending)"
+            try:
+                result = db.decide_pending(conn, int(pid), approve=(op == "approve"))
+            except KeyError:
+                return f"maintenance: pending {pid} not found"
+            except ValueError as e:
+                return f"maintenance: {e}"
+            return json.dumps(result, indent=2, sort_keys=True)
+        return (f"maintenance: unknown op {op}; use decay | sleep | reflect | "
+                "forget_cold | promote | capture | review | pending | approve | reject")
     return with_conn(user, body)
 def _scan_secret(text: str) -> Optional[str]:
     # One pattern list for every write door (capture, MCP, web).
@@ -535,20 +574,25 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "maintenance",
         "description": ("Housekeeping: op=decay ages confidence, op=sleep runs "
-                       "the consolidation pass, op=reflect abstracts cross-session "
-                       "patterns into PROCEDURAL/REFLECTIVE records, op=forget_cold "
-                       "reports (or with apply=true deletes) untouched cold records, "
-                       "op=promote reconsiders promotion of hot INFERENCE/ASSUMPTION, "
-                       "op=capture extracts lessons from the current session log "
-                       "(with apply=true they are written to memory)."),
+                       "the consolidation pass + anchor check + backup, op=reflect "
+                       "abstracts cross-session patterns, op=forget_cold reports "
+                       "(or with apply=true deletes) untouched cold records, "
+                       "op=promote reconsiders hot INFERENCE/ASSUMPTION, "
+                       "op=capture extracts lessons (staging=true parks them for "
+                       "review), op=pending lists staged writes, op=approve/reject "
+                       "decides one by pending_id."),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "op": {"type": "string",
                        "enum": ["decay", "sleep", "reflect", "forget_cold",
-                                "promote", "capture"]},
+                                "promote", "capture", "review", "pending", "approve", "reject"]},
                 "apply": {"type": "boolean",
                           "description": "forget_cold: actually delete; capture/reflect: write"},
+                "staging": {"type": "boolean",
+                            "description": "capture: park candidates for approve/reject"},
+                "pending_id": {"type": "integer",
+                               "description": "approve/reject: which staged write"},
             },
         },
     },

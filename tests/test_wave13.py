@@ -20,7 +20,7 @@ def test_schema_v15_columns(conn):
     assert {"decay_tau", "valid_from", "valid_until",
             "anchor_path", "anchor_sha", "stale"} <= cols
     v = conn.execute("SELECT version FROM schema_version").fetchone()[0]
-    assert v == 15
+    assert v == 16
 
 
 def test_digest_budget_and_stability(conn):
@@ -163,3 +163,64 @@ def test_check_anchors_flags_changed_file(conn, tmp_path):
     f.write_text("TIMEOUT = 30\n")
     report = db.check_anchors(conn, apply=True)
     assert report["cleared"] == [r["id"]]
+
+
+# --- Wave D: anti-hoarding + write staging ------------------------------------
+
+def test_env_failures_are_not_lessons():
+    from omp_memory import capture
+    entries = [
+        {"type": "message", "message": {"role": "toolResult", "toolName": "bash",
+         "content": "bash: uv: command not found"}},
+        {"type": "message", "message": {"role": "toolResult", "toolName": "bash",
+         "content": "Error: connect ECONNREFUSED 127.0.0.1:5432"}},
+        {"type": "message", "message": {"role": "toolResult", "toolName": "bash",
+         "content": "ModuleNotFoundError: No module named 'requests'"}},
+    ]
+    lessons = capture.extract_lessons(entries, None)
+    assert not any("command not found" in l["content"] for l in lessons)
+    assert not any("ECONNREFUSED" in l["content"] for l in lessons)
+
+
+def test_unfixed_complaint_skipped_fixed_kept():
+    from omp_memory import capture
+    entries = [
+        {"type": "message", "message": {"role": "toolResult", "toolName": "bash",
+         "content": "AssertionError: the deploy script does not work"}},
+        {"type": "message", "message": {"role": "toolResult", "toolName": "bash",
+         "content": "AssertionError: parser is broken. fix: escape the quotes, resolved"}},
+    ]
+    lessons = capture.extract_lessons(entries, None)
+    contents = " ".join(l["content"] for l in lessons)
+    assert "does not work" not in contents
+    assert "fix: escape" in contents or "resolved" in contents
+
+
+def test_staging_approve_reject(conn):
+    cand = {"rtype": "INFERENCE", "content": "staged lesson about wal checkpoints",
+            "evidence": "observed", "confidence": 0.35, "source": "auto-capture",
+            "tags": "failure", "session_id": "s", "project_id": "p", "event_id": ""}
+    pid = db.stage_write(conn, cand)
+    assert db.list_pending(conn)[0]["id"] == pid
+    # nothing in records yet
+    assert not db.recall(conn, "wal checkpoints staged")
+    # duplicate staging is a no-op
+    assert db.stage_write(conn, cand) == pid
+    result = db.decide_pending(conn, pid, approve=True)
+    assert result["status"] == "approved" and result["record_id"]
+    assert any(not h.get("abstained") for h in db.recall(conn, "wal checkpoints staged"))
+    # decided twice = noop
+    assert db.decide_pending(conn, pid, approve=True)["noop"]
+    pid2 = db.stage_write(conn, {**cand, "content": "another staged lesson reject me"})
+    assert db.decide_pending(conn, pid2, approve=False)["status"] == "rejected"
+    assert not any("reject me" in (h.get("snippet") or "")
+                   for h in db.recall(conn, "reject me staged"))
+
+
+def test_staging_hash_pin(conn):
+    cand = {"rtype": "INFERENCE", "content": "pinned lesson content", "confidence": 0.35}
+    pid = db.stage_write(conn, cand)
+    conn.execute("UPDATE pending_writes SET content='tampered content' WHERE id=?", (pid,))
+    conn.commit()
+    with pytest.raises(ValueError, match="changed since staging"):
+        db.decide_pending(conn, pid, approve=True)
