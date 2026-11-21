@@ -18,6 +18,7 @@ export function DetailPanel() {
   const [record, setRecord] = useState(null)
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
+  const [evidenceDraft, setEvidenceDraft] = useState('')
   const [status, setStatus] = useState('')
 
   const isRecord = !!selectedId && selectedId.startsWith('mem-')
@@ -38,16 +39,24 @@ export function DetailPanel() {
 
   const startEdit = () => {
     setDraft(record?.content || node?.data.label || '')
+    setEvidenceDraft(record?.evidence || '')
     setEditing(true)
     setStatus('')
   }
 
   const commitEdit = async () => {
+    if (draft.length > 20000) {
+      setStatus(`save failed: content exceeds 20000 chars (${draft.length})`)
+      return
+    }
     try {
-      const updated = await saveRecord(selectedId.slice(4), { content: draft })
+      const updated = await saveRecord(selectedId.slice(4), {
+        content: draft,
+        evidence: evidenceDraft,
+      })
       setRecord(updated)
       setEditing(false)
-      setStatus('saved to store')
+      setStatus('saved to store (correction logged)')
     } catch (e) {
       setStatus(`save failed: ${e.message}`)
     }
@@ -203,13 +212,26 @@ export function DetailPanel() {
             </span>
           </div>
           {editing ? (
-            <textarea
-              data-testid="record-editor"
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              rows={8}
-              className="w-full text-[12px] leading-relaxed bg-[var(--surface-2)] border border-[var(--accent)] rounded p-2 whitespace-pre-wrap font-mono outline-none resize-y"
-            />
+            <>
+              <textarea
+                data-testid="record-editor"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                rows={8}
+                maxLength={20000}
+                className="w-full text-[12px] leading-relaxed bg-[var(--surface-2)] border border-[var(--accent)] rounded p-2 whitespace-pre-wrap font-mono outline-none resize-y"
+              />
+              <input
+                data-testid="evidence-input"
+                value={evidenceDraft}
+                onChange={(e) => setEvidenceDraft(e.target.value)}
+                placeholder="evidence: why this edit is right (required unless verified)"
+                className="w-full mt-1 bg-[var(--surface-2)] border border-[var(--border)] rounded px-2 py-1.5 text-[11px] outline-none focus:border-[var(--accent)]"
+              />
+              <div className="text-[10px] mt-1 text-[var(--text-muted)]">
+                {draft.length}/20000 · a content change is logged as a correction and needs evidence or verified status
+              </div>
+            </>
           ) : (
             <div className="text-[12px] leading-relaxed bg-[var(--surface-2)] border border-[var(--border)] rounded p-2 max-h-40 overflow-y-auto whitespace-pre-wrap font-mono">
               {record?.content || node.data.label || '(no content)'}

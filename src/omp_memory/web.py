@@ -311,9 +311,10 @@ def _record_payload(r: dict) -> dict:
 
 
 def _update_record(record_id: str, patch: dict) -> dict:
-    """Edit content/evidence/verified of one record; FTS stays in sync via
-    the update trigger. Content identity is preserved: the id does not change,
-    so graph cosmetics and reinforcement history keep pointing at it."""
+    """Edit one record in place. A content change goes through the store's
+    correction primitive (db.reinforce): same id, FTS trigger sync, evidence
+    or verified required, length capped, confidence surprise + supersede
+    history applied. A raw UPDATE here would bypass those invariants."""
     conn = db.connect()
     try:
         r = db.get_record(conn, record_id)
@@ -324,12 +325,22 @@ def _update_record(record_id: str, patch: dict) -> dict:
             raise ValueError("content must not be empty")
         evidence = patch.get("evidence", r["evidence"])
         verified = 1 if patch.get("verified", r["verified"]) else 0
-        conn.execute(
-            "UPDATE records SET content=?, evidence=?, verified=?, updated_at=?"
-            " WHERE id=?",
-            (content.strip(), str(evidence), verified, db.now_iso(), record_id),
-        )
-        conn.commit()
+        if content.strip() != r["content"].strip():
+            try:
+                db.reinforce(conn, record_id, "correction",
+                             content=content, evidence=str(evidence),
+                             verified=verified, source="web-ui")
+            except ValueError as e:
+                # reinforce words it as "correction rewrite..."; the UI
+                # caller just edited content, so translate the wording.
+                raise ValueError(str(e).replace("correction rewrite", "content edit"))
+        else:
+            conn.execute(
+                "UPDATE records SET evidence=?, verified=?, updated_at=?"
+                " WHERE id=?",
+                (str(evidence), verified, db.now_iso(), record_id),
+            )
+            conn.commit()
         return _record_payload(db.get_record(conn, record_id))
     finally:
         conn.close()

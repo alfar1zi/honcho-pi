@@ -51,7 +51,7 @@ def test_skill_nodes_from_dirs(tmp_path, monkeypatch):
 
 def test_update_record_writes_content_and_keeps_id(graph_env):
     rid = db.upsert_record(graph_env, "FACT", "old lesson text", session_id="s")
-    updated = web._update_record(rid, {"content": "corrected lesson text"})
+    updated = web._update_record(rid, {"content": "corrected lesson text", "evidence": "operator edit"})
     assert updated["id"] == rid
     assert updated["content"] == "corrected lesson text"
     row = db.get_record(graph_env, rid)
@@ -82,7 +82,7 @@ def test_merge_fresh_keeps_cosmetics_and_note_nodes(graph_env):
         "data": {"label": "sticky note", "type": "note"},
     })
     saved["edges"].append({"id": "e-manual", "source": "n-note", "target": f"mem-{rid}"})
-    web._update_record(rid, {"content": "wal mode lesson, revised"})
+    web._update_record(rid, {"content": "wal mode lesson, revised", "evidence": "operator edit"})
     merged = web._merge_fresh(saved)
     mnode = next(n for n in merged["nodes"] if n["id"] == f"mem-{rid}")
     assert mnode["position"] == {"x": 123.0, "y": -45.0}
@@ -150,8 +150,39 @@ def test_dashboard_stats_real_numbers(graph_env):
 def test_merge_fresh_content_edit_updates_default_label(graph_env):
     rid = db.upsert_record(graph_env, "FACT", "original lesson first line", session_id="s")
     saved = web.build_graph()
-    web._update_record(rid, {"content": "rewritten lesson first line"})
+    web._update_record(rid, {"content": "rewritten lesson first line", "evidence": "operator edit"})
     merged = web._merge_fresh(saved)
     node = next(n for n in merged["nodes"] if n["id"] == f"mem-{rid}")
     assert node["data"]["label"].startswith("rewritten lesson"), \
         "default label must follow store content after an edit"
+
+
+def test_content_edit_requires_evidence_or_verified(graph_env):
+    rid = db.upsert_record(graph_env, "FACT", "unevidenced lesson", session_id="s")
+    with pytest.raises(ValueError, match="evidence or verified"):
+        web._update_record(rid, {"content": "sneaky rewrite"})
+    # verified records may be edited without new evidence
+    vid = db.upsert_record(graph_env, "RULE", "verified rule", verified=1, session_id="s")
+    out = web._update_record(vid, {"content": "verified rule, refined"})
+    assert out["content"] == "verified rule, refined"
+
+
+def test_content_edit_rejects_oversize(graph_env):
+    rid = db.upsert_record(graph_env, "FACT", "small lesson", evidence="e", session_id="s")
+    with pytest.raises(ValueError, match="20000"):
+        web._update_record(rid, {"content": "x" * 20001})
+
+
+def test_content_edit_logs_correction_and_supersedes(graph_env):
+    rid = db.upsert_record(graph_env, "FACT", "original claim", evidence="e",
+                           confidence=0.9, session_id="s")
+    web._update_record(rid, {"content": "corrected claim"})
+    row = graph_env.execute(
+        "SELECT signal, source FROM reinforcement WHERE record_id=? ORDER BY ts DESC LIMIT 1",
+        (rid,)).fetchone()
+    assert row["signal"] == "correction"
+    assert row["source"] == "web-ui"
+    # hypercorrection: correction delta is positive (reconsolidated memory),
+    # amplified 1.5x above the 0.7 confidence threshold, clamped at 1.0
+    conf = graph_env.execute("SELECT confidence FROM records WHERE id=?", (rid,)).fetchone()[0]
+    assert conf == 1.0
