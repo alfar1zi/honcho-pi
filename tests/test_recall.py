@@ -93,7 +93,10 @@ def test_compact_reports_no_evidence_and_is_smaller_than_full(conn):
     c_item = compact[0]
     f_item = full[0]
 
-    assert set(c_item.keys()) == {"id", "type", "confidence", "verified", "score", "heat", "snippet", "abstained", "about_peer", "session_id"}
+    assert set(c_item.keys()) == {
+        "id", "type", "confidence", "verified", "score", "heat", "snippet",
+        "abstained", "about_peer", "session_id",
+    }
     assert "evidence" not in c_item
     assert "snippet" in c_item
     assert "snippet" not in f_item

@@ -517,7 +517,8 @@ _RECORD_COLUMNS = (
 )
 _RECORDS_DDL = """CREATE TABLE IF NOT EXISTS records (
         id          TEXT PRIMARY KEY,
-        type        TEXT NOT NULL CHECK (type IN ('FACT','ASSUMPTION','INFERENCE','DECISION','RULE','CORRECTION','INTENT','WORKFLOW','PROCEDURAL','REFLECTIVE')),
+        type        TEXT NOT NULL CHECK (type IN ('FACT','ASSUMPTION','INFERENCE','DECISION','RULE',
+                                                  'CORRECTION','INTENT','WORKFLOW','PROCEDURAL','REFLECTIVE')),
         content     TEXT NOT NULL,
         evidence    TEXT NOT NULL DEFAULT '',
         verified    INTEGER NOT NULL DEFAULT 0,
@@ -582,7 +583,8 @@ def _create_schema(conn: sqlite3.Connection):
     CREATE TABLE IF NOT EXISTS reinforcement (
         id            INTEGER PRIMARY KEY AUTOINCREMENT,
         record_id     TEXT NOT NULL,
-        signal        TEXT NOT NULL CHECK (signal IN ('success','failure','correction','reinforce','decay','retrieval')),
+        signal        TEXT NOT NULL CHECK (signal IN ('success','failure','correction',
+                                                      'reinforce','decay','retrieval')),
         delta         REAL NOT NULL DEFAULT 0.1,
         source        TEXT NOT NULL DEFAULT '',
         ts            TEXT NOT NULL,

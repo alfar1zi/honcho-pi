@@ -48,7 +48,9 @@ done
 
 echo "--- line length (max 120) ---"
 for f in "${FILES[@]}"; do
-  if awk 'length > 120 {found=1} END {exit !found}' "$f"; then
+  # LC_ALL=C: gawk in a UTF-8 locale counts characters, CI mawk counts bytes;
+  # pin the byte semantics so the gate agrees everywhere.
+  if LC_ALL=C awk 'length > 120 {found=1} END {exit !found}' "$f"; then
     fail "$f: line longer than 120 chars"
   fi
 done
