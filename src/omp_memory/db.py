@@ -1900,8 +1900,11 @@ def _search_relaxed(conn: sqlite3.Connection, query: str, **kwargs) -> list:
     if not rows and not _query_known(conn, query):
         # Vocabulary gate (graphify _query_uses_known_words): a query whose
         # words exist nowhere in the index cannot be answered from one
-        # incidental shared token; abstain instead of guessing.
-        return []
+        # incidental shared token; abstain instead of guessing. Cue hits
+        # are exempt: an INTENT's cue is deliberately outside the FTS
+        # index, so a cue-only match is still a real answer.
+        cue_rows = _cue_pool(conn, query, **kwargs)
+        return cue_rows
     if not rows:
         words = _tokens(query)
         if len(words) >= 2:
