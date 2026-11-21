@@ -251,3 +251,58 @@ def test_recall_still_lexical_lead_with_ppr(conn):
     db.remember(conn, "FACT", "wal wal wal wal wal wal", source="s")
     hits = db.recall(conn, "zorbital engine", limit=2)
     assert hits and "zorbital" in hits[0]["snippet"]
+
+
+# --- Wave F: skill export + sync pack -----------------------------------------
+
+def test_export_skill_folder(conn, tmp_path):
+    p = db.remember(conn, "PROCEDURAL", "deploy the gateway: build, sign, push, verify",
+                    evidence="run 42 exit 0", source="s")
+    db.remember(conn, "FACT", "episode one detail", source="s", parent_id=p["id"])
+    db.remember(conn, "FACT", "episode two detail", source="s", parent_id=p["id"])
+    out = db.export_skill(conn, p["id"], tmp_path)
+    skill_md = tmp_path / out["name"] / "SKILL.md"
+    text = skill_md.read_text()
+    assert text.startswith("---\nname: ")
+    assert "description: " in text
+    assert len(out["references"]) == 2
+    assert (tmp_path / out["name"] / "references" / "episode-1.md").exists()
+    # description cap
+    desc_line = next(l for l in text.splitlines() if l.startswith("description:"))
+    assert len(desc_line) <= len("description: ") + 100
+
+
+def test_export_skill_rejects_wrong_type(conn, tmp_path):
+    f = db.remember(conn, "FACT", "not a procedure", source="s")
+    with pytest.raises(ValueError):
+        db.export_skill(conn, f["id"], tmp_path)
+
+
+def test_pack_roundtrip_and_merge(conn, tmp_path):
+    db.remember(conn, "FACT", "pack lesson alpha", confidence=0.6, source="s")
+    db.remember(conn, "RULE", "pack rule beta", verified=1, confidence=0.9, source="s")
+    pack = tmp_path / "team.pack"
+    info = db.export_pack(conn, pack)
+    assert info["records"] == 2
+    # deterministic: same store, same bytes
+    pack2 = tmp_path / "team2.pack"
+    info2 = db.export_pack(conn, pack2)
+    assert info["sha256"] == info2["sha256"]
+    # import into a fresh store
+    c2 = db.connect(str(tmp_path / "other.db"))
+    db.init_db(c2)
+    r = db.import_pack(c2, pack)
+    assert r["imported"] == 2
+    # re-import: no-op merge
+    r2 = db.import_pack(c2, pack)
+    assert r2["imported"] == 0 and r2["merged"] == 2
+    # verification propagates: verify on machine 2, pack back, machine 1 takes max
+    rid = db.recall(c2, "pack lesson alpha")[0]["id"]
+    c2.execute("UPDATE records SET verified=1, confidence=0.95 WHERE id=?", (rid,))
+    c2.commit()
+    back = tmp_path / "back.pack"
+    db.export_pack(c2, back)
+    db.import_pack(conn, back)
+    row = conn.execute("SELECT verified, confidence FROM records WHERE id=?", (rid,)).fetchone()
+    assert row[0] == 1 and row[1] >= 0.95
+    c2.close()

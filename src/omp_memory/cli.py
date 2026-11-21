@@ -437,6 +437,42 @@ def cmd_mirror(args) -> int:
     print("mirror: " + ", ".join(parts))
     return 0
 
+def cmd_skill_export(args) -> int:
+    conn = _open()
+    try:
+        result = db.export_skill(conn, args.record_id, args.dir)
+    except (KeyError, ValueError) as e:
+        print(f"skill-export: {e}")
+        return 1
+    finally:
+        conn.close()
+    print(f"skill-export: {result['dir']} ({len(result['references'])} references)")
+    return 0
+
+
+def cmd_pack(args) -> int:
+    conn = _open()
+    try:
+        result = db.export_pack(conn, args.file)
+    finally:
+        conn.close()
+    print(f"pack: {result['records']} records -> {result['file']} "
+          f"({result['bytes']} bytes, sha256 {result['sha256'][:12]})")
+    return 0
+
+
+def cmd_unpack(args) -> int:
+    conn = _open()
+    try:
+        result = db.import_pack(conn, args.file)
+    except (ValueError, OSError) as e:
+        print(f"unpack: {e}")
+        return 1
+    finally:
+        conn.close()
+    print(f"unpack: {result['imported']} new, {result['merged']} merged")
+    return 0
+
 
 def cmd_repair(args) -> int:
     ok = db.repair_from_backup(db.DB_PATH)
@@ -610,6 +646,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--init", action="store_true",
                    help="git init the directory when it is not a repository yet")
     p.set_defaults(func=cmd_mirror)
+
+    p = sub.add_parser("skill-export", help="export a procedural record as an agentskills.io SKILL.md")
+    p.add_argument("record_id")
+    p.add_argument("dir", help="output directory (skill folder created inside)")
+    p.set_defaults(func=cmd_skill_export)
+
+    p = sub.add_parser("pack", help="export the store as a compressed sync pack")
+    p.add_argument("file", help="output .pack file (committable to a team repo)")
+    p.set_defaults(func=cmd_pack)
+
+    p = sub.add_parser("unpack", help="import a sync pack (content-identity merge)")
+    p.add_argument("file", help="pack file to import")
+    p.set_defaults(func=cmd_unpack)
 
     p = sub.add_parser("disk", help="check free space")
     p.add_argument("min_free_mb", type=int, nargs="?", default=DEFAULT_MIN_FREE_MB)

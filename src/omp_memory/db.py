@@ -3099,6 +3099,116 @@ def sync_mirror(out_dir, message: str = None, init: bool = False) -> dict:
     sha_proc = _git_run(["git", "rev-parse", "HEAD"], cwd=out_path)
     return {"committed": True, "sha": sha_proc.stdout.strip(), "files": files_to_stage}
 
+def export_skill(conn: sqlite3.Connection, record_id: str, out_dir) -> dict:
+    """Export a PROCEDURAL/WORKFLOW record (or a reflect cluster) as an
+    agentskills.io SKILL.md folder: frontmatter + body + references/ for
+    child episodes. Progressive disclosure: L0 name+description routes,
+    L1 the body, L2 the evidence files. Description capped at 100 chars
+    (hermes lesson: overlong descriptions never route).
+    """
+    r = get_record(conn, record_id)
+    if not r:
+        raise KeyError(record_id)
+    if r["type"] not in ("PROCEDURAL", "WORKFLOW", "REFLECTIVE", "RULE"):
+        raise ValueError(f"skill export needs PROCEDURAL/WORKFLOW/REFLECTIVE/RULE, got {r['type']}")
+    out_path = Path(out_dir).expanduser().resolve()
+    slug = re.sub(r"[^a-z0-9]+", "-", normalize_content(r["content"])[:40].casefold()).strip("-")
+    skill_dir = out_path / (slug or record_id)
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    first = next((l for l in r["content"].splitlines() if l.strip()), "")
+    desc = first[:100]
+    body = ["---", f"name: {slug or record_id}", f"description: {desc}", "---", "",
+            f"# {first[:80]}", "", r["content"], ""]
+    if r["evidence"]:
+        body += ["## Evidence", "", r["evidence"], ""]
+    children = [dict(c) for c in conn.execute(
+        "SELECT id, content, evidence FROM records WHERE parent_id=? ORDER BY created_at",
+        (record_id,))]
+    refs = []
+    if children:
+        ref_dir = skill_dir / "references"
+        ref_dir.mkdir(exist_ok=True)
+        body += ["## Episodes", ""]
+        for i, ch in enumerate(children):
+            fname = f"episode-{i + 1}.md"
+            (ref_dir / fname).write_text(
+                ch["content"] + ("\n\nEvidence: " + ch["evidence"] if ch["evidence"] else ""),
+                encoding="utf-8")
+            refs.append(f"references/{fname}")
+            body.append(f"- [{fname}](references/{fname})")
+        body.append("")
+    (skill_dir / "SKILL.md").write_text("\n".join(body), encoding="utf-8")
+    return {"dir": str(skill_dir), "name": slug or record_id,
+            "references": refs, "record_id": record_id}
+
+
+def export_pack(conn: sqlite3.Connection, out_file) -> dict:
+    """Git Sync one-file (engram pattern): a compressed, deterministic JSON
+    pack of all records, committable to a team repo and importable on
+    another machine. Content-addressed ids make the merge deterministic:
+    the same lesson from two machines is the same row. No server needed.
+    """
+    import zlib
+    rows = [dict(r) for r in conn.execute(
+        "SELECT id, type, content, evidence, verified, confidence, source, tags,"
+        " created_at, updated_at, project_id, project_ids, parent_id, event_id,"
+        " importance, cue, decay_tau, valid_from, valid_until, anchor_path,"
+        " anchor_sha FROM records ORDER BY id")]
+    payload = json.dumps({"format": "honcho-pack-1", "records": rows},
+                         sort_keys=True, separators=(",", ":")).encode()
+    packed = zlib.compress(payload, 9)
+    out = Path(out_file).expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(packed)
+    return {"file": str(out), "records": len(rows), "bytes": len(packed),
+            "sha256": hashlib.sha256(packed).hexdigest()}
+
+
+def import_pack(conn: sqlite3.Connection, in_file) -> dict:
+    """Import a pack: upsert by content identity, so re-importing the same
+    pack is a no-op and two machines' packs merge without conflicts on
+    identical lessons. Confidence takes the max, verified ORs: a
+    verification on one machine counts everywhere.
+    """
+    import zlib
+    raw = Path(in_file).expanduser().read_bytes()
+    data = json.loads(zlib.decompress(raw))
+    if data.get("format") != "honcho-pack-1":
+        raise ValueError("not a honcho-pack-1 file")
+    imported, merged = 0, 0
+    for r in data["records"]:
+        existing = get_record(conn, r["id"])
+        if not existing:
+            # Insert with the pack's id, not a re-derived one: upsert_record
+            # hashes raw content, but the pack id was derived from the
+            # normalized form, so re-deriving would fork the identity.
+            conn.execute(
+                "INSERT INTO records (id, type, content, evidence, verified,"
+                " confidence, source, tags, created_at, updated_at, project_id,"
+                " project_ids, parent_id, event_id, importance, cue, decay_tau,"
+                " valid_from, valid_until, anchor_path, anchor_sha)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (r["id"], r["type"], r["content"], r.get("evidence", ""),
+                 r.get("verified", 0), r.get("confidence", 0.5),
+                 r.get("source", ""), r.get("tags", ""),
+                 r.get("created_at") or now_iso(), r.get("updated_at") or now_iso(),
+                 r.get("project_id", ""), r.get("project_ids", ""),
+                 r.get("parent_id", ""), r.get("event_id", ""),
+                 r.get("importance", 0.5), r.get("cue", ""),
+                 r.get("decay_tau", 0), r.get("valid_from", ""),
+                 r.get("valid_until", ""), r.get("anchor_path", ""),
+                 r.get("anchor_sha", "")))
+            imported += 1
+        else:
+            conf = max(float(existing["confidence"]), float(r.get("confidence", 0)))
+            verified = max(int(existing["verified"]), int(r.get("verified", 0)))
+            conn.execute("UPDATE records SET confidence=?, verified=? WHERE id=?",
+                         (conf, verified, r["id"]))
+            merged += 1
+    conn.commit()
+    return {"imported": imported, "merged": merged, "total": len(data["records"])}
+
+
 
 if __name__ == "__main__":
     conn = connect()
