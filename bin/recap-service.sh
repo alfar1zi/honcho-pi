@@ -5,7 +5,8 @@
 # the systemd timer expects; anything else passes through to "recap".
 set -uo pipefail
 
-VENV=/home/farizi/.omp/memory/venv
+MEM_HOME="${OMP_MEMORY_HOME:-$HOME/.omp/memory}"
+VENV="$MEM_HOME/venv"
 PY="$VENV/bin/python3"
 
 if [[ "${1:-}" == "auto-capture" ]]; then

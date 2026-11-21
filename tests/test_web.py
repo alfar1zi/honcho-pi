@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 
@@ -224,3 +225,85 @@ def test_merge_fresh_drops_foreign_mem_ids_keeps_notes(graph_env):
     eids = {e["id"] for e in merged["edges"]}
     assert "e-foreign" not in eids, "edges to dropped nodes go too"
     assert "e-note" in eids
+
+
+# --- write-door hardening ----------------------------------------------------
+
+def test_web_edit_rejects_secret_content(graph_env):
+    rid = db.upsert_record(graph_env, "FACT", "clean lesson", evidence="e", session_id="s")
+    with pytest.raises(ValueError, match="secret"):
+        web._update_record(rid, {"content": "use api_key=sk-abcdefgh12345678 for auth"})
+    assert db.get_record(graph_env, rid)["content"] == "clean lesson"
+
+
+def test_sleep_pass_takes_backup(graph_env, tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "BACKUP_DIR", str(tmp_path / "backups"))
+    db.upsert_record(graph_env, "FACT", "sleep backup lesson", session_id="s")
+    report = db.sleep_pass(graph_env, apply=True)
+    assert report.get("backup"), "sleep must produce a snapshot"
+    assert os.path.exists(report["backup"])
+
+
+def test_health_flags_stale_backups(graph_env, tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "BACKUP_DIR", str(tmp_path / "backups"))
+    h = db.health(graph_env)
+    assert h["backup_stale"] is True
+    db.backup_db(db.db_path_of(graph_env))
+    h2 = db.health(graph_env)
+    assert h2["backup_stale"] is False
+    assert h2["backup_count"] == 1
+
+
+# --- HTTP handler: CSRF + shape validation -----------------------------------
+
+@pytest.fixture
+def http_server(graph_env, tmp_path, monkeypatch):
+    import threading
+    from http.server import ThreadingHTTPServer
+    monkeypatch.setattr(web, "DIST_DIR", tmp_path / "dist")
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "index.html").write_text("<html></html>")
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), web.Handler)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}"
+    srv.shutdown()
+
+
+def _req(url, method, body=None, headers=None):
+    import urllib.request
+    import urllib.error
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method,
+                                 headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+
+
+def test_cross_origin_write_rejected(http_server):
+    status, body = _req(http_server + "/api/graph", "PUT",
+                        {"nodes": [], "edges": []},
+                        {"Origin": "https://evil.example", "Content-Type": "text/plain"})
+    assert status == 403
+    status, _ = _req(http_server + "/api/record", "POST", {"id": "x"},
+                     {"Origin": "https://evil.example"})
+    assert status == 403
+
+
+def test_same_origin_and_no_origin_pass(http_server):
+    host = http_server.replace("http://", "")
+    status, _ = _req(http_server + "/api/graph", "PUT", {"nodes": [], "edges": []},
+                     {"Origin": http_server})
+    assert status == 200
+    status, _ = _req(http_server + "/api/graph", "PUT", {"nodes": [], "edges": []})
+    assert status == 200
+
+
+def test_put_graph_rejects_bad_shape(http_server):
+    status, _ = _req(http_server + "/api/graph", "PUT", ["not", "a", "graph"])
+    assert status == 400
+    status, _ = _req(http_server + "/api/graph", "PUT", {"nodes": "x", "edges": []})
+    assert status == 400

@@ -185,7 +185,7 @@ def test_reinforce_rejects_secret_content(server):
     out = server.call("reinforce", {"id": rid, "signal": "correction",
                                     "content": "token ghp_abcdefghijabcdefghij for ci",
                                     "evidence": "x"})
-    assert "github token" in out
+    assert "github_token" in out
     # The record was not rewritten: the secret never reached storage.
     assert "psi pump" in server.call("recall", {"query": "psi pump"})
 

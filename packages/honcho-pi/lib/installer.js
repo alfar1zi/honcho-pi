@@ -5,7 +5,7 @@
 // the venv python executable, never a shell.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { findPython, venvBin, venvPython } from "./platform.js";
@@ -38,6 +38,37 @@ function smokeTest(venvDir) {
   if (health.status !== 0) throw new Error(`omp-memory health failed:\n${health.stdout}\n${health.stderr}`);
 }
 
+// The venv bin dir is not on PATH, so a bare "omp-memory-mcp" in an MCP
+// config never resolves. Write env.sh and print the absolute-path config.
+function writeEnv(installDir, venvDir) {
+  const bin = venvBin(venvDir);
+  const envSh = path.join(installDir, "env.sh");
+  writeFileSync(envSh, `export PATH="${bin}:$PATH"\n`);
+  return envSh;
+}
+
+function mcpConfigBlock(venvDir) {
+  const mcp = path.join(venvBin(venvDir), process.platform === "win32" ? "omp-memory-mcp.exe" : "omp-memory-mcp");
+  return JSON.stringify({ mcpServers: { memory: { command: mcp } } }, null, 2);
+}
+
+// The graph UI ships no dist in the pip package; build it when npm exists.
+// Best-effort: the memory engine works without the UI.
+function buildWebUi(srcDir, installDir, log) {
+  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+  const webDir = path.join(srcDir, "web");
+  if (!existsSync(path.join(webDir, "package.json"))) return;
+  const inst = spawnSync(npm, ["--prefix", webDir, "install", "--silent"], { stdio: "inherit" });
+  if (inst.status !== 0) { log("web UI deps failed; skipping the graph view (memory engine unaffected)"); return; }
+  const build = spawnSync(npm, ["--prefix", webDir, "run", "build"], { stdio: "inherit" });
+  if (build.status !== 0) { log("web UI build failed; skipping the graph view"); return; }
+  const dest = path.join(installDir, "web");
+  mkdirSync(dest, { recursive: true });
+  rmSync(path.join(dest, "dist"), { recursive: true, force: true });
+  cpSync(path.join(webDir, "dist"), path.join(dest, "dist"), { recursive: true });
+  log(`web UI deployed to ${dest}/dist (OMP_MEMORY_WEB_DIR=${dest})`);
+}
+
 function markerPath(installDir) {
   return path.join(installDir, "install.json");
 }
@@ -62,16 +93,22 @@ export function setup({ installDir }, log) {
   mkdirSync(installDir, { recursive: true });
   const src = mkdtempSync(path.join(os.tmpdir(), "honcho-pi-src-"));
   const venvDir = path.join(installDir, "venv");
+  let envSh;
   try {
     fetchSource(sha, src);
     makeVenv(py, venvDir);
     pipInstall(venvDir, src);
     smokeTest(venvDir);
+    envSh = writeEnv(installDir, venvDir);
+    buildWebUi(src, installDir, log);
     writeFileSync(markerPath(installDir), JSON.stringify({ sha, venv: venvDir }, null, 2) + "\n");
   } finally {
     rmSync(src, { recursive: true, force: true });
   }
   log(`installed to ${venvDir}`);
+  log(`shell PATH: source ${envSh}`);
+  log("MCP config (absolute path, works without PATH changes):");
+  log(mcpConfigBlock(venvDir));
   return { sha, venvDir };
 }
 

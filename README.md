@@ -66,8 +66,8 @@ That is the whole install. Python 3.10+ and Node 18+ are the only prerequisites.
 }
 ```
 
-Works with Claude Code, Codex, Cursor, and any MCP client. The agent gets five tools: `recall`, `remember`,
-`reinforce`, `forget`, `stats`. It uses them on its own; you never file anything.
+Works with Claude Code, Codex, Cursor, and any MCP client. The agent gets six tools: `recall`, `remember`,
+`reinforce`, `forget`, `stats`, `maintenance`. It uses them on its own; you never file anything.
 
 ## The memory universe
 
@@ -188,9 +188,9 @@ hits = m.recall(conn, "install dependencies", limit=3)
 | --- | --- |
 | Concurrent writers | WAL mode, 30 s lock wait |
 | Backup | `VACUUM INTO` snapshot, rotated |
-| Corrupt database | quarantine and restore from backup; never delete |
-| Secret leakage | capture scans for secrets before storing |
-| Disk exhaustion | capture refuses below 100 MB free |
+| Corrupt database | raises and keeps the file; `repair` restores from the newest usable backup |
+| Secret leakage | capture, MCP writes, and the web editor scan for secrets before storing |
+| Disk exhaustion | CLI capture refuses below 100 MB free |
 
 ## Configuration
 
@@ -206,7 +206,7 @@ Updates: `npx honcho-pi@latest update` (keeps the database). Status: `npx honcho
 ## Development
 
 ```bash
-python -m pytest              # 385 tests, no network
+python -m pytest              # 386 tests, no network
 bash bin/clean-code.sh        # quality gate
 bash bin/web-deploy.sh        # build + deploy the web UI
 ```

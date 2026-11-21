@@ -379,23 +379,13 @@ def tool_maintenance(args: Dict[str, Any], user: str = "") -> str:
                 db, conn, apply=bool(args.get("apply")),
                 reflect=bool(args.get("reflect")))
             return json.dumps(report, indent=2, sort_keys=True)
-        return f"maintenance: unknown op {op}; use decay | sleep | forget_cold | promote | capture"
+        return f"maintenance: unknown op {op}; use decay | sleep | reflect | forget_cold | promote | capture"
     return with_conn(user, body)
-_SECRET_PATTERNS = [
-    (r"sk-[A-Za-z0-9_-]{20,}", "openai-style key"),
-    (r"ghp_[A-Za-z0-9]{20,}", "github token"),
-    (r"AKIA[0-9A-Z]{16}", "aws key id"),
-    (r"(?i)bearer\s+[A-Za-z0-9._-]{20,}", "bearer token"),
-    (r"-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----", "private key"),
-]
-
-
 def _scan_secret(text: str) -> Optional[str]:
-    import re
-    for pattern, label in _SECRET_PATTERNS:
-        if re.search(pattern, text):
-            return label
-    return None
+    # One pattern list for every write door (capture, MCP, web).
+    from .capture import scan_text
+    hits = scan_text(text)
+    return hits[0][0] if hits else None
 
 TOOLS: List[Dict[str, Any]] = [
     {
@@ -484,7 +474,9 @@ TOOLS: List[Dict[str, Any]] = [
     },
     {
         "name": "maintenance",
-        "description": ("Housekeeping: op=decay ages confidence, op=forget_cold "
+        "description": ("Housekeeping: op=decay ages confidence, op=sleep runs "
+                       "the consolidation pass, op=reflect abstracts cross-session "
+                       "patterns into PROCEDURAL/REFLECTIVE records, op=forget_cold "
                        "reports (or with apply=true deletes) untouched cold records, "
                        "op=promote reconsiders promotion of hot INFERENCE/ASSUMPTION, "
                        "op=capture extracts lessons from the current session log "
@@ -493,10 +485,10 @@ TOOLS: List[Dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "op": {"type": "string",
-                       "enum": ["decay", "sleep", "forget_cold", "promote",
-                                "capture"]},
+                       "enum": ["decay", "sleep", "reflect", "forget_cold",
+                                "promote", "capture"]},
                 "apply": {"type": "boolean",
-                          "description": "forget_cold: actually delete; capture: write"},
+                          "description": "forget_cold: actually delete; capture/reflect: write"},
             },
         },
     },

@@ -98,6 +98,9 @@ EVENT_TAG_PREFIX = "event:"
 SECRET_PATTERNS = [
     ("api_key", r"sk-[A-Za-z0-9_\-]{8,}"),
     ("api_key", r"(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{8,}"),
+    ("github_token", r"ghp_[A-Za-z0-9]{20,}"),
+    ("aws_key", r"AKIA[0-9A-Z]{16}"),
+    ("bearer", r"(?i)bearer\s+[A-Za-z0-9._-]{20,}"),
     ("private_key", r"-----BEGIN [A-Z ]+PRIVATE KEY-----"),
     ("assignment", r"(?i)(?:password|passwd|secret|api_key|apikey|token|credential)\s*[=:]\s*\S{6,}"),
 ]

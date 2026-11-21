@@ -355,6 +355,13 @@ def _update_record(record_id: str, patch: dict) -> dict:
             raise ValueError("content must not be empty")
         evidence = patch.get("evidence", r["evidence"])
         verified = 1 if patch.get("verified", r["verified"]) else 0
+        # Same secret guard as MCP remember and CLI capture: the web editor
+        # must not become the one door that stores credentials.
+        from . import capture
+        for text in (content, str(evidence)):
+            hits = capture.scan_text(text)
+            if hits:
+                raise ValueError(f"secret-looking content refused ({hits[0][0]})")
         if content.strip() != r["content"].strip():
             try:
                 db.reinforce(conn, record_id, "correction",
@@ -586,17 +593,38 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _cross_origin(self) -> bool:
+        # Loopback is not a trust boundary: any web page can fire a no-cors
+        # simple request at 127.0.0.1. Reject writes whose Origin is another
+        # site; same-origin and non-browser clients (no Origin) pass.
+        origin = self.headers.get("Origin")
+        if not origin:
+            return False
+        host = self.headers.get("Host", "")
+        return origin not in (f"http://{host}", f"https://{host}", "null")
+
     def do_PUT(self):
         path = self.path.split("?", 1)[0]
         if path != "/api/graph":
             self.send_error(404)
             return
+        if self._cross_origin():
+            self._json({"error": "cross-origin write rejected"}, 403)
+            return
         length = int(self.headers.get("Content-Length") or 0)
+        if length > _IMAGE_MAX_BYTES + 4 * 1024 * 1024:
+            self._json({"error": "payload too large"}, 400)
+            return
         raw = self.rfile.read(length)
         try:
             graph = json.loads(raw)
         except json.JSONDecodeError:
             self._json({"error": "invalid json"}, 400)
+            return
+        if not isinstance(graph, dict) \
+                or not isinstance(graph.get("nodes"), list) \
+                or not isinstance(graph.get("edges"), list):
+            self._json({"error": "graph must be {nodes: [], edges: []}"}, 400)
             return
         _save_graph(graph)
         _broadcast("graph:updated", graph)
@@ -610,6 +638,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
+        if self._cross_origin():
+            self._json({"error": "cross-origin write rejected"}, 403)
+            return
         if path not in ("/api/record", "/api/image"):
             self.send_error(404)
             return

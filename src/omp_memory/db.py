@@ -1438,6 +1438,10 @@ def sleep_pass(conn, now=None, budget: int = SLEEP_EVICT_BUDGET,
                                    "value": round(row["value"], 6)})
     if apply and (report["merged"] or report["evicted"]):
         conn.commit()
+    # Sleep is the natural backup moment: offline, consistent, and the
+    # restore story is meaningless without a snapshot that actually runs.
+    if apply:
+        report["backup"] = backup_db(db_path_of(conn))
     return report
 
 
@@ -2496,7 +2500,12 @@ def stats(conn: sqlite3.Connection) -> dict:
 
 def health(conn: sqlite3.Connection) -> dict:
     ok = quick_check(conn) or integrity_check(conn)
-    backups = len(glob.glob(os.path.join(BACKUP_DIR, "memory.db.bak.*")))
+    backup_paths = glob.glob(os.path.join(BACKUP_DIR, "memory.db.bak.*"))
+    backups = len(backup_paths)
+    # A restore story needs a recent snapshot: none, or newest older than
+    # 7 days, is a warning the operator can act on (run backup or sleep).
+    newest = max((os.path.getmtime(p) for p in backup_paths), default=0)
+    stale = backups == 0 or (time.time() - newest) > 7 * 86400
     try:
         total = stats(conn).get("total", 0)
     except sqlite3.DatabaseError:
@@ -2505,6 +2514,7 @@ def health(conn: sqlite3.Connection) -> dict:
         "status": "ok" if ok else "corrupt",
         "db_path": db_path_of(conn),
         "backup_count": backups,
+        "backup_stale": stale,
         "total_records": total,
     }
 
