@@ -1846,6 +1846,26 @@ def _concept_overlap(query: str, row: dict) -> int:
     return max(1, n)
 
 
+def _query_known(conn: sqlite3.Connection, query: str) -> bool:
+    """True when at least one query word (or a prefix of it) is indexed.
+
+    graphify vocabulary gate, stdlib: unknown vocabulary means the query is
+    outside what this store can answer, so the honest reply is abstention,
+    not a partial-token guess. Known synonyms count as known words.
+    """
+    vocab = _vocab(conn)
+    if not vocab:
+        return True  # empty index: nothing to gate against
+    vocab_set = set(vocab)
+    for w in _tokens(query):
+        s = _stem(w)
+        if s in vocab_set or any(t.startswith(s) for t in vocab_set):
+            return True
+        if _WORD_TO_GROUP.get(w):
+            return True
+    return False
+
+
 def _search_relaxed(conn: sqlite3.Connection, query: str, **kwargs) -> list:
     """When no record contains every word, rank by best single-word match.
 
@@ -1877,6 +1897,11 @@ def _search_relaxed(conn: sqlite3.Connection, query: str, **kwargs) -> list:
                 r["synonym_match"] = True
                 r["matched_terms"] = _concept_overlap(query, r)
                 r["query_terms"] = max(1, len(_tokens(query)))
+    if not rows and not _query_known(conn, query):
+        # Vocabulary gate (graphify _query_uses_known_words): a query whose
+        # words exist nowhere in the index cannot be answered from one
+        # incidental shared token; abstain instead of guessing.
+        return []
     if not rows:
         words = _tokens(query)
         if len(words) >= 2:
@@ -2114,6 +2139,16 @@ def _ppr_expand(conn: sqlite3.Connection, seeds: list, all_rows: list,
             for j in members:
                 if i != j:
                     adj[i][j] = adj[i].get(j, 0.0) + weight
+    # Hub penalty (graphify _path_hub_penalty, stdlib): a node that links to
+    # a large share of the pool is a hub, and mass through it is association
+    # by accident of degree, not meaning. Discount edges into such nodes.
+    degree = [len(a) for a in adj]
+    hub_cut = max(4, n // 8)
+    for i in range(n):
+        if degree[i] <= hub_cut:
+            continue
+        for j in list(adj[i]):
+            adj[i][j] *= 0.5
     for i, r in enumerate(all_rows):
         other = r.get("parent_id")
         if other and other in idx:
@@ -2144,6 +2179,38 @@ def _ppr_expand(conn: sqlite3.Connection, seeds: list, all_rows: list,
 
 
 PPR_WEIGHT = 0.10
+
+
+def _ppr_bonus(conn: sqlite3.Connection, seeds: list, all_rows: list) -> dict:
+    """Associative bonus per record, bounded by link strength (graphify
+    weakest-hop): mass is scaled by the rarest shared term with a seed, so
+    a hit joined only through a hub word earns little even when PPR mass is
+    high. Returns {id: bonus in [0, PPR_WEIGHT]}.
+    """
+    ppr = _ppr_expand(conn, seeds, all_rows)
+    if not ppr:
+        return {}
+    ppr_max = max(ppr.values())
+    if ppr_max <= 0:
+        return {}
+    postings: dict = {}
+    for i, r in enumerate(all_rows):
+        for w in set(_tokens(r.get("content") or "")):
+            postings.setdefault(w, []).append(r["id"])
+    seed_terms = set()
+    for s in seeds:
+        seed_terms |= set(_tokens(s.get("content") or ""))
+    n = max(1, len(all_rows))
+    out = {}
+    for r in all_rows:
+        terms = set(_tokens(r.get("content") or "")) & seed_terms
+        if not terms:
+            continue
+        # Rarest shared term decides the link strength: 1 member = 1.0,
+        # a 40-member hub term = 0.025.
+        strength = max(1.0 / len(postings[t]) for t in terms if t in postings)
+        out[r["id"]] = PPR_WEIGHT * (ppr.get(r["id"], 0.0) / ppr_max) * min(1.0, strength * 4)
+    return out
 
 
 MMR_LAMBDA = 0.7
@@ -2207,8 +2274,7 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
     # Associative expansion (HippoRAG): spread seed mass over the term graph
     # so a record that shares rare terms with several hits ranks above one
     # that matched a single common word. Bounded bonus, lexical still leads.
-    ppr = _ppr_expand(conn, candidates[:limit], candidates)
-    ppr_max = max(ppr.values()) if ppr else 0.0
+    ppr = _ppr_bonus(conn, candidates[:limit], candidates)
 
     # Cue triggering (Rummel & Kvavilashvili 2023): a query that carries an
     # INTENT's cue is the cue's appearance in the environment, so the intent
@@ -2248,9 +2314,8 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
         penalty = SUPERSEDED_PENALTY if superseded else 0.0
         boost = SUPERSEDED_BOOST if cand["id"] in chain_heads else 0.0
         bonus = cue_bonus.get(cand["id"], 0.0)
-        assoc = (ppr.get(cand["id"], 0.0) / ppr_max) if ppr_max > 0 else 0.0
-        score = round(max(0.0, base + bonus + boost - penalty
-                          + PPR_WEIGHT * assoc), 6)
+        assoc = ppr.get(cand["id"], 0.0)
+        score = round(max(0.0, base + bonus + boost - penalty + assoc), 6)
         scored.append((cand, parts, heat, lexical, prior, score))
 
     def _sort_key(item):
