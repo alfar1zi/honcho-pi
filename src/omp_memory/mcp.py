@@ -305,19 +305,21 @@ def tool_remember(args: Dict[str, Any], user: str = "") -> str:
         anchor_path = str(args.get("anchor_path") or "")
         valid_from = str(args.get("valid_from") or "")
         valid_until = str(args.get("valid_until") or "")
-        if anchor_path or valid_from or valid_until:
+        if valid_from or valid_until:
+            # Route through the primitive so the future-tense guard fires;
+            # re-apply on the same id is a no-op update of the window.
+            db.remember(conn, rtype=rtype, content=_clip(content),
+                        valid_from=valid_from, valid_until=valid_until)
+        if anchor_path:
             import hashlib
-            sha = ""
-            if anchor_path:
-                try:
-                    with open(anchor_path, "rb") as f:
-                        sha = hashlib.sha256(f.read()).hexdigest()
-                except OSError:
-                    return f"remember: anchor_path not readable: {anchor_path}"
+            try:
+                with open(anchor_path, "rb") as f:
+                    sha = hashlib.sha256(f.read()).hexdigest()
+            except OSError:
+                return f"remember: anchor_path not readable: {anchor_path}"
             conn.execute(
-                "UPDATE records SET anchor_path=?, anchor_sha=?, valid_from=?,"
-                " valid_until=? WHERE id=?",
-                (anchor_path, sha, valid_from, valid_until, rid))
+                "UPDATE records SET anchor_path=?, anchor_sha=? WHERE id=?",
+                (anchor_path, sha, rid))
             conn.commit()
         rec = db.get_record(conn, rid) or {}
         out = (
@@ -465,8 +467,15 @@ def tool_maintenance(args: Dict[str, Any], user: str = "") -> str:
             except ValueError as e:
                 return f"maintenance: {e}"
             return json.dumps(result, indent=2, sort_keys=True)
+        if op == "not_conflict":
+            a, b = args.get("a"), args.get("b")
+            if not a or not b:
+                return "maintenance: not_conflict needs a and b (record ids)"
+            return json.dumps(db.mark_not_conflict(conn, str(a), str(b)),
+                              indent=2, sort_keys=True)
         return (f"maintenance: unknown op {op}; use decay | sleep | reflect | "
-                "forget_cold | promote | capture | review | pending | approve | reject")
+                "forget_cold | promote | capture | review | pending | approve | reject"
+                " | not_conflict")
     return with_conn(user, body)
 def _scan_secret(text: str) -> Optional[str]:
     # One pattern list for every write door (capture, MCP, web).
@@ -580,19 +589,23 @@ TOOLS: List[Dict[str, Any]] = [
                        "op=promote reconsiders hot INFERENCE/ASSUMPTION, "
                        "op=capture extracts lessons (staging=true parks them for "
                        "review), op=pending lists staged writes, op=approve/reject "
-                       "decides one by pending_id."),
+                       "decides one by pending_id, op=not_conflict records an "
+                       "adjudicated compatible pair (a, b) so it never resurfaces."),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "op": {"type": "string",
                        "enum": ["decay", "sleep", "reflect", "forget_cold",
-                                "promote", "capture", "review", "pending", "approve", "reject"]},
+                                "promote", "capture", "review", "pending", "approve",
+                                "reject", "not_conflict"]},
                 "apply": {"type": "boolean",
                           "description": "forget_cold: actually delete; capture/reflect: write"},
                 "staging": {"type": "boolean",
                             "description": "capture: park candidates for approve/reject"},
                 "pending_id": {"type": "integer",
                                "description": "approve/reject: which staged write"},
+                "a": {"type": "string", "description": "not_conflict: first record id"},
+                "b": {"type": "string", "description": "not_conflict: second record id"},
             },
         },
     },

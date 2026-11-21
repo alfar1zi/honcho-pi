@@ -167,7 +167,7 @@ INTENT_CUE_BONUS = 0.10
 INTENT_DECAY_TAU_DAYS = 7.0
 
 PRE_COMPRESS_CHECKPOINT_API_VERSION = 2
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 # Recall reranking weights. Lexical is dominant (0.70) because recall is
 # primarily an inquiry of relevance. Heat is moderate (0.25) so stale yet
 # relevant records do not sink while breaking ties among equally relevant
@@ -659,6 +659,12 @@ def _create_schema(conn: sqlite3.Connection):
         created_at TEXT NOT NULL,
         decided_at TEXT NOT NULL DEFAULT ''
     );
+    CREATE TABLE IF NOT EXISTS not_conflict (
+        a TEXT NOT NULL,
+        b TEXT NOT NULL,
+        ts TEXT NOT NULL,
+        PRIMARY KEY (a, b)
+    );
     CREATE INDEX IF NOT EXISTS idx_promotion_record ON promotion_log(record_id);
     CREATE INDEX IF NOT EXISTS idx_graveyard_ts     ON forgotten_graveyard(ts);
     """)
@@ -1057,6 +1063,20 @@ def _migrate(conn: sqlite3.Connection):
             )""")
         conn.execute("DELETE FROM schema_version")
         conn.execute("INSERT INTO schema_version(version) VALUES (16)")
+        conn.commit()
+
+    if version < 17:
+        # v17: adjudicated non-conflicts (engram not_conflict pattern). A
+        # pair the agent judged compatible never resurfaces in conflicts().
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS not_conflict (
+                a TEXT NOT NULL,
+                b TEXT NOT NULL,
+                ts TEXT NOT NULL,
+                PRIMARY KEY (a, b)
+            )""")
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version(version) VALUES (17)")
         conn.commit()
 
 
@@ -1546,7 +1566,8 @@ def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str =
              tags: str = "", session_id: str = "", project_id: str = "",
              parent_id: str = "", upsert: bool = False, limit: int = 5,
              about_peer: str = "", event_id: str = "",
-             importance: float = 0.5, cue: str = "") -> dict:
+             importance: float = 0.5, cue: str = "",
+             valid_from: str = "", valid_until: str = "") -> dict:
     """Write by content identity, not by provenance.
 
     Two spellings of one fact (casing, whitespace) and two provenances of one
@@ -1606,12 +1627,36 @@ def remember(conn: sqlite3.Connection, rtype: str, content: str, evidence: str =
         applied = "inserted"
 
     conn.commit()
+    if valid_from or valid_until:
+        conn.execute("UPDATE records SET valid_from=?, valid_until=? WHERE id=?",
+                     (valid_from, valid_until, record_id))
+        conn.commit()
     rif_applied = _rif_supersede(conn, record_id, rtype, norm,
                                  decision["similar"])
+    advisory = decision["advisory"]
+    plan_note = _future_tense_note(content, valid_from)
+    if plan_note:
+        advisory = (advisory + " " + plan_note).strip() if advisory else plan_note
     return {"id": record_id, "type": rtype, "shape": norm, "applied": applied,
             "rif": rif_applied,
             "action": decision["action"], "reason": decision["reason"],
-            "similar": decision["similar"], "advisory": decision["advisory"]}
+            "similar": decision["similar"], "advisory": advisory}
+
+
+# Future-tense markers (graphiti temporal_edge_utils.py pattern): a plan is
+# not a present fact. When wording says "will/akan" and the caller pinned a
+# validity window, remind them the window should start when the plan
+# executes, not when it was stated. Advisory only - never blocks a write.
+_FUTURE_RE = re.compile(
+    r"\b(will|shall|going to|plans? to|planned|next (sprint|week|month|release)"
+    r"|akan|nanti|rencana|mau di)\b", re.IGNORECASE)
+
+
+def _future_tense_note(content: str, valid_from: str) -> str:
+    if valid_from and _FUTURE_RE.search(content or ""):
+        return ("plan wording detected: valid_from should mark when the plan "
+                "takes effect, not when it was stated")
+    return ""
 
 
 def _fts_query(query: str) -> str:
@@ -2101,6 +2146,40 @@ def _ppr_expand(conn: sqlite3.Connection, seeds: list, all_rows: list,
 PPR_WEIGHT = 0.10
 
 
+MMR_LAMBDA = 0.7
+
+
+def _mmr_select(scored: list, limit: int) -> list:
+    """Maximal Marginal Relevance over term overlap (graphiti pattern,
+    stdlib): pick the best hit, then prefer candidates that add new terms
+    over ones restating what is already selected. Relevance still leads
+    (lambda 0.85); only near-duplicates get pushed down, so a window of
+    k hits carries k distinct lessons instead of k spellings of one.
+    """
+    if len(scored) <= 1 or limit <= 1:
+        return scored[:limit]
+    pool = scored[:max(limit * 2, limit)]
+    tokens = [set(_tokens(item[0].get("content") or "")) for item in pool]
+    chosen: list = []
+    chosen_tokens: set = set()
+    remaining = list(range(len(pool)))
+    while remaining and len(chosen) < limit:
+        best_i, best_v = None, None
+        for i in remaining:
+            rel = pool[i][5]
+            if chosen_tokens and tokens[i]:
+                redundancy = len(tokens[i] & chosen_tokens) / len(tokens[i])
+            else:
+                redundancy = 0.0
+            v = MMR_LAMBDA * rel - (1.0 - MMR_LAMBDA) * redundancy
+            if best_v is None or v > best_v:
+                best_i, best_v = i, v
+        chosen.append(pool[best_i])
+        chosen_tokens |= tokens[best_i]
+        remaining.remove(best_i)
+    return chosen
+
+
 def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = False,
            pool: int = None, rtype: str = None, project_id: str = None,
            session_id: str = None, now=None,
@@ -2187,7 +2266,7 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
         )
 
     scored.sort(key=_sort_key)
-    top = scored[:limit]
+    top = _mmr_select(scored, limit)
     abstained = bool(top) and top[0][5] < ABSTAIN_SCORE
 
     out = []
@@ -2247,8 +2326,10 @@ def conflicts(conn: sqlite3.Connection, ids: list) -> list:
         "SELECT id, type, content, superseded_by FROM records WHERE id IN (%s)"
         % ",".join("?" * len(ids)), ids)] if ids else []
     token_sets = {r["id"]: set(_tokens(r["content"])) for r in rows}
+    adjudicated = {tuple(sorted((r["a"], r["b"]))) for r in conn.execute(
+        "SELECT a, b FROM not_conflict")}
     out = []
-    seen = set()
+    seen = set(adjudicated)
     for a in rows:
         for b in rows:
             if a["id"] == b["id"]:
@@ -2273,6 +2354,20 @@ def conflicts(conn: sqlite3.Connection, ids: list) -> list:
                 out.append({"a": a["id"], "b": b["id"],
                             "overlap": round(overlap, 3), "kind": kind})
     return out
+
+
+def mark_not_conflict(conn: sqlite3.Connection, a: str, b: str) -> dict:
+    """Record an adjudication: this pair is compatible, stop surfacing it.
+
+    engram's not_conflict verb: judgment belongs to the agent, and once
+    made it persists so the same false positive never costs attention
+    twice. Order-independent; idempotent.
+    """
+    lo, hi = sorted((a, b))
+    conn.execute("INSERT OR IGNORE INTO not_conflict (a, b, ts) VALUES (?,?,?)",
+                 (lo, hi, now_iso()))
+    conn.commit()
+    return {"a": lo, "b": hi, "stored": True}
 
 
 def check_anchors(conn: sqlite3.Connection, apply: bool = False) -> dict:
