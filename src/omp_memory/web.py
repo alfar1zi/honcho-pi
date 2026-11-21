@@ -23,15 +23,20 @@ from pathlib import Path
 
 from . import db
 
-# In a source checkout web/ sits next to src/; in a venv install it does not,
-# so OMP_MEMORY_WEB_DIR (or ~/.omp/memory/web) points at the built assets.
-_WEB_CANDIDATES = [
-    Path(os.environ["OMP_MEMORY_WEB_DIR"]) if os.environ.get("OMP_MEMORY_WEB_DIR") else None,
-    Path(__file__).resolve().parent.parent.parent / "web",
-    Path.home() / ".omp/memory/web",
-]
-WEB_DIR = next((p for p in _WEB_CANDIDATES if p and (p / "dist" / "index.html").is_file()),
-               next(p for p in _WEB_CANDIDATES if p))
+# In a source checkout web/ sits next to src/; in a venv install it does not.
+# An explicit OMP_MEMORY_WEB_DIR wins unconditionally: falling through to the
+# checkout would point GRAPH_FILE/MEDIA_DIR at tracked repo files, so a demo
+# run could pollute the repo. Missing dist there is main()'s error to report.
+_ENV_WEB = os.environ.get("OMP_MEMORY_WEB_DIR")
+if _ENV_WEB:
+    WEB_DIR = Path(_ENV_WEB)
+else:
+    _WEB_CANDIDATES = [
+        Path(__file__).resolve().parent.parent.parent / "web",
+        Path.home() / ".omp/memory/web",
+    ]
+    WEB_DIR = next((p for p in _WEB_CANDIDATES if (p / "dist" / "index.html").is_file()),
+                   _WEB_CANDIDATES[0])
 DIST_DIR = WEB_DIR / "dist"
 GRAPH_FILE = WEB_DIR / "data" / "graph.json"
 MEDIA_DIR = WEB_DIR / "data" / "media"

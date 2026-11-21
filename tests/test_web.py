@@ -186,3 +186,19 @@ def test_content_edit_logs_correction_and_supersedes(graph_env):
     # amplified 1.5x above the 0.7 confidence threshold, clamped at 1.0
     conf = graph_env.execute("SELECT confidence FROM records WHERE id=?", (rid,)).fetchone()[0]
     assert conf == 1.0
+
+
+def test_env_web_dir_wins_without_dist(tmp_path, monkeypatch):
+    # An explicit override must not fall through to the checkout when dist is
+    # missing there: GRAPH_FILE would point at tracked repo files.
+    import importlib
+    empty = tmp_path / "no-dist"
+    empty.mkdir()
+    monkeypatch.setenv("OMP_MEMORY_WEB_DIR", str(empty))
+    try:
+        reloaded = importlib.reload(web)
+        assert reloaded.WEB_DIR == empty
+        assert reloaded.GRAPH_FILE == empty / "data" / "graph.json"
+    finally:
+        monkeypatch.delenv("OMP_MEMORY_WEB_DIR")
+        importlib.reload(web)
