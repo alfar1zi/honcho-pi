@@ -1694,7 +1694,7 @@ def _cue_pool(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str 
               project_id: str = None, session_id: str = None,
               verified_only: bool = False,
               min_confidence: float = 0.0, pool: int = None,
-              about_peer: str = None) -> list:
+              about_peer: str = None, as_of: str = None) -> list:
     """INTENT records whose cue shares a token with the query.
 
     Content search cannot see the cue (it is not in the FTS index), so this
@@ -1709,7 +1709,8 @@ def _cue_pool(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str 
         SELECT r.id, r.type, r.content, r.evidence, r.verified, r.confidence,
                r.source, r.tags, r.created_at, r.updated_at, r.session_id,
                r.project_id, r.parent_id, r.about_peer, r.superseded_by,
-               r.importance, r.cue, 0.0 AS rank
+               r.importance, r.cue, r.decay_tau, r.stale, r.valid_from,
+               r.valid_until, 0.0 AS rank
         FROM records r
         WHERE r.type = 'INTENT'
     """
@@ -1731,6 +1732,10 @@ def _cue_pool(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str 
     if min_confidence > 0:
         sql += " AND r.confidence >= ?"
         params.append(min_confidence)
+    if as_of:
+        sql += (" AND (r.valid_from='' OR r.valid_from<=?)"
+                " AND (r.valid_until='' OR r.valid_until>?)")
+        params.extend([as_of, as_of])
     rows = [dict(row) for row in conn.execute(sql, params)]
     picked = []
     for row in rows:
@@ -1746,14 +1751,15 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
                   project_id: str = None, session_id: str = None,
                   verified_only: bool = False,
                   min_confidence: float = 0.0, pool: int = None,
-                  about_peer: str = None):
+                  about_peer: str = None, as_of: str = None):
     match = query if query.startswith('>') else _fts_query(query)
     if not match:
         return []
     sql = """
         SELECT r.id, r.type, r.content, r.evidence, r.verified, r.confidence, r.source, r.tags,
                r.created_at, r.updated_at, r.session_id, r.project_id, r.parent_id,
-               r.about_peer, r.superseded_by, r.importance, r.cue,
+               r.about_peer, r.superseded_by, r.importance, r.cue, r.decay_tau,
+               r.stale, r.valid_from, r.valid_until,
                bm25(records_fts) / CASE r.type
                    WHEN 'RULE' THEN 1.4 WHEN 'CORRECTION' THEN 1.4
                    WHEN 'DECISION' THEN 1.2 WHEN 'WORKFLOW' THEN 1.2
@@ -1783,6 +1789,10 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
     if min_confidence > 0:
         sql += " AND r.confidence >= ?"
         params.append(min_confidence)
+    if as_of:
+        sql += (" AND (r.valid_from='' OR r.valid_from<=?)"
+                " AND (r.valid_until='' OR r.valid_until>?)")
+        params.extend([as_of, as_of])
     sql += " ORDER BY rank, r.verified DESC, r.confidence DESC, r.updated_at DESC LIMIT ?"
     params.append(pool if pool is not None else limit)
     rows = [dict(row) for row in conn.execute(sql, params)]
@@ -1822,13 +1832,18 @@ def search(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = N
            project_id: str = None, session_id: str = None,
            verified_only: bool = False,
            min_confidence: float = 0.0, pool: int = None,
-           about_peer: str = None):
-    """Exact AND first, then typo-repaired, then best single-word match."""
+           about_peer: str = None, as_of: str = None):
+    """Exact AND first, then typo-repaired, then best single-word match.
+
+    as_of (ISO timestamp) answers 'what was true then': records whose
+    validity window excludes that moment are filtered out (Graphiti /
+    Mnemosyne bi-temporal pattern). Empty windows mean always-valid.
+    """
     return _search_relaxed(conn, query, limit=limit, rtype=rtype,
                            project_id=project_id, session_id=session_id,
                            verified_only=verified_only,
                            min_confidence=min_confidence, pool=pool,
-                           about_peer=about_peer)
+                           about_peer=about_peer, as_of=as_of)
 
 BM25_CEILING = 10.0
 
@@ -1877,7 +1892,7 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
            pool: int = None, rtype: str = None, project_id: str = None,
            session_id: str = None, now=None,
            verified_only: bool = False, min_confidence: float = 0.0,
-           about_peer: str = None) -> list:
+           about_peer: str = None, as_of: str = None) -> list:
     """Rerank candidate memories combining lexical match, heat and type prior.
 
     Confidence enters once, through heat (which already weights it 0.45); a
@@ -1893,7 +1908,7 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
                         rtype=rtype, project_id=project_id,
                         session_id=session_id,
                         verified_only=verified_only, min_confidence=min_confidence,
-                        about_peer=about_peer)
+                        about_peer=about_peer, as_of=as_of)
     if not candidates:
         return []
     lexicals = _absolute_lexical(candidates)
@@ -1979,6 +1994,9 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
                 "importance": c.get("importance", 0.5),
                 "cue": c.get("cue", ""),
                 "cue_triggered": c["id"] in cue_bonus,
+                "stale": bool(c.get("stale")),
+                "valid_from": c.get("valid_from", ""),
+                "valid_until": c.get("valid_until", ""),
             })
     else:
         for c, parts, heat, lexical, prior, score in top:
@@ -1995,6 +2013,75 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
                 "about_peer": c.get("about_peer", ""),
             })
     return out
+
+def conflicts(conn: sqlite3.Connection, ids: list) -> list:
+    """Surface candidate contradictions among recalled records (engram /
+    remembrane pattern), never auto-merge. Two records conflict when they
+    share most of their content terms but one supersedes the other, or a
+    CORRECTION names the other's content. The agent judges; we only point.
+    """
+    rows = [dict(r) for r in conn.execute(
+        "SELECT id, type, content, superseded_by FROM records WHERE id IN (%s)"
+        % ",".join("?" * len(ids)), ids)] if ids else []
+    token_sets = {r["id"]: set(_tokens(r["content"])) for r in rows}
+    out = []
+    seen = set()
+    for a in rows:
+        for b in rows:
+            if a["id"] == b["id"]:
+                continue
+            key = tuple(sorted((a["id"], b["id"])))
+            if key in seen:
+                continue
+            ta, tb = token_sets[a["id"]], token_sets[b["id"]]
+            if not ta or not tb:
+                continue
+            overlap = len(ta & tb) / min(len(ta), len(tb))
+            linked = a["superseded_by"] == b["id"] or b["superseded_by"] == a["id"]
+            correction = (a["type"] == "CORRECTION" and overlap >= 0.5) or \
+                         (b["type"] == "CORRECTION" and overlap >= 0.5)
+            if overlap >= 0.6 and (linked or correction):
+                seen.add(key)
+                out.append({"a": a["id"], "b": b["id"],
+                            "overlap": round(overlap, 3),
+                            "kind": "supersede" if linked else "correction"})
+    return out
+
+
+def check_anchors(conn: sqlite3.Connection, apply: bool = False) -> dict:
+    """Mark records stale when the file they describe has changed.
+
+    A record may carry anchor_path + anchor_sha (the file content it was
+    learned from). When the current sha differs, the lesson may no longer
+    hold: flag it for review instead of silently serving it. No competitor
+    verified in the scan does checksum-triggered invalidation for coding
+    memory; this is the 'memory that knows when it might be wrong' feature.
+    """
+    import hashlib
+    rows = [dict(r) for r in conn.execute(
+        "SELECT id, anchor_path, anchor_sha, stale FROM records"
+        " WHERE anchor_path != '' AND anchor_sha != ''")]
+    checked, flagged, cleared = 0, [], []
+    for r in rows:
+        checked += 1
+        try:
+            with open(r["anchor_path"], "rb") as f:
+                current = hashlib.sha256(f.read()).hexdigest()
+        except OSError:
+            current = None  # missing file: the anchor itself is gone
+        changed = current != r["anchor_sha"]
+        if changed and not r["stale"]:
+            flagged.append(r["id"])
+            if apply:
+                conn.execute("UPDATE records SET stale=1 WHERE id=?", (r["id"],))
+        elif not changed and r["stale"]:
+            cleared.append(r["id"])
+            if apply:
+                conn.execute("UPDATE records SET stale=0 WHERE id=?", (r["id"],))
+    if apply and (flagged or cleared):
+        conn.commit()
+    return {"checked": checked, "flagged": flagged, "cleared": cleared,
+            "apply": bool(apply)}
 
 
 def _snippet(content: str, query: str, width: int = SNIPPET_CHARS) -> str:

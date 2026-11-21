@@ -222,7 +222,7 @@ def tool_recall(args: Dict[str, Any], user: str = "") -> str:
                          session_id=session,
                          verified_only=verified_only,
                          min_confidence=min_confidence,
-                         about_peer=about_peer)
+                         about_peer=about_peer, as_of=args.get("as_of"))
         if not rows:
             return f"No memory matched: {query!r}"
         _last_recall[user] = [r["id"] for r in rows]
@@ -249,6 +249,15 @@ def tool_recall(args: Dict[str, Any], user: str = "") -> str:
                 f"  id={r['id']} confidence={float(r['confidence']):.2f} {flag}"
                 + (f" evidence={_clip(r['evidence'], 200)}" if r["evidence"] else "")
             )
+        cf = db.conflicts(conn, [r["id"] for r in rows])
+        if cf:
+            out.append("Possible contradictions (judge, do not auto-merge):")
+            for c in cf:
+                out.append(f"- {c['a']} vs {c['b']} ({c['kind']}, "
+                           f"overlap {c['overlap']})")
+        stale = [r["id"] for r in rows if r.get("stale")]
+        if stale:
+            out.append(f"Stale anchors (source file changed, re-verify): {', '.join(stale)}")
         out.append("Say reinforce {id, signal} after using one of these: success when it "
                    "held, failure when it did not, correction when the right answer was "
                    "different. The signal feeds confidence and heat.")
@@ -290,6 +299,26 @@ def tool_remember(args: Dict[str, Any], user: str = "") -> str:
             cue=str(args.get("cue") or ""),
         )
         rid = result["id"]
+        # Temporal validity + code anchor (v15): set after the write so the
+        # content identity path stays untouched. anchor_sha defaults to the
+        # file's current hash so check_anchors has a baseline.
+        anchor_path = str(args.get("anchor_path") or "")
+        valid_from = str(args.get("valid_from") or "")
+        valid_until = str(args.get("valid_until") or "")
+        if anchor_path or valid_from or valid_until:
+            import hashlib
+            sha = ""
+            if anchor_path:
+                try:
+                    with open(anchor_path, "rb") as f:
+                        sha = hashlib.sha256(f.read()).hexdigest()
+                except OSError:
+                    return f"remember: anchor_path not readable: {anchor_path}"
+            conn.execute(
+                "UPDATE records SET anchor_path=?, anchor_sha=?, valid_from=?,"
+                " valid_until=? WHERE id=?",
+                (anchor_path, sha, valid_from, valid_until, rid))
+            conn.commit()
         rec = db.get_record(conn, rid) or {}
         out = (
             f"Stored {rtype} id={rid} confidence={float(rec.get('confidence', 0)):.2f} "
@@ -379,6 +408,7 @@ def tool_maintenance(args: Dict[str, Any], user: str = "") -> str:
             return json.dumps(report, indent=2, sort_keys=True)
         if op == "sleep":
             report = db.sleep_pass(conn, apply=bool(args.get("apply", True)))
+            report["anchors"] = db.check_anchors(conn, apply=bool(args.get("apply", True)))
             return json.dumps(report, indent=2, sort_keys=True)
         if op == "forget_cold":
             report = db.forget_cold(conn, apply=bool(args.get("apply")))
@@ -428,6 +458,9 @@ TOOLS: List[Dict[str, Any]] = [
                           "description": "L0 index only: id + one line + confidence, "
                                          "with token cost. Fetch detail via recall full "
                                          "or a narrower query."},
+                "as_of": {"type": "string",
+                          "description": "ISO timestamp: what was true then "
+                                         "(bi-temporal validity filter)."},
             },
             "required": ["query"],
         },
@@ -454,6 +487,11 @@ TOOLS: List[Dict[str, Any]] = [
                 "importance": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.5,
                                "description": "How much this intent matters (INTENT records)."},
                 "cue": {"type": "string", "description": "Trigger phrase that surfaces an INTENT on recall."},
+                "anchor_path": {"type": "string",
+                                "description": "File this lesson describes; its sha is "
+                                               "recorded so a later change flags the record stale."},
+                "valid_from": {"type": "string", "description": "ISO: valid from this moment."},
+                "valid_until": {"type": "string", "description": "ISO: expires at this moment."},
             },
             "required": ["content"],
         },

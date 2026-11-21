@@ -107,3 +107,59 @@ def test_strength_cap(conn):
         db.reinforce(conn, r["id"], "success", delta=0.01)
     tau = conn.execute("SELECT decay_tau FROM records WHERE id=?", (r["id"],)).fetchone()[0]
     assert tau <= db.STRENGTH_TAU_MAX_DAYS
+
+
+# --- Wave C: bi-temporal, conflicts, anchors ----------------------------------
+
+def test_as_of_filters_validity(conn):
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    past = (now - timedelta(days=10)).isoformat()
+    mid = (now - timedelta(days=5)).isoformat()
+    future = (now + timedelta(days=10)).isoformat()
+    db.remember(conn, "FACT", "wal mode is the journal setting", confidence=0.9, source="s")
+    conn.execute("UPDATE records SET valid_until=? WHERE content LIKE 'wal mode%'", (mid,))
+    conn.commit()
+    # as_of before expiry: visible; after: gone
+    assert db.recall(conn, "wal mode journal", as_of=past)
+    assert not db.recall(conn, "wal mode journal", as_of=future)
+    # no as_of: expired record still returned (default = current truth incl. history)
+    assert db.recall(conn, "wal mode journal")
+
+
+def test_conflicts_surfaces_supersede_pair(conn):
+    r1 = db.remember(conn, "FACT", "use pip for dependency installs always", confidence=0.8, source="s")
+    r2 = db.remember(conn, "CORRECTION", "use uv for dependency installs always, pip is slow",
+                     confidence=0.9, source="s")
+    conn.execute("UPDATE records SET superseded_by=? WHERE id=?", (r2["id"], r1["id"]))
+    conn.commit()
+    cf = db.conflicts(conn, [r1["id"], r2["id"]])
+    assert len(cf) == 1
+    assert cf[0]["kind"] == "supersede"
+
+
+def test_conflicts_ignores_unrelated(conn):
+    r1 = db.remember(conn, "FACT", "sqlite wal mode journaling", source="s")
+    r2 = db.remember(conn, "FACT", "react flow graph rendering", source="s")
+    assert db.conflicts(conn, [r1["id"], r2["id"]]) == []
+
+
+def test_check_anchors_flags_changed_file(conn, tmp_path):
+    f = tmp_path / "config.py"
+    f.write_text("TIMEOUT = 30\n")
+    import hashlib
+    sha = hashlib.sha256(f.read_bytes()).hexdigest()
+    r = db.remember(conn, "FACT", "timeout is thirty seconds in config", source="s")
+    conn.execute("UPDATE records SET anchor_path=?, anchor_sha=? WHERE id=?",
+                 (str(f), sha, r["id"]))
+    conn.commit()
+    report = db.check_anchors(conn, apply=True)
+    assert report["checked"] == 1 and not report["flagged"]
+    f.write_text("TIMEOUT = 60\n")
+    report = db.check_anchors(conn, apply=True)
+    assert report["flagged"] == [r["id"]]
+    assert conn.execute("SELECT stale FROM records WHERE id=?", (r["id"],)).fetchone()[0] == 1
+    # restore the file: flag clears
+    f.write_text("TIMEOUT = 30\n")
+    report = db.check_anchors(conn, apply=True)
+    assert report["cleared"] == [r["id"]]
