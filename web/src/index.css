@@ -22,15 +22,19 @@
   --skill: #ff6bd6;
   --note: #4da3ff;
   --mask: rgba(13, 13, 16, 0.7);
-  /* Liquid glass, dark-first: the fill is a dark translucent surface so the
-     layer reads as smoked glass over the canvas, not a white frost. Border
-     and top highlight carry the "glass" signal; the shadow grounds it.
-     Chrome only (toolbar, panels, controls); the canvas stays matte. */
-  --glass: rgba(22, 22, 29, 0.62);
-  --glass-strong: rgba(22, 22, 29, 0.85);
-  --glass-border: rgba(255, 255, 255, 0.09);
-  --glass-highlight: rgba(255, 255, 255, 0.06);
-  --glass-shadow: 0 12px 40px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
+  /* Liquid Glass (macOS Tahoe): clear material, not a grey plate. Three
+     signals: (1) low-alpha tint so the canvas shows through, (2) fresnel
+     rim = inset highlights that intensify at the edges, (3) backdrop
+     blur + contrast dip + saturation lift on what passes through.
+     Chrome only; the canvas stays matte. */
+  --glass: rgba(255, 255, 255, 0.06);
+  --glass-strong: rgba(30, 30, 40, 0.42);
+  --glass-border: rgba(255, 255, 255, 0.14);
+  --glass-shadow: 0 12px 40px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.35);
+  --glass-rim:
+    inset 1.5px 1.5px 2px -1px rgba(255, 255, 255, 0.35),
+    inset 0 0 12px 1px rgba(255, 255, 255, 0.05),
+    inset -1px -1.5px 2px -1px rgba(255, 255, 255, 0.14);
   --glow-a: #2a1f4d;
   --glow-b: #0e2b33;
 }
@@ -53,11 +57,14 @@
   --inference: #475569;
   --skill: #be185d;
   --note: #1d4ed8;
-  --glass: rgba(255, 255, 255, 0.6);
-  --glass-strong: rgba(255, 255, 255, 0.82);
-  --glass-border: rgba(15, 23, 42, 0.1);
-  --glass-highlight: rgba(255, 255, 255, 0.7);
-  --glass-shadow: 0 8px 32px rgba(15, 23, 42, 0.12), 0 2px 8px rgba(15, 23, 42, 0.08);
+  --glass: rgba(255, 255, 255, 0.42);
+  --glass-strong: rgba(255, 255, 255, 0.6);
+  --glass-border: rgba(255, 255, 255, 0.65);
+  --glass-shadow: 0 8px 32px rgba(15, 23, 42, 0.14), 0 2px 8px rgba(15, 23, 42, 0.08);
+  --glass-rim:
+    inset 1.5px 1.5px 2px -1px rgba(255, 255, 255, 0.9),
+    inset 0 0 12px 1px rgba(255, 255, 255, 0.25),
+    inset -1px -1.5px 2px -1px rgba(255, 255, 255, 0.5);
   --glow-a: #ede9fe;
   --glow-b: #ccfbf1;
 }
@@ -96,27 +103,28 @@ body::before {
   font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace;
 }
 
-/* Glass: translucent fill + hairline border + top highlight. The blur is a
-   progressive enhancement on chrome that floats over the canvas (toolbar,
-   panels, controls); dashboard cards sit over a static backdrop and use the
-   fill alone, so nine stacked compositor layers never happen. Nodes stay
-   solid fills. */
+/* Liquid Glass material: clear tint + fresnel rim + grounding shadow.
+   The rim is the tell: highlights intensify toward the edges like light
+   catching a beveled pane, not a uniform top stripe. Blur chain follows
+   Apple's material: blur, contrast dip, saturation + brightness lift.
+   Chrome only (toolbar, panels, controls); dashboard cards use the fill
+   over a shared static backdrop, no per-card compositor layers. */
 .glass {
   background: var(--glass);
   border: 1px solid var(--glass-border);
-  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight);
+  box-shadow: var(--glass-shadow), var(--glass-rim);
 }
 
 .glass-strong {
   background: var(--glass-strong);
   border: 1px solid var(--glass-border);
-  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight);
+  box-shadow: var(--glass-shadow), var(--glass-rim);
 }
 
 @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .glass-blur {
-    -webkit-backdrop-filter: blur(20px) saturate(1.15);
-    backdrop-filter: blur(20px) saturate(1.15);
+    -webkit-backdrop-filter: blur(16px) saturate(1.5) brightness(1.08);
+    backdrop-filter: blur(16px) saturate(1.5) brightness(1.08);
   }
 }
 
@@ -142,12 +150,12 @@ mark {
   overflow: hidden;
   background: var(--glass);
   border: 1px solid var(--glass-border);
-  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight);
+  box-shadow: var(--glass-shadow), var(--glass-rim);
 }
 @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .react-flow__controls {
-    -webkit-backdrop-filter: blur(20px) saturate(1.15);
-    backdrop-filter: blur(20px) saturate(1.15);
+    -webkit-backdrop-filter: blur(16px) saturate(1.5) brightness(1.08);
+    backdrop-filter: blur(16px) saturate(1.5) brightness(1.08);
   }
 }
 .react-flow__controls button {
@@ -156,7 +164,7 @@ mark {
   color: var(--text);
 }
 .react-flow__controls button:hover {
-  background: var(--glass-highlight);
+  background: rgba(255, 255, 255, 0.08);
 }
 .react-flow__controls button svg {
   fill: var(--text);
