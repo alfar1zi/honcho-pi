@@ -15,6 +15,16 @@ const PORT = process.env.PORT || 4001
 const app = express()
 app.use(express.json({ limit: '10mb' }))
 app.use(express.static(join(ROOT, 'dist')))
+app.use('/media', express.static(join(DATA_DIR, 'media'), { immutable: true, maxAge: '1y' }))
+
+// The stdlib prod server owns /events; in dev, socket.io carries updates, so
+// this stub just keeps EventSource from erroring in the console.
+app.get('/events', (_req, res) => {
+  res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' })
+  res.write(': connected\n\n')
+  const keep = setInterval(() => res.write(': keep\n\n'), 30000)
+  res.on('close', () => clearInterval(keep))
+})
 
 const httpServer = createServer(app)
 const io = new Server(httpServer, { cors: { origin: '*' } })

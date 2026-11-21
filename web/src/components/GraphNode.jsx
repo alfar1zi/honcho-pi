@@ -58,18 +58,36 @@ export function GraphNode({ id, data, selected }) {
       onBlur={() => setHoverId(null)}
     >
       <Handle type="target" position={Position.Top} className="!w-px !h-px !border-0 !opacity-0" />
-      <div
-        className={`rounded-full transition-all ${selected ? 'ring-2 ring-offset-2 ring-offset-[var(--bg)]' : ''}`}
-        style={{
-          width: r * 2,
-          height: r * 2,
-          background: color,
-          boxShadow: selected || hoverId === id
-            ? `0 0 10px 1px color-mix(in srgb, ${color} 70%, transparent)`
-            : `0 0 6px 0 color-mix(in srgb, ${color} 35%, transparent)`,
-          ...(selected ? { '--tw-ring-color': color } : {}),
-        }}
-      />
+      {data.image ? (
+        <img
+          src={data.image}
+          alt=""
+          draggable={false}
+          className={`rounded-full object-cover transition-all ${selected ? 'ring-2 ring-offset-2 ring-offset-[var(--bg)]' : ''}`}
+          style={{
+            width: Math.max(28, r * 2.4),
+            height: Math.max(28, r * 2.4),
+            border: `2px solid ${color}`,
+            boxShadow: selected || hoverId === id
+              ? `0 0 10px 1px color-mix(in srgb, ${color} 70%, transparent)`
+              : 'none',
+            ...(selected ? { '--tw-ring-color': color } : {}),
+          }}
+        />
+      ) : (
+        <div
+          className={`rounded-full transition-all ${selected ? 'ring-2 ring-offset-2 ring-offset-[var(--bg)]' : ''}`}
+          style={{
+            width: r * 2,
+            height: r * 2,
+            background: color,
+            boxShadow: selected || hoverId === id
+              ? `0 0 10px 1px color-mix(in srgb, ${color} 70%, transparent)`
+              : `0 0 6px 0 color-mix(in srgb, ${color} 35%, transparent)`,
+            ...(selected ? { '--tw-ring-color': color } : {}),
+          }}
+        />
+      )}
       {((zoom > 0.75 && deg >= 4) || focusId === id || connected.has(id) || selected || (q && matchesSearch)) && (
         <div
           className="node-label absolute left-full ml-2 whitespace-nowrap text-[11px] pointer-events-none select-none max-w-[140px] truncate"

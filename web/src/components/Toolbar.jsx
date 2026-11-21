@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Plus, Save, Search, Network, Moon, Sun, RefreshCw, Maximize, Settings2, Pin, PinOff, EyeOff, Eye, ZoomIn } from 'lucide-react'
+import { Plus, Save, Search, Network, Moon, Sun, RefreshCw, Maximize, Settings2, Pin, PinOff, EyeOff, Eye, ZoomIn, LayoutDashboard } from 'lucide-react'
 import { useGraphStore, typeColor } from '../store.js'
 
 const CHIP_ORDER = ['FACT', 'DECISION', 'RULE', 'CORRECTION', 'INFERENCE', 'skill']
@@ -100,6 +100,8 @@ export function Toolbar() {
   const toggleTheme = useGraphStore((s) => s.toggleTheme)
   const relayout = useGraphStore((s) => s.relayout)
   const fitView = useGraphStore((s) => s.fitView)
+  const view = useGraphStore((s) => s.view)
+  const setView = useGraphStore((s) => s.setView)
   const [settingsOpen, setSettingsOpen] = useState(false)
 
   const typeCounts = useMemo(() => {
@@ -178,6 +180,16 @@ export function Toolbar() {
       </div>
       <div className="flex-1" />
       <div className="flex items-center gap-1 bg-[var(--surface)] border border-[var(--border)] rounded-lg p-1 pointer-events-auto">
+        <button
+          data-testid="toggle-dashboard"
+          onClick={() => setView(view === 'dashboard' ? 'graph' : 'dashboard')}
+          aria-label={view === 'dashboard' ? 'Back to graph' : 'Open dashboard'}
+          aria-pressed={view === 'dashboard'}
+          className={`p-1.5 rounded hover:bg-[var(--surface-2)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] ${view === 'dashboard' ? 'text-[var(--accent)]' : ''}`}
+          title={view === 'dashboard' ? 'Back to graph' : 'Dashboard: store health'}
+        >
+          {view === 'dashboard' ? <Network size={16} /> : <LayoutDashboard size={16} />}
+        </button>
         <button data-testid="add-node" onClick={addNode} aria-label="Add node" className="p-1.5 rounded hover:bg-[var(--surface-2)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]" title="Add node">
           <Plus size={16} />
         </button>

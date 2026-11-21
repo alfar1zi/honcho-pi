@@ -1,5 +1,5 @@
-import { useMemo, useEffect, useRef } from 'react'
-import { X, Type, Palette, Tag, Link2 } from 'lucide-react'
+import { useMemo, useEffect, useRef, useState } from 'react'
+import { X, Type, Palette, Tag, Link2, ImagePlus, Pencil, Check, Trash2 } from 'lucide-react'
 import { useGraphStore, parseConfidence, typeColor } from '../store.js'
 
 const COLORS = ['#7c3aed', '#06b6d4', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#6366f1']
@@ -11,6 +11,60 @@ export function DetailPanel() {
   const node = nodes.find((n) => n.id === selectedId)
   const closeRef = useRef(null)
   const open = !!node
+  const saveRecord = useGraphStore((s) => s.saveRecord)
+  const attachImage = useGraphStore((s) => s.attachImage)
+  const removeImage = useGraphStore((s) => s.removeImage)
+  const fileRef = useRef(null)
+  const [record, setRecord] = useState(null)
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const [status, setStatus] = useState('')
+
+  const isRecord = !!selectedId && selectedId.startsWith('mem-')
+
+  // Full record content comes from the store, not the 90-char graph label.
+  useEffect(() => {
+    setRecord(null)
+    setEditing(false)
+    setStatus('')
+    if (!isRecord) return
+    let alive = true
+    fetch(`/api/record/${selectedId.slice(4)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((body) => { if (alive) setRecord(body) })
+      .catch(() => {})
+    return () => { alive = false }
+  }, [selectedId, isRecord])
+
+  const startEdit = () => {
+    setDraft(record?.content || node?.data.label || '')
+    setEditing(true)
+    setStatus('')
+  }
+
+  const commitEdit = async () => {
+    try {
+      const updated = await saveRecord(selectedId.slice(4), { content: draft })
+      setRecord(updated)
+      setEditing(false)
+      setStatus('saved to store')
+    } catch (e) {
+      setStatus(`save failed: ${e.message}`)
+    }
+  }
+
+  const onPickImage = async (e) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file || !node) return
+    try {
+      setStatus('uploading image...')
+      await attachImage(node.id, file)
+      setStatus('image attached')
+    } catch (err) {
+      setStatus(`image failed: ${err.message}`)
+    }
+  }
 
   // Panel behaves like a non-modal dialog: Escape closes, focus lands on close.
   useEffect(() => {
@@ -41,7 +95,6 @@ export function DetailPanel() {
 
   const conf = parseConfidence(node.data.meta)
 
-  const isRecord = node.id.startsWith('mem-')
   const color = typeColor(node.data.type, theme, node.data.color)
 
   const update = (patch) => {
@@ -86,16 +139,97 @@ export function DetailPanel() {
           )}
         </div>
 
-        <div>
-          <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">Content</div>
-          <div className="text-[12px] leading-relaxed bg-[var(--surface-2)] border border-[var(--border)] rounded p-2 max-h-40 overflow-y-auto whitespace-pre-wrap font-mono">
-            {node.data.label || '(no content)'}
+        {node.data.image && (
+          <div className="relative">
+            <img
+              src={node.data.image}
+              alt={node.data.label || 'attached image'}
+              className="w-full rounded border border-[var(--border)] max-h-48 object-cover"
+            />
+            <button
+              onClick={() => removeImage(node.id)}
+              aria-label="Remove image"
+              className="absolute top-1 right-1 p-1 rounded bg-[var(--surface)] border border-[var(--border)] hover:border-[var(--accent)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+            >
+              <Trash2 size={12} />
+            </button>
           </div>
+        )}
+
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">Content</span>
+            <span className="flex items-center gap-1">
+              {isRecord && !editing && (
+                <button
+                  data-testid="edit-record"
+                  onClick={startEdit}
+                  aria-label="Edit record content"
+                  className="p-1 rounded hover:bg-[var(--surface-2)] text-[var(--text-muted)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                  title="Edit content (writes to the memory store)"
+                >
+                  <Pencil size={12} />
+                </button>
+              )}
+              {editing && (
+                <button
+                  data-testid="save-record"
+                  onClick={commitEdit}
+                  aria-label="Save record content"
+                  className="p-1 rounded hover:bg-[var(--surface-2)] text-[var(--fact)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                  title="Save to store"
+                >
+                  <Check size={12} />
+                </button>
+              )}
+              <button
+                data-testid="attach-image"
+                onClick={() => fileRef.current?.click()}
+                aria-label="Attach image"
+                className="p-1 rounded hover:bg-[var(--surface-2)] text-[var(--text-muted)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                title="Attach image to this node"
+              >
+                <ImagePlus size={12} />
+              </button>
+              <input
+                ref={fileRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/gif"
+                className="hidden"
+                onChange={onPickImage}
+                aria-hidden="true"
+                tabIndex={-1}
+              />
+            </span>
+          </div>
+          {editing ? (
+            <textarea
+              data-testid="record-editor"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              rows={8}
+              className="w-full text-[12px] leading-relaxed bg-[var(--surface-2)] border border-[var(--accent)] rounded p-2 whitespace-pre-wrap font-mono outline-none resize-y"
+            />
+          ) : (
+            <div className="text-[12px] leading-relaxed bg-[var(--surface-2)] border border-[var(--border)] rounded p-2 max-h-40 overflow-y-auto whitespace-pre-wrap font-mono">
+              {record?.content || node.data.label || '(no content)'}
+            </div>
+          )}
+          {status && (
+            <div role="status" className="text-[10px] mt-1 text-[var(--text-muted)]">{status}</div>
+          )}
         </div>
+
+        {record?.evidence && (
+          <div>
+            <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">Evidence</div>
+            <div className="text-[11px] text-[var(--text-muted)] whitespace-pre-wrap">{record.evidence}</div>
+          </div>
+        )}
 
         {node.data.meta && (
           <div>
-            <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">Evidence</div>
+            <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] mb-1">Provenance</div>
             <div className="text-[11px] text-[var(--text-muted)]">{node.data.meta}</div>
           </div>
         )}
@@ -121,19 +255,20 @@ export function DetailPanel() {
           </div>
         )}
 
+        <div>
+          <label className="flex items-center gap-1.5 text-[11px] text-[var(--text-muted)] mb-1">
+            <Type size={12} /> Graph label
+          </label>
+          <input
+            data-testid="label-input"
+            value={node.data.label || ''}
+            onChange={(e) => update({ label: e.target.value, customLabel: true })}
+            className="w-full bg-[var(--surface-2)] border border-[var(--border)] rounded px-2 py-1.5 text-[13px] outline-none focus:border-[var(--accent)] focus-visible:ring-1 focus-visible:ring-[var(--accent)]"
+          />
+        </div>
+
         {!isRecord && (
           <>
-            <div>
-              <label className="flex items-center gap-1.5 text-[11px] text-[var(--text-muted)] mb-1">
-                <Type size={12} /> Label
-              </label>
-              <input
-                data-testid="label-input"
-                value={node.data.label || ''}
-                onChange={(e) => update({ label: e.target.value })}
-                className="w-full bg-[var(--surface-2)] border border-[var(--border)] rounded px-2 py-1.5 text-[13px] outline-none focus:border-[var(--accent)] focus-visible:ring-1 focus-visible:ring-[var(--accent)]"
-              />
-            </div>
             <div>
               <label className="flex items-center gap-1.5 text-[11px] text-[var(--text-muted)] mb-1">
                 <Tag size={12} /> Meta

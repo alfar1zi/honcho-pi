@@ -212,6 +212,57 @@ export const useGraphStore = create((set, get) => ({
   toggleOrphans: () => set((s) => ({ showOrphans: !s.showOrphans })),
   setForces: (patch) => set((s) => ({ forces: { ...s.forces, ...patch } })),
 
+  view: 'graph',
+  setView: (view) => set({ view }),
+
+  // Write-back: record content lives in SQLite, the graph only mirrors it.
+  // The server rebuilds and broadcasts, so no local node patch is needed.
+  saveRecord: async (id, patch) => {
+    const res = await fetch('/api/record', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, ...patch }),
+    })
+    const body = await res.json()
+    if (!res.ok) throw new Error(body.error || 'save failed')
+    return body
+  },
+
+  attachImage: async (nodeId, file) => {
+    const dataUrl = await new Promise((resolve, reject) => {
+      const fr = new FileReader()
+      fr.onload = () => resolve(fr.result)
+      fr.onerror = () => reject(new Error('could not read file'))
+      fr.readAsDataURL(file)
+    })
+    const res = await fetch('/api/image', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dataUrl }),
+    })
+    const body = await res.json()
+    if (!res.ok) throw new Error(body.error || 'upload failed')
+    set({
+      nodes: get().nodes.map((n) =>
+        n.id === nodeId ? { ...n, data: { ...n.data, image: body.url } } : n
+      ),
+    })
+    get().persist()
+    return body.url
+  },
+
+  removeImage: (nodeId) => {
+    set({
+      nodes: get().nodes.map((n) => {
+        if (n.id !== nodeId) return n
+        const data = { ...n.data }
+        delete data.image
+        return { ...n, data }
+      }),
+    })
+    get().persist()
+  },
+
   fitView: () => get().rf?.fitView({ padding: 0.2, duration: 400 }),
 
   relayout: () => {

@@ -2,9 +2,10 @@
 
 Serves the built single-page app in web/dist/ and a small JSON API over the
 records graph. Pure standard library: http.server plus a hand-rolled
-Server-Sent Events fan-out. The frontend edits node positions and labels in
-web/data/graph.json through PUT /api/graph; record nodes are read-only here
-(the CLI and MCP server own writes to the store).
+Server-Sent Events fan-out. Graph cosmetics (positions, labels, images) live
+in web/data/graph.json via PUT /api/graph. Record content edits write back to
+SQLite through POST /api/record; images are copied into web/data/media/ via
+POST /api/image so both the operator and agents can attach them.
 """
 
 from __future__ import annotations
@@ -25,6 +26,11 @@ from . import db
 WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web"
 DIST_DIR = WEB_DIR / "dist"
 GRAPH_FILE = WEB_DIR / "data" / "graph.json"
+MEDIA_DIR = WEB_DIR / "data" / "media"
+
+# Images: raster formats only, no SVG (script vector), 8 MB cap.
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 
 sse_clients: list = []
 sse_lock = threading.Lock()
@@ -244,6 +250,185 @@ def _load_graph() -> dict:
     return build_graph()
 
 
+def _refresh_graph() -> dict:
+    """Rebuild from the store keeping cosmetics, persist, return. Called after
+    a record write so every tab sees fresh content without losing layout."""
+    graph = _merge_fresh(_load_graph())
+    _save_graph(graph)
+    return graph
+
+
+def _merge_fresh(saved: dict) -> dict:
+    """Rebuild from the store, keep operator cosmetics (position/label/image).
+
+    The store owns record truth; graph.json owns presentation. Without this
+    merge a content edit in the UI would be reverted by the next rebuild.
+    """
+    fresh = build_graph()
+    old = {n["id"]: n for n in saved.get("nodes", [])}
+    for n in fresh["nodes"]:
+        prev = old.get(n["id"])
+        if not prev:
+            continue
+        if prev.get("position"):
+            n["position"] = prev["position"]
+        for key in ("image", "color"):
+            if key in prev.get("data", {}):
+                n["data"][key] = prev["data"][key]
+        if not n["id"].startswith("mem-") and "meta" in prev.get("data", {}):
+            n["data"]["meta"] = prev["data"]["meta"]
+        # Label override only when the operator explicitly renamed the node
+        # (customLabel flag set by the UI); otherwise fresh content wins.
+        if prev.get("data", {}).get("customLabel") and prev["data"].get("label"):
+            n["data"]["label"] = prev["data"]["label"]
+            n["data"]["customLabel"] = True
+    # Operator-added nodes (notes) have no store record; keep them as-is.
+    fresh_ids = {n["id"] for n in fresh["nodes"]}
+    for n in saved.get("nodes", []):
+        if n["id"] not in fresh_ids:
+            fresh["nodes"].append(n)
+    fresh_edge_ids = {e["id"] for e in fresh["edges"]}
+    for e in saved.get("edges", []):
+        if e["id"] not in fresh_edge_ids:
+            fresh["edges"].append(e)
+    return fresh
+
+
+def _record_payload(r: dict) -> dict:
+    return {
+        "id": r["id"],
+        "type": r["type"],
+        "content": r["content"],
+        "evidence": r["evidence"],
+        "confidence": r["confidence"],
+        "verified": bool(r["verified"]),
+        "tags": r["tags"],
+        "source": r["source"],
+        "project_id": r["project_id"],
+        "created_at": r["created_at"],
+        "updated_at": r["updated_at"],
+    }
+
+
+def _update_record(record_id: str, patch: dict) -> dict:
+    """Edit content/evidence/verified of one record; FTS stays in sync via
+    the update trigger. Content identity is preserved: the id does not change,
+    so graph cosmetics and reinforcement history keep pointing at it."""
+    conn = db.connect()
+    try:
+        r = db.get_record(conn, record_id)
+        if not r:
+            raise KeyError(record_id)
+        content = patch.get("content", r["content"])
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("content must not be empty")
+        evidence = patch.get("evidence", r["evidence"])
+        verified = 1 if patch.get("verified", r["verified"]) else 0
+        conn.execute(
+            "UPDATE records SET content=?, evidence=?, verified=?, updated_at=?"
+            " WHERE id=?",
+            (content.strip(), str(evidence), verified, db.now_iso(), record_id),
+        )
+        conn.commit()
+        return _record_payload(db.get_record(conn, record_id))
+    finally:
+        conn.close()
+
+
+def _store_image(payload: dict) -> dict:
+    """Copy a local file or decode a data URL into MEDIA_DIR. Agents call this
+    with {"path": "/abs/file.png"}; the browser sends {"dataUrl": "data:..."}.
+    Returns the served URL. Raster only, size-capped, content sniffed."""
+    import base64
+    import hashlib
+
+    if payload.get("path"):
+        src = Path(payload["path"]).expanduser()
+        if not src.is_file():
+            raise FileNotFoundError(str(src))
+        ext = src.suffix.lower()
+        if ext not in _IMAGE_EXTS:
+            raise ValueError(f"unsupported image type: {ext}")
+        data = src.read_bytes()
+    elif payload.get("dataUrl"):
+        m = re.match(r"data:image/(png|jpeg|webp|gif);base64,(.+)$",
+                     payload["dataUrl"], re.S)
+        if not m:
+            raise ValueError("dataUrl must be a base64 raster image")
+        ext = ".jpg" if m.group(1) == "jpeg" else f".{m.group(1)}"
+        data = base64.b64decode(m.group(2))
+    else:
+        raise ValueError("provide path or dataUrl")
+    if len(data) > _IMAGE_MAX_BYTES:
+        raise ValueError("image exceeds 8 MB")
+    if not _sniff_image(data, ext):
+        raise ValueError("file content does not match an image signature")
+    MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    name = hashlib.sha256(data).hexdigest()[:16] + ext
+    (MEDIA_DIR / name).write_bytes(data)
+    return {"url": f"/media/{name}"}
+
+
+def _sniff_image(data: bytes, ext: str) -> bool:
+    if ext == ".png":
+        return data.startswith(b"\x89PNG\r\n\x1a\n")
+    if ext in (".jpg", ".jpeg"):
+        return data.startswith(b"\xff\xd8\xff")
+    if ext == ".gif":
+        return data.startswith((b"GIF87a", b"GIF89a"))
+    if ext == ".webp":
+        return data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+    return False
+
+
+def _dashboard_stats() -> dict:
+    """Real numbers for the dashboard: store stats + graph health + activity."""
+    conn = db.connect()
+    try:
+        s = db.stats(conn)
+        rows = conn.execute(
+            "SELECT confidence, created_at, source FROM records"
+        ).fetchall()
+    finally:
+        conn.close()
+    buckets = {"low": 0, "mid": 0, "high": 0}
+    per_day: dict = {}
+    auto = 0
+    for r in rows:
+        c = float(r["confidence"])
+        buckets["low" if c < 0.4 else "mid" if c < 0.7 else "high"] += 1
+        day = (r["created_at"] or "")[:10]
+        if day:
+            per_day[day] = per_day.get(day, 0) + 1
+        if "auto-capture" in (r["source"] or ""):
+            auto += 1
+    graph = _load_graph()
+    degree: dict = {}
+    for e in graph["edges"]:
+        degree[e["source"]] = degree.get(e["source"], 0) + 1
+        degree[e["target"]] = degree.get(e["target"], 0) + 1
+    nodes = graph["nodes"]
+    orphans = sum(1 for n in nodes if n["id"] not in degree)
+    top = sorted(nodes, key=lambda n: -degree.get(n["id"], 0))[:8]
+    days = sorted(per_day)[-14:]
+    return {
+        "store": s,
+        "confidence": buckets,
+        "auto_captured": auto,
+        "graph": {
+            "nodes": len(nodes),
+            "edges": len(graph["edges"]),
+            "orphans": orphans,
+            "top_connected": [
+                {"id": n["id"], "label": n["data"].get("label", n["id"]),
+                 "type": n["data"].get("type", ""), "degree": degree.get(n["id"], 0)}
+                for n in top
+            ],
+        },
+        "activity": [{"day": d, "count": per_day[d]} for d in days],
+    }
+
+
 def _save_graph(graph: dict) -> None:
     GRAPH_FILE.parent.mkdir(parents=True, exist_ok=True)
     GRAPH_FILE.write_text(json.dumps(graph, indent=2), encoding="utf-8")
@@ -282,10 +467,45 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/graph":
             self._json(_load_graph())
             return
+        if path == "/api/stats":
+            self._json(_dashboard_stats())
+            return
+        if path.startswith("/api/record/"):
+            conn = db.connect()
+            try:
+                r = db.get_record(conn, path[len("/api/record/"):])
+            finally:
+                conn.close()
+            if not r:
+                self._json({"error": "not found"}, 404)
+                return
+            self._json(_record_payload(r))
+            return
+        if path.startswith("/media/"):
+            self._media(path[len("/media/"):])
+            return
         if path == "/events":
             self._sse()
             return
         self._static(path)
+
+    def _media(self, name):
+        # Content-addressed filenames only; no traversal, no dotfiles.
+        if not re.fullmatch(r"[0-9a-f]{16}\.(png|jpg|jpeg|webp|gif)", name):
+            self.send_error(404)
+            return
+        target = MEDIA_DIR / name
+        if not target.is_file():
+            self.send_error(404)
+            return
+        ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        body = target.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _sse(self):
         self.send_response(200)
@@ -340,6 +560,45 @@ class Handler(BaseHTTPRequestHandler):
         _save_graph(graph)
         _broadcast("graph:updated", graph)
         self._json({"ok": True})
+
+    def _read_json(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > _IMAGE_MAX_BYTES + 4 * 1024 * 1024:
+            raise ValueError("payload too large")
+        return json.loads(self.rfile.read(length))
+
+    def do_POST(self):
+        path = self.path.split("?", 1)[0]
+        if path not in ("/api/record", "/api/image"):
+            self.send_error(404)
+            return
+        try:
+            payload = self._read_json()
+        except (json.JSONDecodeError, ValueError) as e:
+            self._json({"error": str(e)}, 400)
+            return
+        if path == "/api/image":
+            try:
+                self._json(_store_image(payload))
+            except (OSError, ValueError) as e:
+                self._json({"error": str(e)}, 400)
+            return
+        record_id = payload.get("id", "")
+        if not record_id:
+            self._json({"error": "id required"}, 400)
+            return
+        try:
+            updated = _update_record(record_id, payload)
+        except KeyError:
+            self._json({"error": "not found"}, 404)
+            return
+        except ValueError as e:
+            self._json({"error": str(e)}, 400)
+            return
+        # Refresh so every open tab sees the new content; cosmetics survive.
+        graph = _refresh_graph()
+        _broadcast("graph:updated", graph)
+        self._json(updated)
 
 
 def main(argv=None):

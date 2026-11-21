@@ -6,6 +6,7 @@ import { Toolbar } from './components/Toolbar.jsx'
 import { DetailPanel } from './components/DetailPanel.jsx'
 import { KeyboardHandler } from './components/KeyboardHandler.jsx'
 import { GraphNode } from './components/GraphNode.jsx'
+import { Dashboard } from './components/Dashboard.jsx'
 
 const nodeTypes = { graphNode: GraphNode }
 
@@ -17,6 +18,7 @@ export default function App() {
   const searchQuery = useGraphStore((s) => s.searchQuery)
   const setRf = useGraphStore((s) => s.setRf)
   const setLocalRoot = useGraphStore((s) => s.setLocalRoot)
+  const view = useGraphStore((s) => s.view)
   const clearFilters = useGraphStore((s) => s.clearFilters)
 
   useEffect(() => {
@@ -88,6 +90,14 @@ export default function App() {
 
   if (loading) {
     return <div className="flex items-center justify-center h-full text-[var(--text-muted)]">loading graph...</div>
+  }
+  if (view === 'dashboard') {
+    return (
+      <div className="relative h-full w-full">
+        <Dashboard />
+        <Toolbar />
+      </div>
+    )
   }
 
   return (
