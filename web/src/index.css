@@ -29,6 +29,9 @@
      Chrome only; the canvas stays matte. */
   --glass: rgba(255, 255, 255, 0.06);
   --glass-strong: rgba(30, 30, 40, 0.42);
+  /* Text floor: a shallow dark scrim under the clear tint so muted 10-11px
+     text keeps 4.5:1 even when a bright node blurs underneath. */
+  --glass-scrim: linear-gradient(rgba(8, 8, 11, 0.38), rgba(8, 8, 11, 0.22));
   --glass-border: rgba(255, 255, 255, 0.14);
   --glass-shadow: 0 12px 40px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.35);
   --glass-rim:
@@ -60,6 +63,7 @@
   --glass: rgba(255, 255, 255, 0.42);
   --glass-strong: rgba(255, 255, 255, 0.6);
   --glass-border: rgba(255, 255, 255, 0.65);
+  --glass-scrim: linear-gradient(rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0.2));
   --glass-shadow: 0 8px 32px rgba(15, 23, 42, 0.14), 0 2px 8px rgba(15, 23, 42, 0.08);
   --glass-rim:
     inset 1.5px 1.5px 2px -1px rgba(255, 255, 255, 0.9),
@@ -110,13 +114,13 @@ body::before {
    Chrome only (toolbar, panels, controls); dashboard cards use the fill
    over a shared static backdrop, no per-card compositor layers. */
 .glass {
-  background: var(--glass);
+  background: var(--glass-scrim), var(--glass);
   border: 1px solid var(--glass-border);
   box-shadow: var(--glass-shadow), var(--glass-rim);
 }
 
 .glass-strong {
-  background: var(--glass-strong);
+  background: var(--glass-scrim), var(--glass-strong);
   border: 1px solid var(--glass-border);
   box-shadow: var(--glass-shadow), var(--glass-rim);
 }
