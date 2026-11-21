@@ -307,3 +307,24 @@ def test_put_graph_rejects_bad_shape(http_server):
     assert status == 400
     status, _ = _req(http_server + "/api/graph", "PUT", {"nodes": "x", "edges": []})
     assert status == 400
+
+
+def test_load_graph_rebuilds_after_other_process_write(graph_env, tmp_path):
+    db.upsert_record(graph_env, "FACT", "first lesson", session_id="s")
+    graph_env.commit()
+    g1 = web._load_graph()
+    n1 = len([n for n in g1["nodes"] if n["id"].startswith("mem-")])
+    # Another process (the capture timer) writes; the viewer must notice
+    # on the next load without any UI edit.
+    other = db.connect(str(tmp_path / "memory.db"))
+    try:
+        db.upsert_record(other, "FACT", "second lesson from timer", session_id="s")
+        other.commit()
+    finally:
+        other.close()
+    g2 = web._load_graph()
+    n2 = len([n for n in g2["nodes"] if n["id"].startswith("mem-")])
+    assert n2 == n1 + 1
+    # Stable afterwards: no rebuild loop when nothing changed.
+    g3 = web._load_graph()
+    assert len(g3["nodes"]) == len(g2["nodes"])

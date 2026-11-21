@@ -266,13 +266,50 @@ def _ring_layout(nodes: list) -> None:
         n["position"] = {"x": RING_SKILL * math.cos(a), "y": RING_SKILL * math.sin(a)}
 
 
+_graph_version = None
+
+
 def _load_graph() -> dict:
+    """Serve the cached graph, rebuilding when another process wrote.
+
+    PRAGMA data_version (remembrane pattern) bumps on commits from other
+    connections, so timer captures and MCP writes surface on the next GET
+    without waiting for a UI edit. Own writes already call _refresh_graph.
+    """
+    global _graph_version
+    try:
+        conn = db.connect()
+        try:
+            version = db.store_version(conn)
+        finally:
+            conn.close()
+    except Exception:
+        version = None
+    if version is not None and _graph_version is not None and version != _graph_version:
+        graph = _refresh_graph()
+        # Re-read after the rebuild: our own merge writes bump the counter,
+        # and caching the pre-write value would loop-refresh on every GET.
+        try:
+            conn = db.connect()
+            try:
+                _graph_version = db.store_version(conn)
+            finally:
+                conn.close()
+        except Exception:
+            _graph_version = version
+        return graph
     if GRAPH_FILE.is_file():
         try:
-            return json.loads(GRAPH_FILE.read_text(encoding="utf-8"))
+            graph = json.loads(GRAPH_FILE.read_text(encoding="utf-8"))
+            if version is not None:
+                _graph_version = version
+            return graph
         except (OSError, json.JSONDecodeError):
             pass
-    return build_graph()
+    graph = build_graph()
+    if version is not None:
+        _graph_version = version
+    return graph
 
 
 def _refresh_graph() -> dict:

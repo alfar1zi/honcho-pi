@@ -465,6 +465,18 @@ def connect(db_path: str | None = None) -> sqlite3.Connection:
     return conn
 
 
+def store_version(conn: sqlite3.Connection) -> int:
+    """Change counter for cache invalidation across processes.
+
+    PRAGMA data_version increments when ANOTHER connection commits, so a
+    long-lived reader (web viewer, MCP server) can detect writes made by
+    the capture timer or a CLI call without polling row counts. Own writes
+    on this connection do not bump it; callers that also write through the
+    same connection should invalidate their caches at the write site.
+    """
+    return conn.execute("PRAGMA data_version").fetchone()[0]
+
+
 def integrity_check(conn: sqlite3.Connection) -> bool:
     return _run_check(conn, "integrity_check")
 
@@ -2251,11 +2263,15 @@ def conflicts(conn: sqlite3.Connection, ids: list) -> list:
             linked = a["superseded_by"] == b["id"] or b["superseded_by"] == a["id"]
             correction = (a["type"] == "CORRECTION" and overlap >= 0.5) or \
                          (b["type"] == "CORRECTION" and overlap >= 0.5)
-            if overlap >= 0.6 and (linked or correction):
+            numeric = (overlap >= 0.6 and _numeric_tokens(a["content"])
+                       and _numeric_tokens(b["content"])
+                       and _numeric_tokens(a["content"]) != _numeric_tokens(b["content"]))
+            if overlap >= 0.6 and (linked or correction or numeric):
                 seen.add(key)
+                kind = "supersede" if linked else \
+                    "correction" if correction else "numeric"
                 out.append({"a": a["id"], "b": b["id"],
-                            "overlap": round(overlap, 3),
-                            "kind": "supersede" if linked else "correction"})
+                            "overlap": round(overlap, 3), "kind": kind})
     return out
 
 
@@ -2426,7 +2442,10 @@ def digest(conn: sqlite3.Connection, budget: int = 2000,
                 f"(conf {float(r['confidence']):.2f}"
                 + (", verified" if r["verified"] else "") + f") id={r['id']}")
         if used + len(line) + 1 > budget:
-            break
+            # Greedy refill (remembrane knapsack pattern, simplified): a
+            # long line no longer fitting must not cut shorter records
+            # behind it. Priority order is kept; only oversized lines skip.
+            continue
         lines.append(line)
         used += len(line) + 1
     header = f"[memory digest {used}/{budget} chars, {len(lines)} records]"
