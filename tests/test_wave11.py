@@ -196,7 +196,7 @@ def test_procedural_reflective_roundtrip(tmp_path):
     from omp_memory import db as d
     conn = d.connect(str(tmp_path / "m.db"))
     d.init_db(conn)
-    assert d.SCHEMA_VERSION == 14
+    assert d.SCHEMA_VERSION == 15
     r1 = d.remember(conn, "PROCEDURAL",
                     "migrate with rebuild_records_check swap then reconcile fts",
                     verified=1)
@@ -241,7 +241,7 @@ def test_migration_v13_to_v14_rebuilds_check(tmp_path):
     conn.commit()
     d.init_db(conn)  # replays v14: rebuild + reconcile
     v = conn.execute("SELECT version FROM schema_version").fetchone()[0]
-    assert v == 14
+    assert v == 15
     rid = d.remember(conn, "PROCEDURAL", "procedure after rebuild", verified=1)
     assert rid
     conn.close()

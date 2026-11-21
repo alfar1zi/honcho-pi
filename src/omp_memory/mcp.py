@@ -230,6 +230,17 @@ def tool_recall(args: Dict[str, Any], user: str = "") -> str:
         # event. Logged as a zero-delta signal so it starts the spacing
         # clock and feeds consolidation without moving confidence.
         db.log_retrieval(conn, _last_recall[user])
+        if args.get("brief"):
+            # L0 progressive disclosure: index only, token cost visible.
+            out = [f"Recalled {len(rows)} record(s) for {query!r} (brief index):"]
+            for r in rows:
+                first = next((l for l in r["content"].splitlines() if l.strip()), "")
+                out.append(f"- {r['id']} [{r['type']}] {first[:100]} "
+                           f"(conf {float(r['confidence']):.2f})")
+            body = "\n".join(out)
+            out.append(f"~{len(body) // 4} tokens. Detail: recall with a narrower "
+                       "query, or remember the id and ask for it specifically.")
+            return "\n".join(out)
         out = [f"Recalled {len(rows)} memory record(s) for {query!r}:"]
         for r in rows:
             flag = "verified" if r["verified"] else "unverified"
@@ -244,6 +255,13 @@ def tool_recall(args: Dict[str, Any], user: str = "") -> str:
         return "\n".join(out)
     return with_conn(user, body)
 
+
+def tool_digest(args: Dict[str, Any], user: str = "") -> str:
+    def body(conn):
+        budget = max(200, min(int(args.get("budget") or 2000), 20000))
+        d = db.digest(conn, budget=budget, project_id=args.get("project"))
+        return d["text"]
+    return with_conn(user, body)
 
 def tool_remember(args: Dict[str, Any], user: str = "") -> str:
     def body(conn):
@@ -406,6 +424,10 @@ TOOLS: List[Dict[str, Any]] = [
                 "session": {"type": "string", "description": "Scope to one session's records."},
                 "verified_only": {"type": "boolean"},
                 "min_confidence": {"type": "number"},
+                "brief": {"type": "boolean",
+                          "description": "L0 index only: id + one line + confidence, "
+                                         "with token cost. Fetch detail via recall full "
+                                         "or a narrower query."},
             },
             "required": ["query"],
         },
@@ -492,6 +514,21 @@ TOOLS: List[Dict[str, Any]] = [
             },
         },
     },
+    {
+        "name": "digest",
+        "description": (
+            "The always-in-context memory block: top verified rules, decisions and "
+            "facts rendered into a char budget, stable across calls so prefix caches "
+            "survive. Inject once at session start; use recall for task-specific hits."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "budget": {"type": "integer", "description": "Char budget.", "default": 2000},
+                "project": {"type": "string", "description": "Scope to a project id."},
+            },
+        },
+    },
 ]
 
 _HANDLERS: Dict[str, Any] = {
@@ -501,6 +538,7 @@ _HANDLERS: Dict[str, Any] = {
     "forget": tool_forget,
     "maintenance": tool_maintenance,
     "stats": tool_stats,
+    "digest": tool_digest,
 }
 
 

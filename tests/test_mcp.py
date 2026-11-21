@@ -88,7 +88,7 @@ def test_handshake_and_tool_list(server):
 
     tools = server.request("tools/list")["result"]["tools"]
     assert [t["name"] for t in tools] == ["recall", "remember", "reinforce",
-                                          "forget", "stats", "maintenance"]
+                                          "forget", "stats", "maintenance", "digest"]
 
 
 def test_remember_recall_round_trip(server):

@@ -66,7 +66,7 @@ def test_migration_v6_rebuilds_fts_and_preserves_records(tmp_path):
     c = db.connect(path)
     db.init_db(c, path)
     version = c.execute("SELECT version FROM schema_version").fetchone()[0]
-    assert version == db.SCHEMA_VERSION == 14
+    assert version == db.SCHEMA_VERSION == 15
     rows = c.execute(
         "SELECT sql FROM sqlite_master WHERE name = 'records_fts'"
     ).fetchone()
@@ -220,7 +220,7 @@ def test_v9_check_without_intent_rebuilds_on_migrate(tmp_path):
     c = db.connect(path)
     db.init_db(c, path)
     version = c.execute("SELECT version FROM schema_version").fetchone()[0]
-    assert version == 14
+    assert version == 15
     # A rename-based rebuild orphans reinforcement FKs onto records_old and
     # drops the FTS triggers, so every later write silently desyncs FTS.
     # The swap must leave FKs on records, the triggers alive, and new

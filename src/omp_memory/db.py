@@ -85,6 +85,15 @@ HEAT_DECAY_POWER_BETA = DECAY_POWER_BETA
 # retention curve is what keeps a record on it.
 SPACING_MIN_GAP_HOURS = 1.0
 SPACING_FULL_GAP_HOURS = 24.0
+# Per-record memory strength (Duolingo HLR, Settles & Meeder 2016; MemoryBank
+# 2305.10250): a successful recall at a spaced gap lengthens the record's own
+# forgetting horizon; failure shortens it. decay_tau stores the personal tau
+# in days (0 = global curve). Growth is multiplicative with a cap so one hot
+# streak cannot make a record immortal; the floor keeps failure meaningful.
+STRENGTH_GROWTH = 1.5
+STRENGTH_SHRINK = 0.7
+STRENGTH_TAU_MAX_DAYS = 365.0
+STRENGTH_TAU_MIN_DAYS = 2.0
 # Retrieval-induced forgetting (Anderson, Bjork & Bjork 1994; Murayama et
 # al. 2014): retrieving some memories actively inhibits competing ones. A
 # CORRECTION that supersedes an older record, or a retrieval that picks a
@@ -158,7 +167,7 @@ INTENT_CUE_BONUS = 0.10
 INTENT_DECAY_TAU_DAYS = 7.0
 
 PRE_COMPRESS_CHECKPOINT_API_VERSION = 2
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 # Recall reranking weights. Lexical is dominant (0.70) because recall is
 # primarily an inquiry of relevance. Heat is moderate (0.25) so stale yet
 # relevant records do not sink while breaking ties among equally relevant
@@ -537,7 +546,13 @@ _RECORDS_DDL = """CREATE TABLE IF NOT EXISTS records (
         decay_exempt_until TEXT NOT NULL DEFAULT '',
         superseded_by TEXT NOT NULL DEFAULT '',
         importance REAL NOT NULL DEFAULT 0.5,
-        cue TEXT NOT NULL DEFAULT ''
+        cue TEXT NOT NULL DEFAULT '',
+        decay_tau REAL NOT NULL DEFAULT 0,
+        valid_from TEXT NOT NULL DEFAULT '',
+        valid_until TEXT NOT NULL DEFAULT '',
+        anchor_path TEXT NOT NULL DEFAULT '',
+        anchor_sha TEXT NOT NULL DEFAULT '',
+        stale INTEGER NOT NULL DEFAULT 0
     );"""
 
 
@@ -966,6 +981,28 @@ def _migrate(conn: sqlite3.Connection):
             _reconcile_fts(conn)
         conn.execute("DELETE FROM schema_version")
         conn.execute("INSERT INTO schema_version(version) VALUES (14)")
+        conn.commit()
+
+    if version < 15:
+        # v15: per-record memory strength + temporal validity + code anchors.
+        # decay_tau=0 means "use the global curve"; reinforce(success) grows
+        # it (spacing effect, Cepeda 2006 / Duolingo HLR), failure shrinks it.
+        # valid_from/until give bi-temporal as_of recall (Graphiti/Mnemosyne);
+        # anchor_path/sha let a capture pass mark records stale when the file
+        # they describe changes. All additive: existing rows keep behavior.
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(records)").fetchall()]
+        for col, ddl in (
+            ("decay_tau", "ALTER TABLE records ADD COLUMN decay_tau REAL NOT NULL DEFAULT 0"),
+            ("valid_from", "ALTER TABLE records ADD COLUMN valid_from TEXT NOT NULL DEFAULT ''"),
+            ("valid_until", "ALTER TABLE records ADD COLUMN valid_until TEXT NOT NULL DEFAULT ''"),
+            ("anchor_path", "ALTER TABLE records ADD COLUMN anchor_path TEXT NOT NULL DEFAULT ''"),
+            ("anchor_sha", "ALTER TABLE records ADD COLUMN anchor_sha TEXT NOT NULL DEFAULT ''"),
+            ("stale", "ALTER TABLE records ADD COLUMN stale INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if col not in cols:
+                conn.execute(ddl)
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version(version) VALUES (15)")
         conn.commit()
 
 
@@ -1998,6 +2035,52 @@ def find_record(conn: sqlite3.Connection, rtype: str, content: str,
     return get_record(conn, record_id_for(rtype, content, source, project_id))
 
 
+def digest(conn: sqlite3.Connection, budget: int = 2000,
+           project_id: str = None, now=None) -> dict:
+    """The always-in-context block: top verified/RULE/DECISION records rendered
+    into a char-budgeted, deterministic text (hermes-agent frozen snapshot,
+    but ranked instead of hand-curated). Stable ordering means host prefix
+    caches survive; the budget header tells the agent how full it is.
+
+    L0 of progressive disclosure: one line per record (type, first sentence,
+    confidence, id). Full content stays one recall/get away, so session start
+    costs ~budget chars instead of the whole store.
+    """
+    now = now or datetime.now(timezone.utc)
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM records WHERE type IN ('RULE','DECISION','FACT','CORRECTION')"
+        " AND (verified=1 OR confidence>=0.7) AND superseded_by=''"
+        " AND (valid_until='' OR valid_until>?)",
+        (now.isoformat(),))]
+    if project_id:
+        rows = [r for r in rows
+                if project_id in (r.get("project_ids") or r.get("project_id") or "")]
+    # Verified rules first, then by heat: the block should carry what the
+    # agent must not violate before what merely worked once.
+    def sort_key(r):
+        signals = _record_signals(conn, r["id"])
+        h = heat_parts(r, signals, now=now)["heat"]
+        tier = 0 if r["type"] == "RULE" and r["verified"] else \
+            1 if r["verified"] else 2
+        return (tier, -h, r["id"])
+    rows.sort(key=sort_key)
+    lines = []
+    used = 0
+    for r in rows:
+        first = next((l for l in r["content"].splitlines() if l.strip()), "")
+        line = (f"[{r['type']}] {first[:110]} "
+                f"(conf {float(r['confidence']):.2f}"
+                + (", verified" if r["verified"] else "") + f") id={r['id']}")
+        if used + len(line) + 1 > budget:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    header = f"[memory digest {used}/{budget} chars, {len(lines)} records]"
+    return {"text": header + "\n" + "\n".join(lines),
+            "chars": used, "budget": budget, "records": len(lines),
+            "total_eligible": len(rows)}
+
+
 def list_records(conn: sqlite3.Connection, rtype: str = None, project_id: str = None,
                  limit: int = 100, offset: int = 0):
     sql = "SELECT * FROM records"
@@ -2056,7 +2139,8 @@ def heat_parts(row: dict, signals: list, now=None) -> dict:
     # here recency follows the same power law as decay so the two curves
     # agree: heat should not say a record is warm on a different timescale
     # than the one apply_decay cools it on.
-    recency = (1.0 + age_days / HEAT_DECAY_POWER_TAU_DAYS) ** -HEAT_DECAY_POWER_BETA
+    tau = float(row.get("decay_tau") or 0) or HEAT_DECAY_POWER_TAU_DAYS
+    recency = (1.0 + age_days / tau) ** -HEAT_DECAY_POWER_BETA
 
     successes = [s for s in signals if s.get("signal") == "success"]
     sources = []
@@ -2224,7 +2308,7 @@ def apply_decay(conn: sqlite3.Connection, now=None, floor: float = DECAY_FLOOR) 
     moved = {}
     rows = [dict(r) for r in conn.execute(
         "SELECT id, confidence, updated_at, last_decay_at, verified, type,"
-        " decay_exempt_until FROM records")]
+        " decay_exempt_until, decay_tau FROM records")]
     for row in rows:
         if row["verified"] or row["type"] in ("RULE", "CORRECTION"):
             continue
@@ -2237,7 +2321,8 @@ def apply_decay(conn: sqlite3.Connection, now=None, floor: float = DECAY_FLOOR) 
             continue
         anchor = max(anchors)
         age_days = max(0.0, (now - anchor).total_seconds() / 86400.0)
-        factor = (1.0 + age_days / DECAY_POWER_TAU_DAYS) ** -DECAY_POWER_BETA
+        tau = float(row.get("decay_tau") or 0) or DECAY_POWER_TAU_DAYS
+        factor = (1.0 + age_days / tau) ** -DECAY_POWER_BETA
         base = max(floor, float(row["confidence"]))
         target = floor + (base - floor) * factor
         if factor < 0.05:
@@ -2368,6 +2453,22 @@ def reinforce(conn: sqlite3.Connection, record_id: str, signal: str,
             (actual_delta, record_id))
     new_conf = conn.execute("SELECT confidence FROM records WHERE id=?",
                             (record_id,)).fetchone()[0]
+    # Memory strength (HLR): a spaced success lengthens this record's own
+    # forgetting horizon, a failure shortens it. Massed repeats (spacing
+    # factor ~0.1) do not grow strength: cramming is not consolidation.
+    if signal in ("success", "reinforce") and actual_delta > 0:
+        spaced = delta is not None or _spacing_factor(conn, record_id) >= 0.5
+        if spaced:
+            conn.execute(
+                "UPDATE records SET decay_tau=min(?, max(?, "
+                " (CASE WHEN decay_tau>0 THEN decay_tau ELSE ? END) * ?)) WHERE id=?",
+                (STRENGTH_TAU_MAX_DAYS, STRENGTH_TAU_MIN_DAYS,
+                 DECAY_POWER_TAU_DAYS, STRENGTH_GROWTH, record_id))
+    elif signal == "failure":
+        conn.execute(
+            "UPDATE records SET decay_tau=max(?, "
+            " (CASE WHEN decay_tau>0 THEN decay_tau ELSE ? END) * ?) WHERE id=?",
+            (STRENGTH_TAU_MIN_DAYS, DECAY_POWER_TAU_DAYS, STRENGTH_SHRINK, record_id))
     conn.execute("""
         INSERT INTO reinforcement (record_id, signal, delta, source, ts)
         VALUES (?, ?, ?, ?, ?)

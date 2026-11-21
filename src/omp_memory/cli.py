@@ -453,6 +453,15 @@ def cmd_stats(args) -> int:
     print(json.dumps(data, indent=2))
     return 0
 
+def cmd_digest(args) -> int:
+    conn = _open()
+    try:
+        d = db.digest(conn, budget=args.budget, project_id=args.project)
+    finally:
+        conn.close()
+    print(d["text"])
+    return 0
+
 
 def cmd_disk(args) -> int:
     ok = _check_disk(args.min_free_mb)
@@ -579,6 +588,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("stats", help="record counts by type")
     p.set_defaults(func=cmd_stats)
+
+    p = sub.add_parser("digest", help="always-in-context memory block (char budget)")
+    p.add_argument("--budget", type=int, default=2000)
+    p.add_argument("--project", default=None)
+    p.set_defaults(func=cmd_digest)
 
     p = sub.add_parser("maintenance", help="decay, forget cold records, promote hot ones")
     p.add_argument("op", choices=["decay", "forget_cold", "promote"])
