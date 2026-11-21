@@ -1655,7 +1655,10 @@ def _repair_typos(conn: sqlite3.Connection, words: list, vocab: list) -> list:
         if w in vocab_set or any(t.startswith(w) for t in vocab_set):
             fixed.append(w)
             continue
-        if len(w) < MIN_REPAIR_LEN:
+        if len(w) < MIN_REPAIR_LEN or _WORD_TO_GROUP.get(w):
+            # Short words clear the fuzzy cutoff too easily; known
+            # synonyms are real words, not typos - the synonym tier
+            # translates them, difflib must not mangle them first.
             fixed.append(w)
             continue
         close = difflib.get_close_matches(w, vocab, n=1, cutoff=FUZZY_CUTOFF)
@@ -1702,6 +1705,90 @@ def _or_query(words: list) -> str:
     return " OR ".join('"' + w + '"*' for w in words)
 
 
+# Concept groups for the synonym fallback tier (pattern adopted from
+# Mnemosyne core/synonyms.py, code-audited 2026-11-21). Curated, small,
+# lowercase; a word resolves to at most one group. Expansion runs only
+# when every earlier tier came back empty, so a working query's ranking
+# is never widened.
+SYNONYM_GROUPS = {
+    "database": ["db", "datastore", "sqlite", "postgres"],
+    "password": ["pass", "pwd", "passwd", "credential", "secret"],
+    "config": ["configuration", "settings", "cfg"],
+    "error": ["bug", "fault", "failure", "crash", "exception", "traceback"],
+    "fix": ["repair", "resolve", "patch", "correct"],
+    "deploy": ["deployment", "release", "rollout"],
+    "server": ["host", "machine", "vps", "instance"],
+    "api": ["endpoint", "interface"],
+    "token": ["apikey", "bearer"],
+    "user": ["account", "profile", "identity"],
+    "model": ["llm", "provider"],
+    "latency": ["slow", "lag", "timeout", "deadline"],
+    "memory": ["recall", "remember", "retention"],
+    "search": ["find", "lookup", "query", "retrieve"],
+    "file": ["document", "doc", "path"],
+    "delete": ["remove", "drop", "erase", "purge"],
+    "create": ["add", "insert", "new"],
+    "update": ["edit", "modify", "change", "upgrade"],
+    "test": ["pytest", "spec", "assert"],
+    "install": ["setup", "pip", "npm", "dependency"],
+    "backup": ["snapshot", "dump", "restore"],
+    "rotate": ["rotation", "refresh", "renew"],
+}
+_WORD_TO_GROUP = {}
+for _canonical, _group in SYNONYM_GROUPS.items():
+    for _w in [_canonical] + _group:
+        _WORD_TO_GROUP.setdefault(_w, _canonical)
+
+
+def _synonym_group(word: str):
+    canonical = _WORD_TO_GROUP.get(word)
+    if canonical is None:
+        return None
+    return [canonical] + SYNONYM_GROUPS[canonical]
+
+
+def _synonym_query(query: str) -> str:
+    """OR-of-groups MATCH for the fallback tier; '' when nothing expands.
+
+    Each group becomes ("a" OR "b" ...) and groups AND together, so a
+    two-word query still needs both concepts present, just spelled either
+    way. Words without a group stay literal. Only fires on an otherwise
+    empty result, so precision loss cannot touch a working query.
+    """
+    words = _tokens(query)
+    if not words:
+        return ""
+    parts, expanded = [], False
+    for w in words:
+        group = _synonym_group(w)
+        if group and len(group) > 1:
+            alts = sorted(set(group) | {w})
+            parts.append("(" + " OR ".join('"%s"' % a for a in alts) + ")")
+            expanded = True
+        else:
+            parts.append('"%s"*' % w)
+    if not expanded:
+        return ""
+    return ">>" + " AND ".join(parts)
+
+
+def _concept_overlap(query: str, row: dict) -> int:
+    """Query words whose concept group the record satisfies (any spelling).
+
+    The AND-of-OR-groups MATCH already guarantees every concept is present;
+    this counts them per record so the lexical fraction reflects concepts
+    covered, not raw string overlap with words the operator never stored.
+    """
+    row_tokens = {_stem(w) for w in _tokens(" ".join(
+        (row.get("content") or "", row.get("evidence") or "", row.get("tags") or "")))}
+    n = 0
+    for w in _tokens(query):
+        group = _synonym_group(w) or [w]
+        if any(_stem(g) in row_tokens for g in group):
+            n += 1
+    return max(1, n)
+
+
 def _search_relaxed(conn: sqlite3.Connection, query: str, **kwargs) -> list:
     """When no record contains every word, rank by best single-word match.
 
@@ -1719,6 +1806,20 @@ def _search_relaxed(conn: sqlite3.Connection, query: str, **kwargs) -> list:
     of the pool; the cue bonus in recall() does the ranking.
     """
     rows = _search_after_repairs(conn, query, **kwargs)
+    if not rows:
+        # Concept translation beats word soup: a record covering BOTH
+        # concepts under different spellings is a better answer than one
+        # sharing a single literal word, so the synonym tier runs before
+        # the OR relaxation.
+        syn_expr = _synonym_query(query)
+        if syn_expr:
+            rows = _search_exact(conn, syn_expr, **kwargs)
+            for r in rows:
+                # Provenance: matched via concept translation, not the
+                # operator's literal words. recall() surfaces the flag.
+                r["synonym_match"] = True
+                r["matched_terms"] = _concept_overlap(query, r)
+                r["query_terms"] = max(1, len(_tokens(query)))
     if not rows:
         words = _tokens(query)
         if len(words) >= 2:
@@ -1794,7 +1895,8 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
                   verified_only: bool = False,
                   min_confidence: float = 0.0, pool: int = None,
                   about_peer: str = None, as_of: str = None):
-    match = query if query.startswith('>') else _fts_query(query)
+    raw = query.startswith('>')
+    match = query.lstrip('>') if raw else _fts_query(query)
     if not match:
         return []
     sql = """
@@ -1813,7 +1915,7 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
         JOIN records r ON r.id = records_fts.id
         WHERE records_fts MATCH ?
     """
-    params = [match[1:] if match.startswith(">") else match]
+    params = [match]
     if rtype:
         sql += " AND r.type = ?"
         params.append(rtype)
@@ -1850,7 +1952,7 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
     # the porter algorithm; wrong stems are possible on irregular words,
     # ceiling: swap for the FTS index itself (one MATCH per term) when
     # lexical precision matters more than latency.
-    query_tokens = set(_tokens(query if not match.startswith(">") else
+    query_tokens = set(_tokens(query if not raw else
                                " ".join(re.findall(r'"([^"]+)"', match))))
     for r in rows:
         row_text = " ".join((r.get("content") or "", r.get("evidence") or "",
@@ -2079,7 +2181,7 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
     out = []
     if full:
         for c, parts, heat, lexical, prior, score in top:
-            out.append({
+            item = {
                 "id": c["id"],
                 "type": c["type"],
                 "confidence": c["confidence"],
@@ -2103,7 +2205,10 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
                 "stale": bool(c.get("stale")),
                 "valid_from": c.get("valid_from", ""),
                 "valid_until": c.get("valid_until", ""),
-            })
+            }
+            if c.get("synonym_match"):
+                item["synonym_match"] = True
+            out.append(item)
     else:
         for c, parts, heat, lexical, prior, score in top:
             out.append({
