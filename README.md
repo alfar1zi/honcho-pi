@@ -155,12 +155,28 @@ The agent uses MCP; you can use the CLI:
 
 ```bash
 omp-memory search "wal corruption"          # ranked search
+omp-memory digest                           # always-in-context block for session start
 omp-memory capture --task "fix WAL" --outcome "set busy_timeout" --verified
+omp-memory pack team.pack                   # sync the store via a git-committable file
+omp-memory unpack team.pack                 # merge on another machine (no server)
+omp-memory skill-export <id> ./skills       # procedural memory -> installable SKILL.md
 omp-memory stats                            # counts by type
 omp-memory health                           # integrity + backup status
-omp-memory backup                           # consistent snapshot (VACUUM INTO)
 omp-memory overview                         # the universe, in your browser
 ```
+
+## What the bench shows
+
+Measured, not claimed (harness in `bench/`, pinned corpus, rerunnable):
+
+- **Update-correctness 4/4, freshness ~8ms.** After a correction, recall serves the new
+  fact, the old content is gone, a second update wins again, and never-stored facts are
+  abstained. Published comparisons: Zep's freshness median is 162.7s and it passes 8/24
+  update questions; mem0 v3 is ADD-only and never invalidates.
+- **Retrieval hit@1 1.0** on 2000 synthetic records with hard distractors, p95 < 3ms.
+- **Weight tuning is evidence-backed**: five ranking arms raced on partial-evidence
+  probes; the incumbent wins, PPR expansion earns its keep (+0.01 hit@1 over no-PPR).
+  No weight changes without a run that beats the incumbent.
 
 ## Connect your agent
 
