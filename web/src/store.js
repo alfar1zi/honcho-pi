@@ -94,6 +94,23 @@ export function nodeRadius(node, degreeMap) {
   return 5 + Math.min(9, deg * 1.4)
 }
 
+// Derived graph indexes, rebuilt only when nodes/edges change. Per-node
+// components subscribe to these instead of scanning the edge list on
+// every render (hover flips used to be O(nodes*edges) per frame).
+export function buildIndexes(nodes, edges) {
+  const degree = new Map()
+  const adjacency = new Map()
+  for (const e of edges) {
+    degree.set(e.source, (degree.get(e.source) || 0) + 1)
+    degree.set(e.target, (degree.get(e.target) || 0) + 1)
+    if (!adjacency.has(e.source)) adjacency.set(e.source, new Set())
+    if (!adjacency.has(e.target)) adjacency.set(e.target, new Set())
+    adjacency.get(e.source).add(e.target)
+    adjacency.get(e.target).add(e.source)
+  }
+  return { degree, adjacency }
+}
+
 export function parseConfidence(meta) {
   const m = /conf\s+([0-9.]+)/.exec(meta || '')
   return m ? parseFloat(m[1]) : null
@@ -171,6 +188,7 @@ export function typeColor(type, theme, fallback) {
 export const useGraphStore = create((set, get) => ({
   nodes: [],
   edges: [],
+  indexes: { degree: new Map(), adjacency: new Map() },
   loading: true,
   selectedId: null,
   hoverId: null,
@@ -186,8 +204,8 @@ export const useGraphStore = create((set, get) => ({
   forces: { repel: -90, linkDistance: 70, centerStrength: 0.3 },
   rf: null,
 
-  setNodes: (nodes) => set({ nodes }),
-  setEdges: (edges) => set({ edges }),
+  setNodes: (nodes) => set({ nodes, indexes: buildIndexes(nodes, get().edges) }),
+  setEdges: (edges) => set({ edges, indexes: buildIndexes(get().nodes, edges) }),
   setSelectedId: (id) => set({ selectedId: id }),
   setHoverId: (id) => set({ hoverId: id }),
   setSearchQuery: (q) => set({ searchQuery: q }),
@@ -273,16 +291,22 @@ export const useGraphStore = create((set, get) => ({
 
   onNodesChange: (changes) => {
     const list = toArray(changes)
-    set({ nodes: applyNodeChanges(list, get().nodes) })
+    const nodes = applyNodeChanges(list, get().nodes)
+    // Position-only changes (drag) do not alter degree/adjacency.
+    const structural = list.some((c) => c.type === 'remove' || c.type === 'add')
+    set(structural ? { nodes, indexes: buildIndexes(nodes, get().edges) } : { nodes })
     if (list.some((c) => c.type === 'remove')) get().persist()
   },
   onEdgesChange: (changes) => {
     const list = toArray(changes)
-    set({ edges: applyEdgeChanges(list, get().edges) })
+    const edges = applyEdgeChanges(list, get().edges)
+    const structural = list.some((c) => c.type === 'remove' || c.type === 'add')
+    set(structural ? { edges, indexes: buildIndexes(get().nodes, edges) } : { edges })
     if (list.some((c) => c.type === 'remove')) get().persist()
   },
   onConnect: (connection) => {
-    set({ edges: [...get().edges, { ...connection, id: `e-${Date.now()}` }] })
+    const edges = [...get().edges, { ...connection, id: `e-${Date.now()}` }]
+    set({ edges, indexes: buildIndexes(get().nodes, edges) })
     get().persist()
   },
 
@@ -299,11 +323,9 @@ export const useGraphStore = create((set, get) => ({
       const fresh = incoming.filter((n) => !n.position || (!n.position.x && !n.position.y))
       const laidOut = fresh.length ? layoutForce(fresh, graph.edges || []) : []
       const byId = new Map(laidOut.map((n) => [n.id, n]))
-      set({
-        nodes: incoming.map((n) => byId.get(n.id) || n),
-        edges: graph.edges || [],
-        loading: false,
-      })
+      const nodes = incoming.map((n) => byId.get(n.id) || n)
+      const edges = graph.edges || []
+      set({ nodes, edges, indexes: buildIndexes(nodes, edges), loading: false })
     } catch {
       set({ loading: false })
     }
@@ -328,12 +350,16 @@ export const useGraphStore = create((set, get) => ({
 }))
 
 socket.on('graph:updated', (graph) => {
-  useGraphStore.setState({ nodes: graph.nodes || [], edges: graph.edges || [] })
+  const nodes = graph.nodes || []
+  const edges = graph.edges || []
+  useGraphStore.setState({ nodes, edges, indexes: buildIndexes(nodes, edges) })
 })
 
 // SSE fallback for the no-dep overview server
 const es = new EventSource('/events')
 es.addEventListener('graph:updated', (ev) => {
   const graph = JSON.parse(ev.data)
-  useGraphStore.setState({ nodes: graph.nodes || [], edges: graph.edges || [] })
+  const nodes = graph.nodes || []
+  const edges = graph.edges || []
+  useGraphStore.setState({ nodes, edges, indexes: buildIndexes(nodes, edges) })
 })

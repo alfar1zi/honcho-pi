@@ -15,4 +15,10 @@ if [ "$(cd "$ROOT/web" && pwd)" != "$(cd "$DEST" && pwd)" ]; then
   rm -rf "$DEST/dist"
   mv "$DEST/dist.new" "$DEST/dist"
 fi
+# Seed the graph cache: without it the first GET rebuilds from the store
+# (O(n^2) similarity, ~13s at 600 records) and the page sits on "loading".
+if [ ! -f "$DEST/data/graph.json" ] && [ -f "$ROOT/web/data/graph.json" ]; then
+  mkdir -p "$DEST/data"
+  cp "$ROOT/web/data/graph.json" "$DEST/data/graph.json"
+fi
 echo "[web-deploy] dist -> $DEST/dist"

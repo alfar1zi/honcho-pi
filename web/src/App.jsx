@@ -37,14 +37,7 @@ export default function App() {
     return neighborhood(edges, localRootId, localDepth)
   }, [edges, localRootId, localDepth])
 
-  const degree = useMemo(() => {
-    const m = new Map()
-    for (const e of edges) {
-      m.set(e.source, (m.get(e.source) || 0) + 1)
-      m.set(e.target, (m.get(e.target) || 0) + 1)
-    }
-    return m
-  }, [edges])
+  const degree = useGraphStore((s) => s.indexes.degree)
 
   const visibleNodes = useMemo(() => {
     let list = nodes
@@ -118,6 +111,10 @@ export default function App() {
         fitView
         minZoom={0.05}
         maxZoom={2}
+        onlyRenderVisibleElements
+        edgesFocusable={false}
+        nodesDraggable
+        elevateNodesOnSelect={false}
       >
         <Background color="transparent" />
         <Controls position="bottom-right" showInteractive={false} />
