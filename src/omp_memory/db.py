@@ -1929,6 +1929,63 @@ def _pool_query_terms(candidates: list) -> int:
     n = candidates[0].get("query_terms") or 0
     return max(1, n)
 
+def _ppr_expand(conn: sqlite3.Connection, seeds: list, all_rows: list,
+                alpha: float = 0.15, iterations: int = 20) -> dict:
+    """Personalized PageRank over the record association graph (HippoRAG,
+    Gutierrez et al. 2024): seeds are the lexical hits, edges are shared
+    rare terms + parent links. Power iteration spreads seed mass to
+    associative neighbors that lexical search missed - the multi-hop join
+    recall weakness, attacked without embeddings. Returns {id: ppr_mass}.
+    """
+    if not seeds or not all_rows:
+        return {}
+    ids = [r["id"] for r in all_rows]
+    idx = {rid: i for i, rid in enumerate(ids)}
+    n = len(ids)
+    postings: dict = {}
+    for i, r in enumerate(all_rows):
+        for w in set(_tokens(r.get("content") or "")):
+            postings.setdefault(w, []).append(i)
+    adj: list = [dict() for _ in range(n)]
+    for w, members in postings.items():
+        if len(members) > 40:  # hub terms link everything; no signal
+            continue
+        weight = 1.0 / len(members)
+        for i in members:
+            for j in members:
+                if i != j:
+                    adj[i][j] = adj[i].get(j, 0.0) + weight
+    for i, r in enumerate(all_rows):
+        other = r.get("parent_id")
+        if other and other in idx:
+            j = idx[other]
+            adj[i][j] = adj[i].get(j, 0.0) + 1.0
+            adj[j][i] = adj[j].get(i, 0.0) + 1.0
+    for i in range(n):
+        total = sum(adj[i].values())
+        if total > 0:
+            adj[i] = {j: w / total for j, w in adj[i].items()}
+    seed_set = {idx[s["id"]] for s in seeds if s["id"] in idx}
+    if not seed_set:
+        return {}
+    teleport = {i: 1.0 / len(seed_set) for i in seed_set}
+    rank = dict(teleport)
+    for _ in range(iterations):
+        nxt: dict = {}
+        for i, mass in rank.items():
+            for j, w in adj[i].items():
+                nxt[j] = nxt.get(j, 0.0) + (1.0 - alpha) * mass * w
+        for i, t in teleport.items():
+            nxt[i] = nxt.get(i, 0.0) + alpha * t
+        rank = nxt
+    # Dangling mass (nodes with no edges) redistributes uniformly so every
+    # row has a score; isolated records get the floor, not a KeyError.
+    floor = alpha / max(1, n) * 0.1
+    return {ids[i]: rank.get(i, floor) for i in range(n)}
+
+
+PPR_WEIGHT = 0.10
+
 
 def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = False,
            pool: int = None, rtype: str = None, project_id: str = None,
@@ -1954,6 +2011,11 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
     if not candidates:
         return []
     lexicals = _absolute_lexical(candidates)
+    # Associative expansion (HippoRAG): spread seed mass over the term graph
+    # so a record that shares rare terms with several hits ranks above one
+    # that matched a single common word. Bounded bonus, lexical still leads.
+    ppr = _ppr_expand(conn, candidates[:limit], candidates)
+    ppr_max = max(ppr.values()) if ppr else 0.0
 
     # Cue triggering (Rummel & Kvavilashvili 2023): a query that carries an
     # INTENT's cue is the cue's appearance in the environment, so the intent
@@ -1993,7 +2055,9 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
         penalty = SUPERSEDED_PENALTY if superseded else 0.0
         boost = SUPERSEDED_BOOST if cand["id"] in chain_heads else 0.0
         bonus = cue_bonus.get(cand["id"], 0.0)
-        score = round(max(0.0, base + bonus + boost - penalty), 6)
+        assoc = (ppr.get(cand["id"], 0.0) / ppr_max) if ppr_max > 0 else 0.0
+        score = round(max(0.0, base + bonus + boost - penalty
+                          + PPR_WEIGHT * assoc), 6)
         scored.append((cand, parts, heat, lexical, prior, score))
 
     def _sort_key(item):

@@ -59,12 +59,18 @@ def test_rerank_reorders_a_controlled_case(conn):
     results = memory_db.recall(conn, query, limit=5, full=True, now=now)
     assert len(results) == 3
 
-    # Check manual score formula for every record
+    # Check manual score formula for every record (incl. the bounded PPR
+    # associative bonus; recompute the same expansion the scorer used).
+    pool = memory_db.search(conn, query, limit=20, pool=20)
+    ppr = memory_db._ppr_expand(conn, pool[:5], pool)
+    ppr_max = max(ppr.values()) if ppr else 0.0
     for res in results:
+        assoc = (ppr.get(res["id"], 0.0) / ppr_max) if ppr_max > 0 else 0.0
         expected = round(
             0.70 * res["lexical"]
             + 0.25 * res["heat"]
-            + 0.05 * res["type_prior"],
+            + 0.05 * res["type_prior"]
+            + memory_db.PPR_WEIGHT * assoc,
             6,
         )
         assert res["score"] == pytest.approx(expected, abs=1e-6)

@@ -224,3 +224,30 @@ def test_staging_hash_pin(conn):
     conn.commit()
     with pytest.raises(ValueError, match="changed since staging"):
         db.decide_pending(conn, pid, approve=True)
+
+
+# --- Wave E: PPR associative expansion ----------------------------------------
+
+def test_ppr_spreads_mass_to_neighbors(conn):
+    a = db.remember(conn, "FACT", "quokka migration uses zorbital checkpoints", source="s")
+    b = db.remember(conn, "FACT", "zorbital checkpoints require wal flush ordering", source="s")
+    c = db.remember(conn, "FACT", "completely unrelated cooking recipe pasta", source="s")
+    rows = [db.get_record(conn, x["id"]) for x in (a, b, c)]
+    ppr = db._ppr_expand(conn, [rows[0]], rows)
+    assert ppr[b["id"]] > ppr[c["id"]], "shared rare term must carry mass"
+    assert ppr[c["id"]] < 0.01
+
+
+def test_ppr_parent_link(conn):
+    p = db.remember(conn, "RULE", "parent rule about deployment", source="s")
+    ch = db.remember(conn, "FACT", "child detail", source="s", parent_id=p["id"])
+    rows = [db.get_record(conn, p["id"]), db.get_record(conn, ch["id"])]
+    ppr = db._ppr_expand(conn, [rows[0]], rows)
+    assert ppr[ch["id"]] > 0.05
+
+
+def test_recall_still_lexical_lead_with_ppr(conn):
+    db.remember(conn, "FACT", "the zorbital engine handles wal checkpoints", source="s")
+    db.remember(conn, "FACT", "wal wal wal wal wal wal", source="s")
+    hits = db.recall(conn, "zorbital engine", limit=2)
+    assert hits and "zorbital" in hits[0]["snippet"]
