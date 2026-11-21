@@ -202,3 +202,25 @@ def test_env_web_dir_wins_without_dist(tmp_path, monkeypatch):
     finally:
         monkeypatch.delenv("OMP_MEMORY_WEB_DIR")
         importlib.reload(web)
+
+
+def test_merge_fresh_drops_foreign_mem_ids_keeps_notes(graph_env):
+    rid = db.upsert_record(graph_env, "FACT", "local lesson", session_id="s")
+    saved = web.build_graph()
+    saved["nodes"].append({
+        "id": "mem-foreign999", "type": "graphNode", "position": {"x": 9, "y": 9},
+        "data": {"label": "foreign record", "type": "FACT"},
+    })
+    saved["nodes"].append({
+        "id": "n-note", "type": "graphNode", "position": {"x": 1, "y": 2},
+        "data": {"label": "sticky note", "type": "note"},
+    })
+    saved["edges"].append({"id": "e-foreign", "source": "mem-foreign999", "target": f"mem-{rid}"})
+    saved["edges"].append({"id": "e-note", "source": "n-note", "target": f"mem-{rid}"})
+    merged = web._merge_fresh(saved)
+    ids = {n["id"] for n in merged["nodes"]}
+    assert "mem-foreign999" not in ids, "foreign record id must self-heal away"
+    assert "n-note" in ids, "operator notes survive"
+    eids = {e["id"] for e in merged["edges"]}
+    assert "e-foreign" not in eids, "edges to dropped nodes go too"
+    assert "e-note" in eids

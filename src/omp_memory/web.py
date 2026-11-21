@@ -308,13 +308,18 @@ def _merge_fresh(saved: dict) -> dict:
             n["data"]["label"] = prev["data"]["label"]
             n["data"]["customLabel"] = True
     # Operator-added nodes (notes) have no store record; keep them as-is.
+    # A mem- id absent from the fresh build is a foreign/deleted record
+    # (e.g. a cache seeded from another machine), not a note: drop it, or
+    # its detail panel would 404 forever.
     fresh_ids = {n["id"] for n in fresh["nodes"]}
     for n in saved.get("nodes", []):
-        if n["id"] not in fresh_ids:
+        if n["id"] not in fresh_ids and not n["id"].startswith("mem-"):
             fresh["nodes"].append(n)
     fresh_edge_ids = {e["id"] for e in fresh["edges"]}
+    all_ids = {n["id"] for n in fresh["nodes"]}
     for e in saved.get("edges", []):
-        if e["id"] not in fresh_edge_ids:
+        if e["id"] not in fresh_edge_ids \
+                and e.get("source") in all_ids and e.get("target") in all_ids:
             fresh["edges"].append(e)
     return fresh
 
@@ -657,6 +662,16 @@ def main(argv=None):
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     url = f"http://127.0.0.1:{args.port}"
     print(f"[overview] {url}")
+    # The seeded cache may hold ids from another machine's store. Paint
+    # instantly from it, then reconcile against the local store in the
+    # background so foreign nodes self-heal without waiting for an edit.
+    def _self_heal():
+        try:
+            graph = _refresh_graph()
+            _broadcast("graph:updated", graph)
+        except Exception as e:  # a broken store must not kill the viewer
+            print(f"[overview] graph refresh failed: {e}", file=__import__("sys").stderr)
+    threading.Thread(target=_self_heal, daemon=True).start()
     if not args.no_open:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
     try:
