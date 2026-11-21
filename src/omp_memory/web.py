@@ -23,7 +23,15 @@ from pathlib import Path
 
 from . import db
 
-WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web"
+# In a source checkout web/ sits next to src/; in a venv install it does not,
+# so OMP_MEMORY_WEB_DIR (or ~/.omp/memory/web) points at the built assets.
+_WEB_CANDIDATES = [
+    Path(__file__).resolve().parent.parent.parent / "web",
+    Path(os.environ.get("OMP_MEMORY_WEB_DIR", "")) if os.environ.get("OMP_MEMORY_WEB_DIR") else None,
+    Path.home() / ".omp/memory/web",
+]
+WEB_DIR = next((p for p in _WEB_CANDIDATES if p and (p / "dist" / "index.html").is_file()),
+               _WEB_CANDIDATES[0])
 DIST_DIR = WEB_DIR / "dist"
 GRAPH_FILE = WEB_DIR / "data" / "graph.json"
 MEDIA_DIR = WEB_DIR / "data" / "media"
