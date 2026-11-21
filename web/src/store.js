@@ -149,13 +149,23 @@ const TYPE_VARS = {
   note: '--note',
 }
 
+// Resolve the palette once per theme; typeColor is on the hot path (every
+// node render + minimap), so getComputedStyle per call is wasteful.
+const paletteCache = new Map()
+
 export function typeColor(type, theme, fallback) {
   const v = TYPE_VARS[type]
-  if (v && typeof document !== 'undefined') {
-    const c = getComputedStyle(document.documentElement).getPropertyValue(v).trim()
-    if (c) return c
+  if (!v) return fallback || '#9b7bff'
+  let palette = paletteCache.get(theme)
+  if (!palette && typeof document !== 'undefined') {
+    const cs = getComputedStyle(document.documentElement)
+    palette = {}
+    for (const [t, varName] of Object.entries(TYPE_VARS)) {
+      palette[t] = cs.getPropertyValue(varName).trim()
+    }
+    paletteCache.set(theme, palette)
   }
-  return fallback || '#9b7bff'
+  return palette?.[type] || fallback || '#9b7bff'
 }
 
 export const useGraphStore = create((set, get) => ({
@@ -169,7 +179,10 @@ export const useGraphStore = create((set, get) => ({
   theme: 'dark',
   localRootId: null,
   localDepth: 2,
-  showOrphans: true,
+  // Orphans are 187 of 314 nodes; showing them by default squeezes the
+  // connected region (where the threads live) into the middle of the frame.
+  // Toggle them on from the settings panel when auditing unlinked records.
+  showOrphans: false,
   forces: { repel: -90, linkDistance: 70, centerStrength: 0.3 },
   rf: null,
 

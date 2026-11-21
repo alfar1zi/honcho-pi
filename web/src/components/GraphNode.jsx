@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { Handle, Position } from '@xyflow/react'
+import { Handle, Position, useViewport } from '@xyflow/react'
 import { useGraphStore, parseConfidence, typeColor } from '../store.js'
 
 // Obsidian graph node: a circle sized by degree, colored by record type.
@@ -14,6 +14,9 @@ export function GraphNode({ id, data, selected }) {
   const typeFilter = useGraphStore((s) => s.typeFilter)
   const theme = useGraphStore((s) => s.theme)
   const setSelectedId = useGraphStore((s) => s.setSelectedId)
+  // Label count tracks screen space, not degree: below this zoom only the
+  // focus neighborhood and search hits keep labels; hubs join when zoomed in.
+  const { zoom } = useViewport()
 
   const focusId = hoverId || selectedId
   const connected = useMemo(() => {
@@ -67,7 +70,7 @@ export function GraphNode({ id, data, selected }) {
           ...(selected ? { '--tw-ring-color': color } : {}),
         }}
       />
-      {(deg >= 4 || focusId === id || connected.has(id) || selected || (q && matchesSearch)) && (
+      {((zoom > 0.75 && deg >= 4) || focusId === id || connected.has(id) || selected || (q && matchesSearch)) && (
         <div
           className="node-label absolute left-full ml-2 whitespace-nowrap text-[11px] pointer-events-none select-none max-w-[140px] truncate"
           style={{ color: 'var(--text)', opacity: focusId && !dimmed ? 1 : 0.8 }}

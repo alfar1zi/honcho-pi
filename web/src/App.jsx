@@ -77,11 +77,10 @@ export default function App() {
         animated: false,
         style: {
           stroke: active ? 'var(--accent)' : 'var(--edge)',
-          strokeWidth: active ? 1.4 : 0.9,
-          opacity: focusId ? (active ? 0.95 : 0.05) : 0.85,
-          filter: active
-            ? 'drop-shadow(0 0 3px var(--accent))'
-            : 'drop-shadow(0 0 2px color-mix(in srgb, var(--edge) 80%, transparent))',
+          strokeWidth: active ? 1.4 : 1,
+          vectorEffect: 'non-scaling-stroke',
+          opacity: focusId ? (active ? 0.95 : 0.05) : 0.55,
+          filter: active ? 'drop-shadow(0 0 3px var(--accent))' : undefined,
         },
       }
     })
