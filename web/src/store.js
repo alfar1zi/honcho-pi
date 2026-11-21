@@ -293,8 +293,14 @@ export const useGraphStore = create((set, get) => ({
     try {
       const res = await fetch('/api/graph')
       const graph = await res.json()
+      const incoming = graph.nodes || []
+      // Saved positions are the operator's layout; only nodes without one
+      // (fresh store records) go through the force simulation.
+      const fresh = incoming.filter((n) => !n.position || (!n.position.x && !n.position.y))
+      const laidOut = fresh.length ? layoutForce(fresh, graph.edges || []) : []
+      const byId = new Map(laidOut.map((n) => [n.id, n]))
       set({
-        nodes: layoutForce(graph.nodes || [], graph.edges || []),
+        nodes: incoming.map((n) => byId.get(n.id) || n),
         edges: graph.edges || [],
         loading: false,
       })

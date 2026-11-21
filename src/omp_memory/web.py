@@ -26,12 +26,12 @@ from . import db
 # In a source checkout web/ sits next to src/; in a venv install it does not,
 # so OMP_MEMORY_WEB_DIR (or ~/.omp/memory/web) points at the built assets.
 _WEB_CANDIDATES = [
+    Path(os.environ["OMP_MEMORY_WEB_DIR"]) if os.environ.get("OMP_MEMORY_WEB_DIR") else None,
     Path(__file__).resolve().parent.parent.parent / "web",
-    Path(os.environ.get("OMP_MEMORY_WEB_DIR", "")) if os.environ.get("OMP_MEMORY_WEB_DIR") else None,
     Path.home() / ".omp/memory/web",
 ]
 WEB_DIR = next((p for p in _WEB_CANDIDATES if p and (p / "dist" / "index.html").is_file()),
-               _WEB_CANDIDATES[0])
+               next(p for p in _WEB_CANDIDATES if p))
 DIST_DIR = WEB_DIR / "dist"
 GRAPH_FILE = WEB_DIR / "data" / "graph.json"
 MEDIA_DIR = WEB_DIR / "data" / "media"
@@ -626,9 +626,15 @@ def main(argv=None):
     ap.add_argument("--no-open", action="store_true")
     args = ap.parse_args(argv)
 
-    if not DIST_DIR.is_file() and not (DIST_DIR / "index.html").exists():
-        print(f"[overview] dist missing: {DIST_DIR}", file=__import__("sys").stderr)
-        print("[overview] run: npm --prefix web run build", file=__import__("sys").stderr)
+    if not (DIST_DIR / "index.html").exists():
+        import sys
+        print(f"[overview] dist missing: {DIST_DIR}", file=sys.stderr)
+        checkout = Path(__file__).resolve().parent.parent.parent
+        if (checkout / "web").is_dir():
+            print("[overview] run: bash bin/web-deploy.sh", file=sys.stderr)
+        else:
+            print("[overview] run bin/web-deploy.sh from a repo checkout "
+                  "(or set OMP_MEMORY_WEB_DIR)", file=sys.stderr)
         return 1
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
