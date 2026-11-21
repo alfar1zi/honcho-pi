@@ -105,7 +105,7 @@ def test_compact_reports_no_evidence_and_is_smaller_than_full(conn):
         "content", "evidence", "lexical", "matched_terms", "type_prior",
         "superseded_by",
         "age_days", "successes", "about_peer", "session_id", "importance", "cue",
-        "cue_triggered",
+        "cue_triggered", "stale", "valid_from", "valid_until",
     }
     # intent fields ride on the full payload; a non-INTENT record reports
     # them as empty/false so callers need no type branch.
