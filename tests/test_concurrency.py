@@ -21,7 +21,10 @@ def test_parallel_reinforce_no_lost_update(tmp_path):
     def worker():
         barrier.wait()
         c = db.connect(str(tmp_path / "m.db"))
-        db.reinforce(c, rid, signal="success")
+        # Explicit delta: this test isolates the lost-update regression.
+        # Without it the spacing factor (massed repeats worth 0.1x) makes
+        # the final confidence timing-dependent on slow CI runners.
+        db.reinforce(c, rid, signal="success", delta=0.1)
         c.close()
 
     threads = [threading.Thread(target=worker) for _ in range(8)]
