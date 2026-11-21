@@ -114,7 +114,6 @@ export default function App() {
         onlyRenderVisibleElements
         edgesFocusable={false}
         nodesDraggable
-        elevateNodesOnSelect={false}
       >
         <Background color="transparent" />
         <Controls position="bottom-right" showInteractive={false} />
