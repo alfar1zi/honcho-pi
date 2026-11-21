@@ -9,15 +9,27 @@
 # honcho-pi
 
 ### Your coding agent forgets everything. This fixes that.
-honcho-pi gives the agent a memory that behaves like memory: lessons that hold get stronger, lessons that
-fail fade, and everything carries the evidence behind it.
 
 One SQLite file that remembers what worked, what failed, and why.
 Local-first. No server, no API key, no embeddings. Nothing leaves your machine.
+
 [Quick start](#quick-start) | [Memory universe](#the-memory-universe)
 [How it works](#how-it-works) | [MCP](#connect-your-agent)
+
+<p>
+  <a href="LICENSE.md"><img alt="License: MIT" height="20"
+    src="https://img.shields.io/badge/license-MIT-9b7bff.svg?style=flat-square"></a>
+  <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10+-2ee6d6.svg?style=flat-square" height="20">
+  <img alt="stdlib only" height="20"
+    src="https://img.shields.io/badge/dependencies-stdlib_only-7cff6b.svg?style=flat-square">
+  <img alt="local first" height="20"
+    src="https://img.shields.io/badge/local--first-nothing_leaves_your_machine-ff6bd6.svg?style=flat-square">
+</p>
+
 </div>
+
 ---
+
 <div align="center">
 <img
   src="assets/screenshots/universe-hero.webp"
@@ -26,11 +38,17 @@ Local-first. No server, no API key, no embeddings. Nothing leaves your machine.
   width="100%"
 />
 </div>
+
+<p align="center"><i>The memory universe: every lesson, decision, and skill your agent has learned, connected.</i></p>
+
 ## The problem
+
 Every session, your agent starts from zero. It re-learns the same build command, repeats the same wrong
 assumption, and rediscovers the same fix it found last week. You end up being the memory.
+
 honcho-pi gives the agent a memory that behaves like memory: lessons that hold get stronger, lessons that
 fail fade, and everything carries the evidence behind it.
+
 ## Quick start
 
 ```bash
@@ -55,6 +73,7 @@ Works with Claude Code, Codex, Cursor, and any MCP client. The agent gets five t
 ```bash
 omp-memory overview
 ```
+
 <div align="center">
 <img
   src="assets/screenshots/universe-hover.webp"
@@ -62,10 +81,13 @@ omp-memory overview
   width="100%"
 />
 </div>
+
 Everything the agent remembers, on one canvas. Each color is a record type, each thread is a relationship.
 Hover a node and its connections light up. Double-click to zoom into its neighborhood. Drag nodes to
 arrange your own map; the layout is saved.
+
 **Click any node to open it:**
+
 <div align="center">
 <img
   src="assets/screenshots/detail-image.webp"
@@ -74,12 +96,15 @@ arrange your own map; the layout is saved.
   width="100%"
 />
 </div>
+
 - **Read the full record**: content, evidence, confidence, where it came from.
 - **Edit it**: fix a wrong lesson right there. The edit writes to the store as a logged correction,
   with evidence required. The agent sees the corrected version on its next recall.
 - **Attach images**: screenshots, diagrams, terminal output. The node becomes a thumbnail.
   Agents can attach images too, through the same API.
+
 **And a dashboard that answers one question: is the memory healthy?**
+
 <div align="center">
 <img
   src="assets/screenshots/dashboard.webp"
@@ -87,18 +112,12 @@ arrange your own map; the layout is saved.
   width="100%"
 />
 </div>
+
 Cold records decay toward forgetting; hot ones survive. If the cold bucket dominates, the store needs
 reinforcement, not more capture. The most-connected list shows the hubs your agent actually leans on.
 
 The screenshots above use generated demo data (`python3 web/scripts/demo-universe.py`), not anyone's
 real memory.
-<div align="center">
-<img
-  src="assets/screenshots/universe-hover.webp"
-  alt="Hovering a node lights up its threads and dims everything unrelated"
-  width="100%"
-/>
-</div>
 
 ## How it works
 
@@ -186,7 +205,7 @@ Updates: `npx honcho-pi@latest update` (keeps the database). Status: `npx honcho
 ## Development
 
 ```bash
-python -m pytest              # 384 tests, no network
+python -m pytest              # 385 tests, no network
 bash bin/clean-code.sh        # quality gate
 bash bin/web-deploy.sh        # build + deploy the web UI
 ```

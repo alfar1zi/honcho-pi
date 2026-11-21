@@ -128,7 +128,7 @@ export default function App() {
           nodeColor={(n) => typeColor(n.data?.type, theme, n.data?.color)}
           nodeBorderRadius={6}
           maskColor="var(--mask)"
-          style={{ width: 160, height: 110, background: 'var(--surface)' }}
+          style={{ width: 160, height: 110, background: 'var(--glass)' }}
         />
       </ReactFlow>
       {visibleNodes.length === 0 && (

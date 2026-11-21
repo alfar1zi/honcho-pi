@@ -115,7 +115,7 @@ export function DetailPanel() {
     <div
       role="dialog"
       aria-label={`Record details: ${node.data.label || node.id}`}
-      className="absolute top-16 right-4 w-80 max-h-[calc(100%-5rem)] bg-[var(--surface)] border border-[var(--border)] rounded-lg shadow-2xl z-20 overflow-hidden flex flex-col"
+      className="absolute top-16 right-4 w-80 max-h-[calc(100%-5rem)] glass-strong rounded-2xl z-20 overflow-hidden flex flex-col"
     >
       <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border)] shrink-0">
         <span className="text-[12px] font-semibold text-[var(--text-muted)]">Record details</span>

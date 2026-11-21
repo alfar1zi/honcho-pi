@@ -66,7 +66,7 @@ export function Dashboard() {
   return (
     <div className="h-full overflow-y-auto px-6 py-5 pt-16">
       <div className="max-w-4xl mx-auto space-y-6">
-        <div className="flex flex-wrap gap-x-8 gap-y-2 font-meta text-[12px] text-[var(--text-muted)]">
+        <div className="glass rounded-2xl px-5 py-3 flex flex-wrap gap-x-8 gap-y-2 font-meta text-[12px] text-[var(--text-muted)]">
           <span><b className="text-[var(--text)] text-[16px]">{stats.store.total}</b> records</span>
           <span><b className="text-[var(--text)] text-[16px]">{stats.store.verified}</b> verified</span>
           <span><b className="text-[var(--text)] text-[16px]">{stats.auto_captured}</b> auto-captured</span>
@@ -77,14 +77,14 @@ export function Dashboard() {
         </div>
 
         <div className="grid md:grid-cols-2 gap-6">
-          <section aria-label="Records by type" className="space-y-1.5">
+          <section aria-label="Records by type" className="glass rounded-2xl p-4 space-y-1.5">
             <h2 className="text-[11px] uppercase tracking-wide text-[var(--text-muted)] mb-2">Records by type</h2>
             {typeEntries.map(([t, v]) => (
               <Bar key={t} label={t} value={v} max={typeMax} color={typeColor(t, theme)} />
             ))}
           </section>
 
-          <section aria-label="Confidence distribution" className="space-y-1.5">
+          <section aria-label="Confidence distribution" className="glass rounded-2xl p-4 space-y-1.5">
             <h2 className="text-[11px] uppercase tracking-wide text-[var(--text-muted)] mb-2">Confidence</h2>
             <Bar label="< 0.40 (cold)" value={conf.low} max={confTotal} color="var(--correction)" />
             <Bar label="0.40 - 0.69" value={conf.mid} max={confTotal} color="var(--inference)" />
@@ -95,14 +95,14 @@ export function Dashboard() {
             </p>
           </section>
 
-          <section aria-label="Capture activity" className="space-y-1.5">
+          <section aria-label="Capture activity" className="glass rounded-2xl p-4 space-y-1.5">
             <h2 className="text-[11px] uppercase tracking-wide text-[var(--text-muted)] mb-2">New records per day (last 14 active days)</h2>
             {stats.activity.map((a) => (
               <Bar key={a.day} label={a.day.slice(5)} value={a.count} max={actMax} color="var(--accent)" />
             ))}
           </section>
 
-          <section aria-label="Most connected nodes">
+          <section aria-label="Most connected nodes" className="glass rounded-2xl p-4">
             <h2 className="text-[11px] uppercase tracking-wide text-[var(--text-muted)] mb-2">Most connected</h2>
             <div className="space-y-1">
               {g.top_connected.map((n) => (

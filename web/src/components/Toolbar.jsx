@@ -21,7 +21,7 @@ function SettingsPanel() {
     <div
       role="dialog"
       aria-label="Graph settings"
-      className="absolute top-16 right-4 w-72 bg-[var(--surface)] border border-[var(--border)] rounded-lg shadow-2xl z-20 p-3 pointer-events-auto space-y-4"
+      className="absolute top-16 right-4 w-72 glass-strong rounded-2xl z-20 p-3 pointer-events-auto space-y-4"
     >
       <div className="flex items-center justify-between">
         <span className="text-[12px] font-semibold text-[var(--text-muted)]">Graph settings</span>
@@ -131,14 +131,14 @@ export function Toolbar() {
 
   return (
     <div className="absolute top-4 left-4 right-4 flex items-center gap-2 z-10 pointer-events-none flex-wrap">
-      <div className="flex items-center gap-1.5 bg-[var(--surface)] border border-[var(--border)] rounded-lg px-2.5 py-1.5 pointer-events-auto">
+      <div className="flex items-center gap-1.5 glass rounded-xl px-2.5 py-1.5 pointer-events-auto">
         <Network size={15} className="text-[var(--accent)]" />
         <span className="text-[13px] font-semibold">honcho-pi</span>
         <span className="text-[11px] text-[var(--text-muted)] ml-1 font-meta">
           {nodes.length} nodes · {edges.length} edges
         </span>
       </div>
-      <div className="flex items-center gap-1.5 bg-[var(--surface)] border border-[var(--border)] rounded-lg px-2 py-1.5 pointer-events-auto">
+      <div className="flex items-center gap-1.5 glass rounded-xl px-2 py-1.5 pointer-events-auto">
         <Search size={14} className="text-[var(--text-muted)]" />
         <input
           data-testid="search-input"
@@ -150,7 +150,7 @@ export function Toolbar() {
         />
       </div>
       <div
-        className="flex items-center gap-1 bg-[var(--surface)] border border-[var(--border)] rounded-lg px-1.5 py-1.5 pointer-events-auto"
+        className="flex items-center gap-1 glass rounded-xl px-1.5 py-1.5 pointer-events-auto"
         role="group"
         aria-label="Filter by record type"
       >
@@ -179,7 +179,7 @@ export function Toolbar() {
         })}
       </div>
       <div className="flex-1" />
-      <div className="flex items-center gap-1 bg-[var(--surface)] border border-[var(--border)] rounded-lg p-1 pointer-events-auto">
+      <div className="flex items-center gap-1 glass rounded-xl p-1 pointer-events-auto">
         <button
           data-testid="toggle-dashboard"
           onClick={() => setView(view === 'dashboard' ? 'graph' : 'dashboard')}
