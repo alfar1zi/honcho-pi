@@ -54,6 +54,11 @@ _LESSON_RE = re.compile(
     r"|\bE\s+[A-Z]\w+"
     r"|\bTraceback"
 )
+# `FAILED tests/...` is pytest output: the agent running its own suite.
+# The fix lands in the commit, not in memory, so candidates matching this
+# shape are dropped in the failure loop. Assertion errors from other
+# tooling (no tests/ path) still carry a real lesson.
+_PYTEST_RE = re.compile(r"\bFAILED\s+(?:\./)?(?:tests?|test)/\S+")
 # Lines that merely name an exception (except clauses, raise statements)
 # are source code under test, not an outcome.
 _NOISE_RE = re.compile(r"(?:^|\b\w+:\s)\s*(?:except|raise)\s+\S*?(?:Error|Exception)\b", re.I)
@@ -322,6 +327,8 @@ def _event_candidates(seg: dict, session_id: str, project_id: str,
         # exited with code N" or a parse-error fragment is shell noise,
         # and a typo session must not become permanent memory.
         if _NOISE_RE.search(lesson) or not _LESSON_RE.search(lesson):
+            continue
+        if _PYTEST_RE.search(lesson):
             continue
         candidates.append({
             "rtype": CAPTURE_DEFAULT_TYPE,

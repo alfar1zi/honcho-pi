@@ -409,3 +409,38 @@ def test_self_echo_tool_output_is_not_a_lesson(session_dir):
     p = session_dir / "2026-11-18T08-00-00-000Z_echo.jsonl"
     cands = capture.extract_lessons(capture._read_entries(p), p)
     assert [c for c in cands if "Observed failure" in c["content"]] == []
+
+
+def test_pytest_failure_output_is_dev_noise(session_dir):
+    """Pytest output in a tool result is the dev loop, not a lesson.
+
+    `FAILED tests/test_x.py::test_y - AssertionError: ...` is the agent
+    running its own test suite; the fix lands in the commit, not in
+    memory. Every such row captured so far has been noise, so the
+    matcher drops it at the candidate stage.
+    """
+    entries = [
+        {"type": "message", "timestamp": "2026-11-18T08:00:00.000Z",
+         "message": {"role": "toolResult", "toolName": "bash",
+                     "content": "FAILED tests/test_wave1.py::test_x - "
+                                "AssertionError: assert 'Auto-recall' in 'echo'"}},
+    ]
+    _write_session(session_dir, "2026-11-18T08-00-00-000Z_pytest.jsonl", entries)
+    p = session_dir / "2026-11-18T08-00-00-000Z_pytest.jsonl"
+    cands = capture.extract_lessons(capture._read_entries(p), p)
+    assert [c for c in cands if "Observed failure" in c["content"]] == []
+
+
+def test_plain_assertion_failure_outside_pytest_is_still_a_lesson(session_dir):
+    """The pytest shape needs the FAILED prefix; a bare AssertionError
+    from other tooling keeps producing a candidate."""
+    entries = [
+        {"type": "message", "timestamp": "2026-11-18T08:00:00.000Z",
+         "message": {"role": "toolResult", "toolName": "bash",
+                     "content": "AssertionError: expected 200, got 401"}},
+    ]
+    _write_session(session_dir, "2026-11-18T08-00-00-000Z_plain.jsonl", entries)
+    p = session_dir / "2026-11-18T08-00-00-000Z_plain.jsonl"
+    cands = capture.extract_lessons(capture._read_entries(p), p)
+    fails = [c for c in cands if "Observed failure" in c["content"]]
+    assert len(fails) == 1
