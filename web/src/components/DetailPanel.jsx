@@ -116,6 +116,7 @@ export function DetailPanel() {
       role="dialog"
       aria-label={`Record details: ${node.data.label || node.id}`}
       className="absolute top-16 right-4 w-80 max-h-[calc(100%-5rem)] glass-strong rounded-2xl z-20 overflow-hidden flex flex-col"
+      className="absolute top-16 right-4 w-80 max-h-[calc(100%-5rem)] glass-strong glass-blur rounded-2xl z-20 overflow-hidden flex flex-col"
     >
       <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border)] shrink-0">
         <span className="text-[12px] font-semibold text-[var(--text-muted)]">Record details</span>
@@ -278,15 +279,38 @@ export function DetailPanel() {
         )}
 
         <div>
-          <label className="flex items-center gap-1.5 text-[11px] text-[var(--text-muted)] mb-1">
             <Type size={12} /> Graph label
-          </label>
-          <input
-            data-testid="label-input"
-            value={node.data.label || ''}
             onChange={(e) => update({ label: e.target.value, customLabel: true })}
             className="w-full bg-[var(--surface-2)] border border-[var(--border)] rounded px-2 py-1.5 text-[13px] outline-none focus:border-[var(--accent)] focus-visible:ring-1 focus-visible:ring-[var(--accent)]"
-          />
+          {editing ? (
+            <>
+              <textarea
+                data-testid="record-editor"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                rows={8}
+                maxLength={20000}
+                className="w-full text-[12px] leading-relaxed bg-[var(--surface-2)] border border-[var(--accent)] rounded p-2 whitespace-pre-wrap font-mono outline-none resize-y"
+              />
+              <input
+                data-testid="evidence-input"
+                value={evidenceDraft}
+                onChange={(e) => setEvidenceDraft(e.target.value)}
+                placeholder="evidence: why this edit is right (required unless verified)"
+                className="w-full mt-1 bg-[var(--surface-2)] border border-[var(--border)] rounded px-2 py-1.5 text-[11px] outline-none focus:border-[var(--accent)]"
+              />
+              <div className="text-[10px] mt-1 text-[var(--text-muted)]">
+                {draft.length}/20000 · a content change is logged as a correction and needs evidence or verified status
+              </div>
+            </>
+          ) : (
+            <div className="text-[12px] leading-relaxed bg-[var(--surface-2)] border border-[var(--border)] rounded p-2 max-h-40 overflow-y-auto whitespace-pre-wrap font-mono">
+              {record?.content || node.data.label || '(no content)'}
+            </div>
+          )}
+          {status && (
+            <div role="status" className="text-[10px] mt-1 text-[var(--text-muted)]">{status}</div>
+          )}
         </div>
 
         {!isRecord && (

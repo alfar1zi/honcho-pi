@@ -64,8 +64,20 @@ export function Dashboard() {
   }
 
   return (
-    <div className="h-full overflow-y-auto px-6 py-5 pt-16">
-      <div className="max-w-4xl mx-auto space-y-6">
+    <div className="relative h-full overflow-y-auto px-6 py-5 pt-16">
+      {/* One shared static backdrop instead of per-card blur layers: the
+          cards are translucent fills over these glows. */}
+      <div
+        aria-hidden="true"
+        className="fixed inset-0 pointer-events-none"
+        style={{
+          background:
+            'radial-gradient(900px 600px at 75% 15%, color-mix(in srgb, var(--rule) 14%, transparent), transparent 70%),' +
+            'radial-gradient(1000px 700px at 15% 90%, color-mix(in srgb, var(--decision) 11%, transparent), transparent 70%),' +
+            'radial-gradient(600px 400px at 50% 55%, color-mix(in srgb, var(--skill) 6%, transparent), transparent 70%)',
+        }}
+      />
+      <div className="relative max-w-4xl mx-auto space-y-6">
         <div className="glass rounded-2xl px-5 py-3 flex flex-wrap gap-x-8 gap-y-2 font-meta text-[12px] text-[var(--text-muted)]">
           <span><b className="text-[var(--text)] text-[16px]">{stats.store.total}</b> records</span>
           <span><b className="text-[var(--text)] text-[16px]">{stats.store.verified}</b> verified</span>
