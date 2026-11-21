@@ -18,13 +18,13 @@ Local-first. No server, no API key, no embeddings. Nothing leaves your machine.
 
 <p>
   <a href="LICENSE.md"><img alt="License: MIT" height="20"
-    src="https://img.shields.io/badge/license-MIT-9b7bff.svg?style=flat-square&labelColor=16161b"></a>
+    src="https://img.shields.io/badge/license-MIT-9b7bff.svg?style=flat-square&labelColor=0d0d10"></a>
   <img alt="Python 3.10+" height="20"
-    src="https://img.shields.io/badge/python-3.10+-2ee6d6.svg?style=flat-square&labelColor=16161b">
+    src="https://img.shields.io/badge/python-3.10+-3a3a45.svg?style=flat-square&labelColor=0d0d10">
   <img alt="stdlib only" height="20"
-    src="https://img.shields.io/badge/dependencies-stdlib_only-7cff6b.svg?style=flat-square&labelColor=16161b">
+    src="https://img.shields.io/badge/dependencies-stdlib_only-3a3a45.svg?style=flat-square&labelColor=0d0d10">
   <img alt="local first" height="20"
-    src="https://img.shields.io/badge/data-stays_local-ff6bd6.svg?style=flat-square&labelColor=16161b">
+    src="https://img.shields.io/badge/data-local--first-3a3a45.svg?style=flat-square&labelColor=0d0d10">
 </p>
 
 </div>

@@ -72,8 +72,8 @@ export function Dashboard() {
         className="fixed inset-0 pointer-events-none"
         style={{
           background:
-            'radial-gradient(900px 600px at 75% 15%, color-mix(in srgb, #241a40 60%, transparent), transparent 72%),' +
-            'radial-gradient(1000px 700px at 15% 90%, color-mix(in srgb, #0d262e 55%, transparent), transparent 72%)',
+            'radial-gradient(900px 600px at 75% 15%, color-mix(in srgb, var(--glow-a) 60%, transparent), transparent 72%),' +
+            'radial-gradient(1000px 700px at 15% 90%, color-mix(in srgb, var(--glow-b) 55%, transparent), transparent 72%)',
         }}
       />
       <div className="relative max-w-4xl mx-auto space-y-6">
