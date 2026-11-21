@@ -22,13 +22,15 @@
   --skill: #ff6bd6;
   --note: #4da3ff;
   --mask: rgba(13, 13, 16, 0.7);
-  /* Liquid glass: translucent floating layers over the canvas, macOS style.
-     Only toolbar, panels, controls and minimap use it; the canvas stays matte. */
-  --glass: rgba(28, 28, 36, 0.55);
-  --glass-strong: rgba(28, 28, 36, 0.78);
-  --glass-border: rgba(255, 255, 255, 0.12);
-  --glass-highlight: rgba(255, 255, 255, 0.08);
-  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.45), 0 2px 8px rgba(0, 0, 0, 0.3);
+  /* Liquid glass, dark-first: the fill is a dark translucent surface so the
+     layer reads as smoked glass over the canvas, not a white frost. Border
+     and top highlight carry the "glass" signal; the shadow grounds it.
+     Chrome only (toolbar, panels, controls); the canvas stays matte. */
+  --glass: rgba(22, 22, 29, 0.62);
+  --glass-strong: rgba(22, 22, 29, 0.85);
+  --glass-border: rgba(255, 255, 255, 0.09);
+  --glass-highlight: rgba(255, 255, 255, 0.06);
+  --glass-shadow: 0 12px 40px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
 }
 
 :root[data-theme="light"] {
@@ -76,8 +78,8 @@ body::before {
   pointer-events: none;
   z-index: 0;
   background:
-    radial-gradient(700px 480px at 78% 12%, color-mix(in srgb, var(--rule) 9%, transparent), transparent 70%),
-    radial-gradient(820px 560px at 12% 88%, color-mix(in srgb, var(--decision) 7%, transparent), transparent 70%);
+    radial-gradient(760px 520px at 80% 8%, color-mix(in srgb, #2a1f4d 55%, transparent), transparent 72%),
+    radial-gradient(860px 600px at 8% 92%, color-mix(in srgb, #0e2b33 50%, transparent), transparent 72%);
 }
 
 #root {
