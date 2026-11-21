@@ -7,6 +7,7 @@ const COLORS = ['#7c3aed', '#06b6d4', '#10b981', '#f59e0b', '#ef4444', '#ec4899'
 // Click a node: view its full record (content, type, confidence, evidence meta,
 // connected neighbors) and edit its visual label/meta/color.
 export function DetailPanel() {
+  const { nodes, edges, selectedId, setNodes, setSelectedId, persist, theme } = useGraphStore()
   const node = nodes.find((n) => n.id === selectedId)
   const closeRef = useRef(null)
   const open = !!node

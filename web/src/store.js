@@ -1,12 +1,24 @@
 import { create } from 'zustand'
 import { io } from 'socket.io-client'
-import { forceSimulation, forceLink, forceManyBody, forceCenter, forceCollide } from 'd3-force'
+import { forceSimulation, forceLink, forceManyBody, forceCenter, forceCollide, forceX, forceY } from 'd3-force'
 
 const socket = io({ autoConnect: false })
 
-// Obsidian-style force layout: repel + link spring + center pull.
-// Parameters come from the settings panel (Obsidian "Forces" section).
-// Runs once per graph load (or on demand); node dragging still overrides positions.
+// Cluster anchors: each record type gravitates to its own sector so the graph
+// reads as regions (mindcorpus organises by kind), not one undifferentiated
+// blob. Orphans settle on an outer ring instead of drifting through clusters.
+const CLUSTER_ORDER = ['FACT', 'DECISION', 'RULE', 'CORRECTION', 'INFERENCE', 'skill', 'note']
+const CLUSTER_RADIUS = 340
+
+function clusterAnchor(type) {
+  const i = CLUSTER_ORDER.indexOf(type)
+  if (i < 0) return { x: 0, y: 0 }
+  const angle = (i / CLUSTER_ORDER.length) * Math.PI * 2 - Math.PI / 2
+  return { x: Math.cos(angle) * CLUSTER_RADIUS, y: Math.sin(angle) * CLUSTER_RADIUS }
+}
+
+// Force layout: repel + link spring + cluster pull. Parameters come from the
+// settings panel. Runs once per graph load (or on demand); dragging overrides.
 function layoutForce(nodes, edges, forces) {
   if (!nodes.length) return nodes
   const degree = new Map()
@@ -14,8 +26,21 @@ function layoutForce(nodes, edges, forces) {
     degree.set(e.source, (degree.get(e.source) || 0) + 1)
     degree.set(e.target, (degree.get(e.target) || 0) + 1)
   }
+  // Seed positions near the cluster anchor so the sim converges into regions.
+  const orphanRing = CLUSTER_RADIUS + 260
+  const orphans = nodes.filter((n) => !(degree.get(n.id) > 0))
+  orphans.forEach((n, i) => {
+    const angle = (i / Math.max(1, orphans.length)) * Math.PI * 2
+    n.x = Math.cos(angle) * orphanRing
+    n.y = Math.sin(angle) * orphanRing
+  })
   for (const n of nodes) {
-    if (!n.position) n.position = { x: 0, y: 0 }
+    if (degree.get(n.id) > 0) {
+      const a = clusterAnchor(n.data?.type)
+      n.x = a.x + (Math.random() - 0.5) * 160
+      n.y = a.y + (Math.random() - 0.5) * 160
+    }
+    if (!n.position) n.position = { x: n.x, y: n.y }
   }
   const f = { repel: -90, linkDistance: 70, centerStrength: 0.3, ...forces }
   const sim = forceSimulation(nodes)
@@ -27,8 +52,10 @@ function layoutForce(nodes, edges, forces) {
         .strength(0.35)
     )
     .force('charge', forceManyBody().strength(f.repel))
-    .force('center', forceCenter(0, 0).strength(f.centerStrength))
-    .force('collide', forceCollide().radius((d) => nodeRadius(d, degree) + 6))
+    .force('center', forceCenter(0, 0).strength(f.centerStrength * 0.15))
+    .force('clusterX', forceX((d) => (degree.get(d.id) > 0 ? clusterAnchor(d.data?.type).x : d.x)).strength(0.12))
+    .force('clusterY', forceY((d) => (degree.get(d.id) > 0 ? clusterAnchor(d.data?.type).y : d.y)).strength(0.12))
+    .force('collide', forceCollide().radius((d) => nodeRadius(d, degree) + 14))
     .stop()
   sim.tick(300)
   for (const n of nodes) n.position = { x: n.x, y: n.y }
@@ -109,30 +136,26 @@ function applyEdgeChanges(changes, edges) {
   return next
 }
 
-// Per-theme type colors. The server palette only guarantees contrast on dark;
-// light theme uses darker variants (WCAG AA on white/ blended badge, verified
-// with check_contrast). Unknown types fall back to node.data.color.
-export const TYPE_STYLES = {
-  dark: {
-    FACT: '#34d399',
-    DECISION: '#22d3ee',
-    RULE: '#a78bfa',
-    CORRECTION: '#fbbf24',
-    INFERENCE: '#cbd5e1',
-    skill: '#f472b6',
-  },
-  light: {
-    FACT: '#047857',
-    DECISION: '#155e75',
-    RULE: '#7c3aed',
-    CORRECTION: '#92400e',
-    INFERENCE: '#475569',
-    skill: '#be185d',
-  },
+// Per-theme type colors, sourced from the CSS variables in index.css so the
+// palette lives in one place. Light theme uses darker variants (WCAG AA on
+// white). Unknown types fall back to node.data.color.
+const TYPE_VARS = {
+  FACT: '--fact',
+  DECISION: '--decision',
+  RULE: '--rule',
+  CORRECTION: '--correction',
+  INFERENCE: '--inference',
+  skill: '--skill',
+  note: '--note',
 }
 
 export function typeColor(type, theme, fallback) {
-  return TYPE_STYLES[theme]?.[type] || fallback || '#7c3aed'
+  const v = TYPE_VARS[type]
+  if (v && typeof document !== 'undefined') {
+    const c = getComputedStyle(document.documentElement).getPropertyValue(v).trim()
+    if (c) return c
+  }
+  return fallback || '#9b7bff'
 }
 
 export const useGraphStore = create((set, get) => ({

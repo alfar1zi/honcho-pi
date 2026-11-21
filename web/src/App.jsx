@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from 'react'
+import { ReactFlow, Background, Controls, MiniMap } from '@xyflow/react'
 import { SearchX } from 'lucide-react'
-import { useGraphStore, neighborhood } from './store.js'
+import { useGraphStore, neighborhood, typeColor } from './store.js'
 import { Toolbar } from './components/Toolbar.jsx'
 import { DetailPanel } from './components/DetailPanel.jsx'
 import { KeyboardHandler } from './components/KeyboardHandler.jsx'
@@ -62,16 +63,25 @@ export default function App() {
   const visibleEdges = useMemo(() => edges.filter((e) => visibleIds.has(e.source) && visibleIds.has(e.target)), [edges, visibleIds])
 
   const focusId = useGraphStore((s) => s.hoverId) || selectedId
+  // Threads, not wires: thin low-opacity filaments like the mindcorpus brain
+  // render. Edge kind labels ("similar"/"family") are noise at this density;
+  // the connection itself is the information. Hover lifts the whole thread.
   const styledEdges = useMemo(() => {
     return visibleEdges.map((e) => {
       const active = !!focusId && (e.source === focusId || e.target === focusId)
       return {
         ...e,
+        label: undefined,
+        labelStyle: undefined,
+        labelBgStyle: undefined,
         animated: false,
         style: {
           stroke: active ? 'var(--accent)' : 'var(--edge)',
-          strokeWidth: active ? 1.6 : 0.7,
-          opacity: focusId ? (active ? 1 : 0.08) : 0.4,
+          strokeWidth: active ? 1.4 : 0.9,
+          opacity: focusId ? (active ? 0.95 : 0.05) : 0.85,
+          filter: active
+            ? 'drop-shadow(0 0 3px var(--accent))'
+            : 'drop-shadow(0 0 2px color-mix(in srgb, var(--edge) 80%, transparent))',
         },
       }
     })
@@ -100,13 +110,13 @@ export default function App() {
         minZoom={0.05}
         maxZoom={2}
       >
-        <Background color={theme === 'dark' ? '#30363d' : '#e2e8f0'} gap={24} size={1} />
+        <Background color="transparent" />
         <Controls position="bottom-right" showInteractive={false} />
         <MiniMap
           position="bottom-left"
           pannable
           zoomable
-          nodeColor={(n) => n.data?.color || '#7c3aed'}
+          nodeColor={(n) => typeColor(n.data?.type, theme, n.data?.color)}
           nodeBorderRadius={6}
           maskColor="var(--mask)"
           style={{ width: 160, height: 110, background: 'var(--surface)' }}

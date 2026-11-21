@@ -1,18 +1,27 @@
 @import "tailwindcss";
 
+/* Palette pulled from the mindcorpus reference (/tmp/mindcorpus-ref):
+   near-black canvas #0d0d10, panel #16161b, categorical l0-l7 spectrum.
+   Category colors are information (record type), not decoration. */
 :root,
 :root[data-theme="dark"] {
-  --bg: #0d1117;
-  --surface: #161b22;
-  --surface-2: #1c2129;
-  --border: #30363d;
-  --text: #e6edf3;
-  --text-muted: #8b949e;
-  --accent: #7c3aed;
-  --accent-2: #06b6d4;
-  --edge: #38404c;
-  --grid: #30363d;
-  --mask: rgba(13, 17, 23, 0.8);
+  --bg: #0d0d10;
+  --surface: #16161b;
+  --surface-2: #1e1e25;
+  --border: #2a2a33;
+  --text: #f2f3f5;
+  --text-muted: #8f949b;
+  --accent: #9b7bff;
+  --accent-2: #2ee6d6;
+  --edge: #3a3a45;
+  --mask: rgba(13, 13, 16, 0.8);
+  --fact: #7cff6b;
+  --decision: #2ee6d6;
+  --rule: #9b7bff;
+  --correction: #ff9f1c;
+  --inference: #b6bac0;
+  --skill: #ff6bd6;
+  --note: #4da3ff;
 }
 
 :root[data-theme="light"] {
@@ -25,8 +34,14 @@
   --accent: #7c3aed;
   --accent-2: #0891b2;
   --edge: #cbd5e1;
-  --grid: #e2e8f0;
   --mask: rgba(248, 250, 252, 0.8);
+  --fact: #047857;
+  --decision: #155e75;
+  --rule: #7c3aed;
+  --correction: #92400e;
+  --inference: #475569;
+  --skill: #be185d;
+  --note: #1d4ed8;
 }
 
 html, body, #root {
@@ -37,6 +52,10 @@ html, body, #root {
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   overflow: hidden;
   transition: background 0.2s ease, color 0.2s ease;
+}
+
+.font-meta {
+  font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace;
 }
 
 mark {
@@ -61,4 +80,9 @@ mark {
 }
 .react-flow__controls button svg {
   fill: var(--text);
+}
+
+/* Label halo: text stays readable over edges without a solid chip. */
+.node-label {
+  text-shadow: 0 0 4px var(--bg), 0 0 4px var(--bg), 0 1px 2px var(--bg);
 }

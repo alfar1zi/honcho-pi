@@ -102,12 +102,37 @@ export function Toolbar() {
   const fitView = useGraphStore((s) => s.fitView)
   const [settingsOpen, setSettingsOpen] = useState(false)
 
+  const typeCounts = useMemo(() => {
+    const counts = new Map()
+    for (const n of nodes) {
+      const t = n.data.type || 'note'
+      counts.set(t, (counts.get(t) || 0) + 1)
+    }
+    const ordered = CHIP_ORDER.filter((t) => counts.has(t)).map((t) => [t, counts.get(t)])
+    const rest = [...counts.entries()].filter(([t]) => !CHIP_ORDER.includes(t))
+    return [...ordered, ...rest]
+  }, [nodes])
+
+  const addNode = () => {
+    const id = `n-${Date.now()}`
+    setNodes([
+      ...nodes,
+      {
+        id,
+        type: 'graphNode',
+        position: { x: 200 + Math.random() * 200, y: 200 + Math.random() * 200 },
+        data: { label: 'New node', type: 'note', color: '#7c3aed' },
+      },
+    ])
+    setTimeout(persist, 0)
+  }
+
   return (
     <div className="absolute top-4 left-4 right-4 flex items-center gap-2 z-10 pointer-events-none flex-wrap">
       <div className="flex items-center gap-1.5 bg-[var(--surface)] border border-[var(--border)] rounded-lg px-2.5 py-1.5 pointer-events-auto">
         <Network size={15} className="text-[var(--accent)]" />
         <span className="text-[13px] font-semibold">honcho-pi</span>
-        <span className="text-[11px] text-[var(--text-muted)] ml-1">
+        <span className="text-[11px] text-[var(--text-muted)] ml-1 font-meta">
           {nodes.length} nodes · {edges.length} edges
         </span>
       </div>

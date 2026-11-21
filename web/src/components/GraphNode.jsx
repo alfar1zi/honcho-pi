@@ -61,16 +61,21 @@ export function GraphNode({ id, data, selected }) {
           width: r * 2,
           height: r * 2,
           background: color,
-          boxShadow: selected || hoverId === id ? `0 0 12px 2px ${color}` : 'none',
+          boxShadow: selected || hoverId === id
+            ? `0 0 10px 1px color-mix(in srgb, ${color} 70%, transparent)`
+            : `0 0 6px 0 color-mix(in srgb, ${color} 35%, transparent)`,
           ...(selected ? { '--tw-ring-color': color } : {}),
         }}
       />
-      <div
-        className="absolute left-full ml-2 whitespace-nowrap text-[11px] pointer-events-none select-none"
-        style={{ color: 'var(--text)', opacity: focusId && !dimmed ? 1 : 0.75 }}
-      >
-        <Highlight text={data.label} query={matchesSearch ? searchQuery : ''} />
-      </div>
+      {(deg >= 4 || focusId === id || connected.has(id) || selected || (q && matchesSearch)) && (
+        <div
+          className="node-label absolute left-full ml-2 whitespace-nowrap text-[11px] pointer-events-none select-none max-w-[140px] truncate"
+          style={{ color: 'var(--text)', opacity: focusId && !dimmed ? 1 : 0.8 }}
+          title={data.label}
+        >
+          <Highlight text={data.label} query={matchesSearch ? searchQuery : ''} />
+        </div>
+      )}
       <Handle type="source" position={Position.Bottom} className="!w-px !h-px !border-0 !opacity-0" />
     </button>
   )
