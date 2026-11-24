@@ -167,16 +167,25 @@ omp-memory overview                         # the universe, in your browser
 
 ## What the bench shows
 
-Measured, not claimed (harness in `bench/`, pinned corpus, rerunnable):
+Measured, not claimed. Two tiers, kept separate because their metrics are not comparable:
 
-- **Update-correctness 4/4, freshness ~8ms.** After a correction, recall serves the new
-  fact, the old content is gone, a second update wins again, and never-stored facts are
-  abstained. Published comparisons: Zep's freshness median is 162.7s and it passes 8/24
-  update questions; mem0 v3 is ADD-only and never invalidates.
-- **Retrieval hit@1 1.0** on 2000 synthetic records with hard distractors, p95 < 3ms.
-- **Weight tuning is evidence-backed**: five ranking arms raced on partial-evidence
-  probes; the incumbent wins, PPR expansion earns its keep (+0.01 hit@1 over no-PPR).
-  No weight changes without a run that beats the incumbent.
+**External, labeled** (`bench/EXTERNAL.md`, LongMemEval oracle, SHA-pinned, 479 questions):
+evidence retrieval R@5 **0.7098**, hit@1 **0.4843**. Strongest on knowledge-update
+(0.9028 R@5) and assistant-recall (0.8571); weakest on short user preferences
+(0.1333 R@5) -- an honest, actionable defect, not a number to hide.
+This measures **evidence retrieval**, not QA accuracy or LoCoMo F1; no vendor
+comparison is implied.
+
+**Internal, self-referential** (`bench/RESULTS.md`, pinned synthetic corpus):
+update-correctness 4/4, freshness ~8ms, R@5=1.0 saturated -- useful for
+regression and latency, NOT a quality claim. Five ranking arms raced on
+partial-evidence probes; incumbent wins, PPR earns +0.01 hit@1 over no-PPR.
+No weight changes without a run that beats the incumbent.
+
+Published numbers (Zep freshness 162.7s / 8-of-24 updates; mem0 v3 ADD-only)
+come from vendor reports and are **not** directly comparable to our metrics.
+Mem0's current code does implement update and delete with history events;
+the "never invalidates" phrasing described an older published snapshot.
 
 ## Connect your agent
 
