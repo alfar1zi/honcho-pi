@@ -1234,16 +1234,38 @@ def find_similar(conn: sqlite3.Connection, content: str, limit: int = 5,
     return hits[:limit]
 
 
-def _upsertable(candidate: dict, norm: str) -> bool:
-    """Both guards: a high score and identical numbers.
+def _idf(conn: sqlite3.Connection, token: str) -> float:
+    """Inverse document frequency of a token across stored records.
 
-    The score guard keeps genuinely different statements apart; the number
-    guard stops a one-character version bump from collapsing into its
-    predecessor at a score the threshold alone would accept.
+    Stdlib-only IDF over the FTS index: log(1 + N / (1 + df)). Rare
+    tokens get a high value, common ones a low one.
     """
+    total = conn.execute("SELECT COUNT(*) FROM records").fetchone()[0] or 1
+    df = conn.execute(
+        "SELECT COUNT(*) FROM records WHERE content LIKE ?", (f"%{token}%",)).fetchone()[0]
+    return math.log(1.0 + total / (1.0 + df))
+
+
+def _idf_veto(conn: sqlite3.Connection, a: str, b: str, theta: float = 2.0) -> bool:
+    """Claude-mem #3038 style: a rare discriminating token present on only
+    one side vetoes a merge regardless of lexical similarity."""
+    sa = set(_tokens(a))
+    sb = set(_tokens(b))
+    for t in sa ^ sb:
+        if _idf(conn, t) > theta:
+            return True
+    return False
+
+
+def _upsertable(candidate: dict, norm: str, conn: sqlite3.Connection = None) -> bool:
+    """Guards: high score, identical numbers, and no rare-token veto."""
     if float(candidate.get("score") or 0.0) < UPSERT_THRESHOLD:
         return False
-    return _numeric_tokens(candidate.get("content") or "") == _numeric_tokens(norm)
+    if _numeric_tokens(candidate.get("content") or "") != _numeric_tokens(norm):
+        return False
+    if conn is not None and _idf_veto(conn, candidate.get("content") or "", norm):
+        return False
+    return True
 
 
 def decide(conn: sqlite3.Connection, content: str, rtype: str = "FACT", limit: int = 5,
@@ -1286,7 +1308,7 @@ def decide(conn: sqlite3.Connection, content: str, rtype: str = "FACT", limit: i
                 "similar": [], "advisory": ""}
 
     similar = find_similar(conn, norm, limit=limit, threshold=threshold, rtype=rtype)
-    mergeable = [c for c in similar if upsert and _upsertable(c, norm)]
+    mergeable = [c for c in similar if upsert and _upsertable(c, norm, conn)]
     if mergeable:
         best = mergeable[0]
         return {"action": "update", "id": best["id"], "reason": "similar",
@@ -2671,14 +2693,16 @@ def heat_parts(row: dict, signals: list, now=None) -> dict:
     signals = signals or []
     updated = _parse_ts(row.get("updated_at"))
     age_days = max(0.0, (now - updated).total_seconds() / 86400.0) if updated else 0.0
-    # Park et al. 2023 use an exponential recency term with hourly halving;
-    # here recency follows the same power law as decay so the two curves
-    # agree: heat should not say a record is warm on a different timescale
-    # than the one apply_decay cools it on.
+    # ACT-R base-level activation (Anderson 1993): B = ln(sum (t - t_i)^-d)
+    # approximated by the Park recency power law scaled by recency frequency.
+    # Reinforcement count (n) lifts the base level: more accesses = higher
+    # activation. This is the one remaining Park-term refinement (item 4
+    # of the adopted queue) - kept conservative (0.15 weight on log-count).
     tau = float(row.get("decay_tau") or 0) or HEAT_DECAY_POWER_TAU_DAYS
     recency = (1.0 + age_days / tau) ** -HEAT_DECAY_POWER_BETA
 
     successes = [s for s in signals if s.get("signal") == "success"]
+    n_access = max(1, len(successes) + 1)
     sources = []
     for s in successes:
         name = normalize_content(s.get("source") or "").casefold()
@@ -2694,6 +2718,7 @@ def heat_parts(row: dict, signals: list, now=None) -> dict:
                      + 0.5 * (1.0 - math.exp(-max(0.0, net_delta) / 0.1)))
 
     confidence = min(1.0, max(0.0, float(row.get("confidence") or 0.0)))
+    recency = min(1.0, recency + 0.15 * math.log(n_access) / math.log(10))
     heat = (HEAT_WEIGHTS["confidence"] * confidence
             + HEAT_WEIGHTS["recency"] * recency
             + HEAT_WEIGHTS["reinforcement"] * reinforcement)
