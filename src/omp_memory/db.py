@@ -2011,7 +2011,7 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
                r.created_at, r.updated_at, r.session_id, r.project_id, r.parent_id,
                r.about_peer, r.superseded_by, r.importance, r.cue, r.decay_tau,
                r.stale, r.valid_from, r.valid_until,
-               bm25(records_fts) / CASE r.type
+               bm25(records_fts, 5.0, 1.0, 0.5) / CASE r.type
                    WHEN 'RULE' THEN 1.4 WHEN 'CORRECTION' THEN 1.4
                    WHEN 'DECISION' THEN 1.2 WHEN 'WORKFLOW' THEN 1.2
                    WHEN 'PROCEDURAL' THEN 1.2 WHEN 'INTENT' THEN 1.0
