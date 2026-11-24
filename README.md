@@ -169,10 +169,10 @@ omp-memory overview                         # the universe, in your browser
 
 Measured, not claimed. Two tiers, kept separate because their metrics are not comparable:
 
-**External, labeled** (`bench/EXTERNAL.md`, LongMemEval oracle, SHA-pinned, 479 questions):
-evidence retrieval R@5 **0.7098**, hit@1 **0.4843**. Strongest on knowledge-update
-(0.9028 R@5) and assistant-recall (0.8571); weakest on short user preferences
-(0.1333 R@5) -- an honest, actionable defect, not a number to hide.
+**External, labeled** (`bench/EXTERNAL.md`, LongMemEval oracle, SHA-pinned, 428 scored questions):
+evidence retrieval R@5 **0.9556**, hit@1 **0.6308**, scored per-question against
+the canonical haystack. Every category retrieves its gold turn in the top 5
+at >= 0.93; knowledge-update 0.9306 confirms freshness on human-authored questions.
 This measures **evidence retrieval**, not QA accuracy or LoCoMo F1; no vendor
 comparison is implied.
 

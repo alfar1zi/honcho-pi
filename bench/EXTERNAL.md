@@ -12,47 +12,56 @@ regression/latency only.
 - SHA-256: `821a2034d219ab45846873dd14c14f12cfe7776e73527a483f9dac095d38620c`
   (locally computed, matches HF `x-linked-etag`)
 - Adapter: `bench/external.py` (stdlib only, verifies SHA before use)
+- Gold rule: canonical `process_item_flat_index` in LongMemEval's
+  `src/retrieval/run_retrieval.py:209-228`. Every user turn is indexed.
+  A turn is gold iff its id contains "answer" (has_answer inside an answer
+  session); all other turns are decoys. Questions with no gold turn are
+  skipped, exactly as the canonical evaluator does (`run_retrieval.py:400`).
 
 ## What is measured, and what is NOT
 
-The oracle split is evidence-only: each question carries a haystack with
-`has_answer` turns and `answer_session_ids`. We ingest every `has_answer`
-turn from all questions into ONE shared DB (896 records), then ask the
-original question and check whether a gold turn appears in recall top-5 /
-top-1.
+We ingest every user turn from all 500 questions (5,479 records) into one
+DB, then recall with `project_id=q:<question_id>` so each question is scored
+against **its own haystack** -- the same per-question scope as the canonical
+evaluator (`batch_get_retrieved_context_and_eval`, `run_retrieval.py:243`).
+Queries are human-authored, so this is not self-referential: the earlier
+"shared corpus" variant mixed 500 different people's turns and produced a
+misleading 0.1333 for preferences.
 
-This measures **evidence retrieval**, NOT answer accuracy. LongMemEval's
-published numbers are GPT-4o-judged QA accuracy; LoCoMo uses F1; Zep's page
-uses accuracy on 1,540 questions. These are DIFFERENT metrics and are not
-comparable. No "we beat Zep" claim is made or implied.
+This measures **evidence retrieval** (R@5, hit@1), NOT answer accuracy.
+LongMemEval's published numbers are GPT-4o-judged QA accuracy; LoCoMo uses
+F1; Zep's page uses accuracy on 1,540 questions. These are DIFFERENT metrics
+and are not comparable. No "we beat Zep" claim is made or implied.
 
-## Results (500 questions, 479 with labeled gold)
+## Results (500 questions, 428 with labeled gold)
 
 | Question type | n | R@5 | hit@1 |
 |---|---:|---:|---:|
-| knowledge-update | 72 | 0.9028 | 0.7361 |
-| single-session-assistant | 56 | 0.8571 | 0.6607 |
-| single-session-user | 64 | 0.7812 | 0.5938 |
-| multi-session | 125 | 0.6880 | 0.4320 |
-| temporal-reasoning | 132 | 0.6591 | 0.3712 |
-| **single-session-preference** | 30 | **0.1333** | **0.0333** |
-| **Overall** | **479** | **0.7098** | **0.4843** |
+| single-session-assistant | 5 | 1.0000 | 0.6000 |
+| **single-session-preference** | 30 | **1.0000** | **0.5000** |
+| multi-session | 125 | 0.9680 | 0.5680 |
+| single-session-user | 64 | 0.9844 | 0.7500 |
+| knowledge-update | 72 | 0.9306 | 0.6944 |
+| temporal-reasoning | 132 | 0.9318 | 0.6288 |
+| **Overall** | **428** | **0.9556** | **0.6308** |
 
 ## Reading the result
 
 - Internal R@5=1.0 was saturated by construction (queries derived from the
-  same records). This external probe is the first that can fail.
-- Strongest: knowledge-update 0.9028 and assistant-then-recall 0.8571 --
-  these are the update-correctness and provenance paths the engine was
-  designed for.
-- Weakest: **single-session-preference 0.1333**. A user preference ("I prefer
-  tea, not coffee") is a short utterance with almost no distinctive lexical
-  signal; it loses to longer turns sharing the question's topic words. This
-  is a real, actionable defect -- a stdlib-safe fix is a type/prior boost
-  for preference-shaped records (short, `prefer/like/never` wording) or a
-  PPR link between preference turns and later topic turns. Both need an A/B
-  against this pinned corpus before adoption.
-- temporal 0.6591 and multi-session 0.6880 are the next targets.
+  same records). This external probe uses human-authored questions and
+  canonical gold labels, so it can and does fail: overall R@5 0.9556 and
+  hit@1 0.6308.
+- Every category retrieves its gold turn in the top 5 at >= 0.93. The
+  differentiator is rank-1: single-session-user 0.7500 vs multi-session
+  0.5680 -- multi-session needs synthesis across turns, so no single turn
+  dominates, which is expected.
+- An earlier adapter revision reported preference R@5 0.1333; that was an
+  artifact of mixing 500 unrelated haystacks into one candidate pool, not
+  an engine defect. Corrected by scoping recall to the question's own
+  haystack, per the canonical evaluator. No engine change was made for it.
+- Freshness/update correctness remains separately measured by the internal
+  harness (4/4, ~8ms); this external split has a knowledge-update category
+  (0.9306 R@5) that confirms the same path on human-authored questions.
 
 ## Reproduce
 

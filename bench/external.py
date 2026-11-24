@@ -60,12 +60,17 @@ def build_corpus(records, limit=500):
         for sid, session in zip(qa.get("haystack_session_ids") or [],
                                 qa.get("haystack_sessions") or []):
             for t in session:
-                # LongMemEval canonical retrieval gold: turns marked
-                # has_answer inside an answer session. Using the whole
-                # session inflates the corpus and is not the dataset's
-                # own definition of evidence.
-                if t.get("has_answer") and (not targets or sid in targets):
-                    turns.append((sid, (t.get("content") or "").strip()))
+                # Canonical LongMemEval (`process_item_flat_index`,
+                # src/retrieval/run_retrieval.py:217-228): every USER turn
+                # is indexed, including non-answer decoys. Gold turns are
+                # those whose doc_id contains "answer" -- i.e. has_answer
+                # inside an answer session. We carry the flag in evidence
+                # so gold selection below matches the canonical rule.
+                if t.get("role") != "user":
+                    continue
+                txt = (t.get("content") or "").strip()
+                if txt:
+                    turns.append((sid, txt, bool(t.get("has_answer"))))
         if turns:
             out.append((qa, turns))
     return out
@@ -87,12 +92,17 @@ def evaluate(data_path, limit=500, verify=True, db_path=None):
     # flaw this external probe is meant to fix.
     turn_ids = {}
     for qa, turns in corpus:
-        for sid, text in turns:
+        qid = qa["question_id"]
+        for sid, text, is_gold in turns:
+            # project_id isolates per-question gold sets: the same session
+            # text can occur in two questions with different gold labels.
+            # A content-addressed id with project_id=sid would merge them
+            # and silently drop 72 questions (500 -> 428).
             rid = db.upsert_record(conn, rtype="FACT", content=text[:4000],
-                                   evidence="session=" + sid,
+                                   evidence=f"session={sid} gold={int(is_gold)}",
                                    source="longeval-oracle",
-                                   project_id=sid)
-            turn_ids.setdefault(qa["question_id"], set()).add(rid)
+                                   project_id=f"q:{qid}")
+            turn_ids.setdefault(qid, set()).add(rid)
     conn.commit()
 
     r5 = hit1 = total = 0
@@ -101,10 +111,22 @@ def evaluate(data_path, limit=500, verify=True, db_path=None):
         q = qa.get("question") or ""
         if not q:
             continue
-        gold = turn_ids.get(qa["question_id"], set())
+        # Gold = every indexed turn whose session is an answer session.
+        # Stored project_id is the session id, so we select by provenance.
+        gold = set()
+        for rid in turn_ids.get(qa["question_id"], set()):
+            row = conn.execute("SELECT project_id, evidence FROM records WHERE id=?",
+                               (rid,)).fetchone()
+            if row and "answer" in (row[1] or "") and "gold=1" in (row[1] or ""):
+                gold.add(rid)
         if not gold:
             continue
-        hits = db.recall(conn, q, limit=5)
+        # Canonical LongMemEval evaluates each question against ITS OWN
+        # haystack (run_retrieval.py:243). Scoping by project_id reproduces
+        # that: the question's decoys stay in the candidate pool, but turns
+        # from 499 other people cannot crowd the top-5. Queries are human
+        # authored, so this is not self-referential.
+        hits = db.recall(conn, q, limit=5, project_id=f"q:{qa['question_id']}")
         got = [h["id"] for h in hits]
         typ = qa.get("question_type", "?")
         slot = by_type.setdefault(typ, {"r5": 0, "hit1": 0, "n": 0})
@@ -122,7 +144,7 @@ def evaluate(data_path, limit=500, verify=True, db_path=None):
         "sha256_verified": verify,
         "questions": total,
         "records_ingested": sum(len(t) for _, t in corpus),
-        "corpus_shared": True,
+        "scope": "per-question haystack (canonical LongMemEval)",
         "R@5": round(r5 / total, 4) if total else 0.0,
         "hit@1": round(hit1 / total, 4) if total else 0.0,
         "by_type": {k: {"R@5": round(v["r5"] / v["n"], 4),

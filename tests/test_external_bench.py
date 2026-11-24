@@ -53,4 +53,7 @@ def test_build_corpus_uses_canonical_gold_label():
     assert len(corpus) == 1
     meta, turns = corpus[0]
     assert meta["question_id"] == "q1"
-    assert turns == [("s2", "gold turn")]
+    # Canonical evaluator indexes every user turn; gold selection happens
+    # later via answer_session_ids, not at ingest time.
+    assert ("s2", "gold turn", True) in turns
+    assert ("s1", "no answer here", False) in turns
