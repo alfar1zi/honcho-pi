@@ -826,7 +826,13 @@ def _rebuild_records_check(conn: sqlite3.Connection) -> bool:
         conn.execute(_RECORDS_DDL.replace(
             "CREATE TABLE IF NOT EXISTS records", "CREATE TABLE records_new"))
         carry = [r[1] for r in conn.execute("PRAGMA table_info(records)").fetchall()]
-        shared = ",".join(c for c in carry if c in _RECORD_COLUMNS)
+        # rowid must travel with the row: the FTS index is keyed on it, so a
+        # rebuild that lets SQLite assign fresh rowids strands every FTS row
+        # on the old number. The stale rows then collide with new inserts
+        # ("constraint failed" on records_ai) and that write -- and every
+        # write after it -- fails. Reproduced on a live store: 26 orphans,
+        # next insert rowid 966 already taken by an orphan.
+        shared = "rowid," + ",".join(c for c in carry if c in _RECORD_COLUMNS)
         conn.execute(f"INSERT INTO records_new ({shared})"
                      f" SELECT {shared} FROM records")
         conn.execute("DROP TABLE records")
@@ -868,7 +874,15 @@ def _reconcile_fts(conn: sqlite3.Connection):
         conn.execute(f"CREATE INDEX IF NOT EXISTS {name} ON records({col})")
     fts_count = conn.execute("SELECT COUNT(*) FROM records_fts").fetchone()[0]
     rec_count = conn.execute("SELECT COUNT(*) FROM records").fetchone()[0]
-    if fts_count != rec_count:
+    # Count equality is not health. A table rebuild that reassigned rowids
+    # leaves the same NUMBER of FTS rows pointing at rowids the table no
+    # longer has, so the counts still match while every future insert
+    # collides with a stranded row. Compare identities instead.
+    stale = conn.execute(
+        "SELECT COUNT(*) FROM records_fts f LEFT JOIN records r"
+        " ON r.rowid = f.rowid AND r.id = f.id WHERE r.rowid IS NULL"
+    ).fetchone()[0]
+    if fts_count != rec_count or stale:
         conn.execute("DELETE FROM records_fts")
         conn.execute(
             "INSERT INTO records_fts(rowid, id, content, evidence, tags)"
