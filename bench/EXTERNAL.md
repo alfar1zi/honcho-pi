@@ -43,14 +43,14 @@ and are not comparable. No "we beat Zep" claim is made or implied.
 | single-session-user | 64 | 0.9844 | 0.7500 |
 | knowledge-update | 72 | 0.9306 | 0.6944 |
 | temporal-reasoning | 132 | 0.9318 | 0.6288 |
-| **Overall** | **428** | **0.9556** | **0.6308** |
+| **Overall** | **428** | **0.9556** | **0.6285** |
 
 ## Reading the result
 
 - Internal R@5=1.0 was saturated by construction (queries derived from the
   same records). This external probe uses human-authored questions and
   canonical gold labels, so it can and does fail: overall R@5 0.9556 and
-  hit@1 0.6308.
+  hit@1 0.6285.
 - Every category retrieves its gold turn in the top 5 at >= 0.93. The
   differentiator is rank-1: single-session-user 0.7500 vs multi-session
   0.5680 -- multi-session needs synthesis across turns, so no single turn

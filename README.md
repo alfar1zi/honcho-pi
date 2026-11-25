@@ -169,12 +169,12 @@ omp-memory overview                         # the universe, in your browser
 
 Measured, not claimed. Two tiers, kept separate because their metrics are not comparable:
 
-**External, labeled** (`bench/EXTERNAL.md`, LongMemEval oracle, SHA-pinned, 428 scored questions):
-evidence retrieval R@5 **0.9556**, hit@1 **0.6308**, scored per-question against
-the canonical haystack. Every category retrieves its gold turn in the top 5
-at >= 0.93; knowledge-update 0.9306 confirms freshness on human-authored questions.
-This measures **evidence retrieval**, not QA accuracy or LoCoMo F1; no vendor
-comparison is implied.
+**External, labeled** (`bench/EXTERNAL.md`, two datasets, SHA-pinned). LongMemEval
+oracle, 428 scored questions: evidence retrieval R@5 **0.9556**, hit@1 **0.6285**,
+every category >= 0.93 R@5. LoCoMo (1,977 QA, per-turn gold): hit@1 **0.3647**,
+R@10 0.60-0.70 -- the lexical ceiling, since LoCoMo questions share no words with
+their answers. This measures **evidence retrieval**, not QA accuracy or F1; no
+vendor comparison is implied.
 
 **Internal, self-referential** (`bench/RESULTS.md`, pinned synthetic corpus):
 update-correctness 4/4, freshness ~8ms, R@5=1.0 saturated -- useful for
