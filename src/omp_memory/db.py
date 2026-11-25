@@ -425,7 +425,18 @@ def similarity(a: str, b: str) -> float:
 # --- backups -----------------------------------------------------------------
 
 def rotate_backups():
-    backups = sorted(glob.glob(os.path.join(BACKUP_DIR, "memory.db.bak.*")), key=os.path.getmtime)
+    """Keep the newest MAX_BACKUPS and delete the rest.
+
+    Sorted by (mtime, name): several backups can land in the same second,
+    and mtime alone then leaves the deletion order arbitrary -- an older
+    snapshot could survive while a newer one was deleted. The filename
+    carries the timestamp and a monotonic suffix, so it breaks the tie
+    correctly.
+    """
+    def _key(path):
+        return (os.path.getmtime(path), os.path.basename(path))
+
+    backups = sorted(glob.glob(os.path.join(BACKUP_DIR, "memory.db.bak.*")), key=_key)
     while len(backups) > MAX_BACKUPS:
         try:
             os.remove(backups.pop(0))
@@ -443,9 +454,13 @@ def backup_db(src: str) -> str:
     if not os.path.exists(src):
         return ""
     ensure_dirs()
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    # Microseconds plus a collision loop: a seconds-resolution stamp made
+    # two backups in the same second overwrite each other, and rotation
+    # then kept an arbitrary subset instead of the newest N.
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
     for attempt in range(5):
-        dst = os.path.join(BACKUP_DIR, f"memory.db.bak.{stamp}" + (f".{attempt}" if attempt else ""))
+        dst = os.path.join(BACKUP_DIR,
+                           f"memory.db.bak.{stamp}" + (f".{attempt}" if attempt else ""))
         if os.path.exists(dst):
             continue
         try:

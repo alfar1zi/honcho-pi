@@ -11,6 +11,7 @@ Four defects, each verified against a primary source before the fix:
 4. _set_superseded set superseded_by but never closed valid_until, so an
    as_of query kept returning a fact whose window should have been shut.
 """
+import os
 import tempfile
 
 import pytest
@@ -410,3 +411,22 @@ def test_fts_rowid_stays_aligned_after_update(conn):
     assert orphans == 0
     assert conn.execute("SELECT COUNT(*) FROM records_fts").fetchone()[0] == \
         conn.execute("SELECT COUNT(*) FROM records").fetchone()[0]
+
+
+# --- backup rotation (loop 2) ------------------------------------------------
+
+def test_backups_are_unique_and_rotation_keeps_newest(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMP_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("OMP_MEMORY_BACKUP_DIR", str(tmp_path / "bak"))
+    monkeypatch.setattr(db, "MAX_BACKUPS", 3)
+    monkeypatch.setattr(db, "BACKUP_DIR", str(tmp_path / "bak"))
+    conn = db.connect(str(tmp_path / "m.db"))
+    db.init_db(conn)
+    db.remember(conn, "FACT", "rotation probe payload")
+    created = [db.backup_db(str(tmp_path / "m.db")) for _ in range(8)]
+    names = [os.path.basename(c) for c in created]
+    assert len(set(names)) == len(names), "backup names collided"
+    kept = sorted(os.listdir(tmp_path / "bak"))
+    assert len(kept) == 3
+    assert kept == sorted(names)[-3:], "rotation kept the wrong snapshots"
+    conn.close()
