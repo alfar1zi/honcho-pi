@@ -47,6 +47,30 @@ def load(path, verify=True):
         return json.load(f)
 
 
+_LOCOMO_DATE_RE = re.compile(r"(\d{1,2}):(\d{2})\s*(am|pm)\s+on\s+(\d{1,2})\s+(\w+),?\s+(\d{4})",
+                             re.I)
+_MONTHS = {m: i for i, m in enumerate(
+    ("january", "february", "march", "april", "may", "june", "july",
+     "august", "september", "october", "november", "december"), 1)}
+
+
+def parse_date(value: str) -> str:
+    """LoCoMo session dates look like "1:56 pm on 8 May, 2023".
+
+    Returns "" when unparseable, which upsert_record reads as "now" -- a
+    degraded stamp rather than a failed ingest.
+    """
+    match = _LOCOMO_DATE_RE.search(value or "")
+    if not match:
+        return ""
+    _hh, _mm, ampm, day, month, year = match.groups()
+    month_no = _MONTHS.get(month.lower())
+    if not month_no:
+        return ""
+    hour = int(_hh) % 12 + (12 if ampm.lower() == "pm" else 0)
+    return f"{int(year):04d}-{month_no:02d}-{int(day):02d}T{hour:02d}:00:00+00:00"
+
+
 def _sessions(conv):
     """Yield (session_key, date_string, turns) in ascending session order."""
     keys = [k for k in conv
@@ -77,7 +101,8 @@ def evaluate(data_path, verify=True, db_path=None, search_only=False):
                 rid = db.upsert_record(
                     conn, "FACT", (turn.get("text") or "")[:4000],
                     evidence=f"dia={did} speaker={turn.get('speaker', '')}",
-                    source="locomo", project_id=pid, verified=1, confidence=0.8)
+                    source="locomo", project_id=pid, verified=1, confidence=0.8,
+                    happened_at=parse_date(_date))
                 gold[(ci, did)] = rid
         for qa in convo.get("qa") or []:
             pass

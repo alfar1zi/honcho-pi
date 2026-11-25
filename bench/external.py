@@ -16,6 +16,7 @@ Run: PYTHONPATH= python3.12 bench/external.py [--data /tmp/lme_oracle.json] [--l
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -27,6 +28,23 @@ os.environ.setdefault("OMP_MEMORY_BACKUP_DIR", str(BENCH_DIR / "db" / "backups")
 from omp_memory import db  # noqa: E402
 
 EXPECTED_SHA256 = "821a2034d219ab45846873dd14c14f12cfe7776e73527a483f9dac095d38620c"
+
+
+_DATE_RE = re.compile(r"^(\d{4})/(\d{2})/(\d{2})")
+
+
+def parse_date(value: str) -> str:
+    """LongMemEval dates look like "2023/04/10 (Mon) 17:50", not ISO.
+
+    Returning "" when unparseable is deliberate: upsert_record treats an empty
+    happened_at as "now", so a malformed date degrades to the old behaviour
+    instead of raising mid-ingest.
+    """
+    match = _DATE_RE.match((value or "").strip())
+    if not match:
+        return ""
+    year, month, day = match.groups()
+    return f"{year}-{month}-{day}T00:00:00+00:00"
 
 
 def sha256(path):
@@ -57,6 +75,8 @@ def build_corpus(records, limit=500):
     for qa in records[:limit]:
         targets = set(qa.get("answer_session_ids") or [])
         turns = []
+        dates = dict(zip(qa.get("haystack_session_ids") or [],
+                         qa.get("haystack_dates") or []))
         for sid, session in zip(qa.get("haystack_session_ids") or [],
                                 qa.get("haystack_sessions") or []):
             for t in session:
@@ -70,7 +90,8 @@ def build_corpus(records, limit=500):
                     continue
                 txt = (t.get("content") or "").strip()
                 if txt:
-                    turns.append((sid, txt, bool(t.get("has_answer"))))
+                    turns.append((sid, txt, bool(t.get("has_answer")),
+                                  parse_date(dates.get(sid, ""))))
         if turns:
             out.append((qa, turns))
     return out
@@ -93,7 +114,7 @@ def evaluate(data_path, limit=500, verify=True, db_path=None):
     turn_ids = {}
     for qa, turns in corpus:
         qid = qa["question_id"]
-        for sid, text, is_gold in turns:
+        for sid, text, is_gold, when in turns:
             # project_id isolates per-question gold sets: the same session
             # text can occur in two questions with different gold labels.
             # A content-addressed id with project_id=sid would merge them
@@ -101,7 +122,8 @@ def evaluate(data_path, limit=500, verify=True, db_path=None):
             rid = db.upsert_record(conn, rtype="FACT", content=text[:4000],
                                    evidence=f"session={sid} gold={int(is_gold)}",
                                    source="longeval-oracle",
-                                   project_id=f"q:{qid}")
+                                   project_id=f"q:{qid}",
+                                   happened_at=when)
             turn_ids.setdefault(qid, set()).add(rid)
     conn.commit()
 
