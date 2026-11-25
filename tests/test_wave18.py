@@ -503,3 +503,14 @@ def test_reconcile_detects_stale_fts_rows_not_just_counts(conn):
     # and a fresh insert must not collide
     conn.commit()
     db.remember(conn, "FACT", "insert after repair gamma")
+
+
+# --- recall ordering (loop 7) ------------------------------------------------
+
+def test_recall_output_is_monotonic_in_score(conn):
+    """MMR selects the window; the window must still be ranked by score."""
+    for i in range(12):
+        db.remember(conn, "FACT", f"caroline support group record {i} about lgbtq", verified=1)
+    hits = db.recall(conn, "caroline lgbtq support group", limit=10)
+    scores = [h["score"] for h in hits]
+    assert scores == sorted(scores, reverse=True), f"not monotonic: {scores}"

@@ -2526,6 +2526,11 @@ def _mmr_select(scored: list, limit: int) -> list:
         chosen.append(pool[best_i])
         chosen_tokens |= tokens[best_i]
         remaining.remove(best_i)
+    # MMR decides WHICH items make the window; the window is still a ranking,
+    # so it must be ordered by relevance. Returning selection order made
+    # `recall` non-monotonic in score (observed 0.656 ahead of 0.667), so
+    # "top-1" meant "first pick by the diversity formula", not "best match".
+    chosen.sort(key=lambda item: -item[5])
     return chosen
 
 

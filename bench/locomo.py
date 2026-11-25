@@ -56,7 +56,7 @@ def _sessions(conv):
         yield k, conv.get(k + "_date_time", ""), conv[k]
 
 
-def evaluate(data_path, verify=True, db_path=None):
+def evaluate(data_path, verify=True, db_path=None, search_only=False):
     convs = load(data_path, verify=verify)
     path = db_path or os.environ["OMP_MEMORY_DB"]
     for suffix in ("", "-wal", "-shm"):
@@ -94,11 +94,15 @@ def evaluate(data_path, verify=True, db_path=None):
             want = {gold[(ci, d)] for d in ev if (ci, d) in gold}
             if not want:
                 continue
-            # search(), not recall(): this probe measures whether the
-            # right turn is findable at all. recall() adds PPR + MMR +
-            # cue/heat reranking on top, which is a different question and
-            # 3x the cost across ~2k probes.
-            hits = db.search(conn, q, limit=10, project_id=pid)
+            # recall() by default: it is what the MCP server actually serves.
+            # Measuring search() reported the lexical floor (hit@1 0.3647) and
+            # was then read as the engine's ability, which conflated two
+            # different things. --search-only restores the old probe for
+            # comparison, and the difference is the value PPR/MMR/heat add.
+            if search_only:
+                hits = db.search(conn, q, limit=10, project_id=pid)
+            else:
+                hits = db.recall(conn, q, limit=10, project_id=pid)
             ids = [h["id"] for h in hits]
             cat = _CATEGORY.get(qa.get("category"), "?")
             slot = stats.setdefault(cat, {"hit1": 0, "r10": 0, "n": 0})
@@ -112,6 +116,7 @@ def evaluate(data_path, verify=True, db_path=None):
     conn.close()
     return {
         "dataset": "snap-research/locomo locomo10.json",
+        "retriever": "search(lexical)" if search_only else "recall(ppr+mmr+heat)",
         "sha256_verified": verify,
         "questions": total,
         "records_ingested": len(gold),
@@ -127,8 +132,11 @@ def main():
     ap.add_argument("--data", default="/tmp/locomo10.json")
     ap.add_argument("--no-verify", action="store_true")
     ap.add_argument("--db", default=None)
+    ap.add_argument("--search-only", action="store_true",
+                    help="lexical floor only, for comparison")
     args = ap.parse_args()
-    print(json.dumps(evaluate(args.data, not args.no_verify, args.db),
+    print(json.dumps(evaluate(args.data, not args.no_verify, args.db,
+                              search_only=args.search_only),
                      indent=2, sort_keys=True))
     return 0
 
