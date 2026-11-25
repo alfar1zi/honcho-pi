@@ -21,6 +21,7 @@ CORE_MEMORY_PROVIDER_SENTINELS = frozenset({"", "default", "builtin", "built-in"
 
 
 def is_core_memory_provider(name: Optional[str]) -> bool:
+    """True when name means the built-in provider rather than a plugin."""
     return str(name or "").strip().lower() in CORE_MEMORY_PROVIDER_SENTINELS
 
 

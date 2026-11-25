@@ -244,6 +244,7 @@ _promotion_context = threading.local()
 # --- helpers -----------------------------------------------------------------
 
 def now_iso() -> str:
+    """Current UTC time as an ISO-8601 string (the store's timestamp format)."""
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -252,19 +253,23 @@ def sha(text: str) -> str:
 
 
 def ensure_dirs():
+    """Create the database and backup directories if missing."""
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     Path(BACKUP_DIR).mkdir(parents=True, exist_ok=True)
 
 
 def get_profile() -> str:
+    """Profile name used for identity text and context lookups."""
     return getattr(_profile_context, "profile", "default")
 
 
 def set_profile(profile: str):
+    """Switch the process-wide profile name."""
     _profile_context.profile = profile
 
 
 def clear_profile():
+    """Reset the profile name to the default for this process."""
     if hasattr(_profile_context, "profile"):
         delattr(_profile_context, "profile")
 
@@ -559,6 +564,7 @@ def store_version(conn: sqlite3.Connection) -> int:
 
 
 def integrity_check(conn: sqlite3.Connection) -> bool:
+    """SQLite full integrity_check: slower than quick_check, catches more."""
     return _run_check(conn, "integrity_check")
 
 
@@ -606,6 +612,7 @@ def _run_check(conn: sqlite3.Connection, pragma: str) -> bool:
 
 
 def quick_check(conn: sqlite3.Connection) -> bool:
+    """SQLite quick_check: True when the file is structurally sound."""
     return _run_check(conn, "quick_check")
 
 
@@ -1226,6 +1233,7 @@ def upsert_record(conn: sqlite3.Connection, rtype: str, content: str, evidence: 
                   tags: str = "", session_id: str = "", project_id: str = "",
                   parent_id: str = "", event_id: str = "",
                   happened_at: str = "") -> str:
+    """Insert or merge one record by content identity; returns its id."""
     if rtype not in VALID_TYPES:
         raise ValueError(f"invalid type: {rtype}")
     if not content:
@@ -2820,6 +2828,7 @@ def _snippet(content: str, query: str, width: int = SNIPPET_CHARS) -> str:
 
 
 def get_record(conn: sqlite3.Connection, record_id: str):
+    """One record as a dict, or None when the id is absent."""
     row = conn.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone()
     return dict(row) if row else None
 
@@ -2881,6 +2890,7 @@ def digest(conn: sqlite3.Connection, budget: int = 2000,
 
 def list_records(conn: sqlite3.Connection, rtype: str = None, project_id: str = None,
                  limit: int = 100, offset: int = 0):
+    """Records filtered by type and/or project, newest first."""
     sql = "SELECT * FROM records"
     params = []
     conds = []
@@ -3325,6 +3335,7 @@ def reinforce(conn: sqlite3.Connection, record_id: str, signal: str,
 
 def start_session(conn: sqlite3.Connection, session_id: str, project_id: str = "",
                   parent_id: str = "", profile: str = "") -> str:
+    """Record a session start so capture can attribute records to it."""
     conn.execute("""
         INSERT OR REPLACE INTO sessions (id, parent_id, started_at, project_id, summary, capture_hash, profile)
         VALUES (?, ?, ?, ?, '', '', ?)
@@ -3334,6 +3345,7 @@ def start_session(conn: sqlite3.Connection, session_id: str, project_id: str = "
 
 
 def end_session(conn: sqlite3.Connection, session_id: str, summary: str = "", capture_hash: str = ""):
+    """Close a session and store its summary and capture hash."""
     conn.execute("""
         UPDATE sessions SET ended_at=?, summary=?, capture_hash=? WHERE id=?
     """, (now_iso(), summary, capture_hash, session_id))
@@ -3341,6 +3353,7 @@ def end_session(conn: sqlite3.Connection, session_id: str, summary: str = "", ca
 
 
 def list_sessions(conn: sqlite3.Connection, project_id: str = None, limit: int = 100):
+    """Recent sessions, optionally scoped to a project."""
     sql = "SELECT * FROM sessions"
     params = []
     if project_id:
@@ -3423,6 +3436,7 @@ def restore_from_checkpoint(conn: sqlite3.Connection, checkpoint_id: str) -> dic
 # --- stats / health ----------------------------------------------------------
 
 def stats(conn: sqlite3.Connection) -> dict:
+    """Record counts per type plus verified and total totals."""
     result = {}
     for t in sorted(VALID_TYPES):
         c = conn.execute("SELECT COUNT(*) AS n FROM records WHERE type=?", (t,)).fetchone()["n"]
@@ -3438,6 +3452,7 @@ def stats(conn: sqlite3.Connection) -> dict:
 
 
 def health(conn: sqlite3.Connection) -> dict:
+    """One-call status: record counts, backup count, and integrity result."""
     ok = quick_check(conn) or integrity_check(conn)
     backup_paths = glob.glob(os.path.join(BACKUP_DIR, "memory.db.bak.*"))
     backups = len(backup_paths)
@@ -3476,6 +3491,7 @@ def get_profile_context(conn: sqlite3.Connection, key: str, default=None):
 
 
 def set_profile_context(conn: sqlite3.Connection, key: str, value):
+    """Persist one profile-scoped key/value pair used at session start."""
     profile = get_profile()
     conn.execute("""
         INSERT OR REPLACE INTO profile_contexts (profile, key, value, updated_at)
