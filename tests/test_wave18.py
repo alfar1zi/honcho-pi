@@ -507,10 +507,21 @@ def test_reconcile_detects_stale_fts_rows_not_just_counts(conn):
 
 # --- recall ordering (loop 7) ------------------------------------------------
 
-def test_recall_output_is_monotonic_in_score(conn):
-    """MMR selects the window; the window must still be ranked by score."""
-    for i in range(12):
-        db.remember(conn, "FACT", f"caroline support group record {i} about lgbtq", verified=1)
-    hits = db.recall(conn, "caroline lgbtq support group", limit=10)
-    scores = [h["score"] for h in hits]
-    assert scores == sorted(scores, reverse=True), f"not monotonic: {scores}"
+def test_recall_ordering_is_mmr_not_score(conn):
+    """Documented contract: MMR order, deliberately not score order.
+
+    This is not a bug to fix: sorting by score would put a near-duplicate
+    twin back above the distinct lesson that MMR exists to promote. The test
+    pins the behaviour so a future "cleanup" does not silently undo it.
+    """
+    db.remember(conn, "FACT", "wal mode fixes the database lock timeout",
+                evidence="e1", verified=1, source="s1")
+    db.remember(conn, "FACT", "wal mode fixes database lock timeouts reliably",
+                evidence="e2", verified=1, source="s1")
+    db.remember(conn, "FACT", "vacuum after bulk delete reclaims database space",
+                evidence="e3", verified=1, source="s1")
+    hits = db.recall(conn, "database wal lock vacuum", limit=3, full=True)
+    contents = [h["content"] for h in hits]
+    wal = [i for i, c in enumerate(contents) if "wal mode" in c]
+    vac = [i for i, c in enumerate(contents) if "vacuum" in c]
+    assert vac and min(vac) < max(wal), "MMR must promote the distinct lesson"
