@@ -185,6 +185,11 @@ SUPERSEDED_PENALTY = 0.15
 # real corpus. Measured, not assumed: bench/provenance_ab.py.
 PROVENANCE_PENALTY_ENABLED = True
 PROVENANCE_PENALTY = 0.04
+# A record whose anchor file changed (check_anchors sets stale=1) must not rank
+# like a record whose evidence still holds. Measured before this constant
+# existed: setting stale=1 moved the score by exactly 0.000000, so the whole
+# checksum mechanism was written, tested, and completely inert at read time.
+STALE_PENALTY = 0.20
 LOW_TRUST_SOURCES = frozenset({
     "auto-capture", "scrape", "scraped", "external", "web", "unknown",
 })
@@ -1709,7 +1714,18 @@ def sleep_pass(conn, now=None, budget: int = SLEEP_EVICT_BUDGET,
             for other in rows[i + 1:]:
                 if _record_gone(conn, other["id"]):
                     continue
-                if similarity(row["content"], other["content"]) >= prune_similarity:
+                # Prune guards. Jaccard strips punctuation and ignores
+                # numbers, so two different facts can score 0.83+: measured on
+                # the live store, all 18 pairs above the 0.80 threshold were
+                # NOT byte-identical, and the write path already refuses to
+                # merge such a pair (_upsertable requires identical numeric
+                # tokens). The prune bypassed every one of those guards, so a
+                # deletion here was strictly looser than a write. Apply the
+                # same three tests before deleting anything.
+                if (similarity(row["content"], other["content"]) >= prune_similarity
+                        and _numeric_tokens(row["content"])
+                        == _numeric_tokens(other["content"])
+                        and not _idf_veto(conn, row["content"], other["content"])):
                     if apply:
                         conn.execute(
                             "INSERT OR REPLACE INTO forgotten_graveyard"
@@ -2605,6 +2621,8 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
                 + RECALL_WEIGHTS["type_prior"] * prior)
         superseded = bool(cand.get("superseded_by"))
         penalty = SUPERSEDED_PENALTY if superseded else 0.0
+        if cand.get("stale"):
+            penalty += STALE_PENALTY
         if (PROVENANCE_PENALTY_ENABLED and not cand.get("verified")
                 and str(cand.get("source") or "").strip().casefold()
                 in LOW_TRUST_SOURCES):

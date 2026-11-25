@@ -19,10 +19,14 @@ def _old(row_id, conn, days):
 
 
 def test_sleep_pass_merges_near_duplicates(conn):
+    # A true duplicate: same words, same (empty) numeric set. The old fixture
+    # appended " 2", which is a DIFFERENT fact by the write path's own rule
+    # (_upsertable requires identical numeric tokens), so the prune merging it
+    # was the bug this test had been locking in.
     a = memory_db.remember(conn, "INFERENCE", "deploy needs free disk space",
                            confidence=0.6)
     b = memory_db.remember(conn, "INFERENCE",
-                           "deploy needs free disk space 2",
+                           "deploy needs some free disk space",
                            confidence=0.4)
     report = memory_db.sleep_pass(conn)
     assert {"keeper": a["id"], "merged": b["id"]} in report["merged"]
@@ -35,7 +39,9 @@ def test_sleep_pass_merges_near_duplicates(conn):
 
 
 def test_sleep_pass_prune_is_guarded_by_apply(conn):
-    a = memory_db.remember(conn, "INFERENCE", "cache warmup runs first 2")
+    # No numeric token on either side: a " 2" suffix is a different fact by
+    # the write path's own rule, so the prune must reject it (tested above).
+    a = memory_db.remember(conn, "INFERENCE", "cache warmup runs first always")
     b = memory_db.remember(conn, "INFERENCE", "cache warmup runs first")
     report = memory_db.sleep_pass(conn, apply=False)
     assert report["apply"] is False

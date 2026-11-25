@@ -525,3 +525,27 @@ def test_recall_ordering_is_mmr_not_score(conn):
     wal = [i for i, c in enumerate(contents) if "wal mode" in c]
     vac = [i for i, c in enumerate(contents) if "vacuum" in c]
     assert vac and min(vac) < max(wal), "MMR must promote the distinct lesson"
+
+
+# --- memory-hygiene defects (loop 8) ----------------------------------------
+
+def test_stale_record_scores_lower(conn):
+    """check_anchors sets stale=1; that must change rank, not just a column."""
+    rec = db.remember(conn, "FACT", "cache ttl is sixty seconds for sessions",
+                      verified=1, confidence=0.9)
+    q = "cache ttl sixty seconds"
+    before = [h for h in db.recall(conn, q, limit=3) if h["id"] == rec["id"]][0]["score"]
+    conn.execute("UPDATE records SET stale=1 WHERE id=?", (rec["id"],))
+    conn.commit()
+    after = [h for h in db.recall(conn, q, limit=3) if h["id"] == rec["id"]][0]["score"]
+    assert after < before, "stale flag must lower the score"
+    assert round(before - after, 6) == db.STALE_PENALTY
+
+
+def test_sleep_prune_keeps_facts_that_differ_in_numbers(conn):
+    """The write path refuses this merge; the prune must not be looser."""
+    db.upsert_record(conn, "FACT", "retention limit is 30 days for staging", verified=1)
+    db.upsert_record(conn, "FACT", "retention limit is 45 days for staging", verified=1)
+    report = db.sleep_pass(conn, apply=True)
+    assert report.get("merged", []) == []
+    assert conn.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 2
