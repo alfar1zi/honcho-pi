@@ -84,3 +84,23 @@ The corpus and gold labels are immutable; no network access at runtime.
   recall -- different task, no comparable metric.
 - `xiaowu0162/LongMemEval-V2` (2026, Apache-2.0): web-agent trajectories;
   future work.
+
+## Rejected: SANITY-style claim ledger as recallable records
+
+Evaluated an adaptation of `verycoolapps/sanity-anti-hallucination-skill`
+(13 stars, MIT, docs-only; no tests/evaluator). Its useful idea is a claim
+ledger: store each agent answer with `evidence`, `confidence`, and a
+verification label. We tested adding such claims as records (simulated as
+`FACT` with `source=claim-ledger`, `verified=1`, `confidence=0.9`) to the
+same per-question haystack, on a pinned 60-question slice of the external
+benchmark (single-session-preference + knowledge-update, seed 7):
+
+| Variant | R@5 | hit@1 | n |
+|---|---:|---:|---:|
+| No claim records | 0.9273 | 0.6364 | 55 |
+| With claim records | 0.9273 | 0.5455 | 55 |
+
+R@5 is unchanged but hit@1 drops ~0.09: the agent's own answer outranks
+the human-authored gold turn. **Verdict: rejected.** A claim ledger must
+not be a recallable memory type; if implemented at all it belongs in a
+separate audit table with no FTS exposure. No engine change was made.
