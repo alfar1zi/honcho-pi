@@ -212,6 +212,32 @@ come from vendor reports and are **not** directly comparable to our metrics.
 Mem0's current code does implement update and delete with history events;
 the "never invalidates" phrasing described an older published snapshot.
 
+## Surviving a model switch
+
+The MCP `handoff` tool is pull-only: a fresh model has to *know* to call it,
+and after a real switch it does not. omp emits no `model_change` event to
+extensions, so the working mechanism is the `context`/`before_agent_start`
+extension API, not a hook on the switch itself.
+
+Two things make it automatic:
+
+1. **A brief built from evidence** (`handoff.py`): the operator's verbatim
+   requests, decisions and corrections from memory, observed failures, files
+   touched. No model paraphrase. Role-filtered so retry-fallback hops
+   (`role != "default"`) are not counted as switches — omp's own
+   `lastModelChangeRole(skipEphemeral)` skips the same rows.
+2. **An extension that delivers it** (`~/.omp/agent/extensions/omp-handoff.ts`)
+   on `before_agent_start`, by comparing `ctx.model` with the last model it
+   wrote to a state file. Verified API shape: `BeforeAgentStartEventResult`
+   has exactly `message` and `systemPrompt`; `additionalContext` is **not** a
+   field and is silently ignored.
+
+Guards learned from the real transcript: a 120 s debounce (one observed
+flip-flop was 0.3 minutes apart), one brief per switch key, and a 400-char
+minimum so an almost-empty session does not inject noise. The injected text
+is wrapped in `BEGIN/END HANDOFF EVIDENCE` markers and labelled data, because
+a model given an unmarked block will happily invent its contents.
+
 ## Connect your agent
 
 **MCP client** (Claude Code, Codex, Cursor, ...): the JSON block from [Quick start](#quick-start).
