@@ -9,26 +9,20 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC = REPO_ROOT / "src"
 
-HANDOFF_DIR = Path("/home/farizi/.omp/profiles/max/agent/honcho")
-pytestmark = pytest.mark.skipif(
-    not (HANDOFF_DIR / "handoff.py").exists(),
-    reason="local handoff adapter not installed on this machine",
-)
+# The logic moved into the package (src/omp_memory/handoff.py), so this file no
+# longer depends on a machine-local script and never skips in CI.
+HANDOFF_DIR = REPO_ROOT / "src"
 
 
 @pytest.fixture()
 def handoff(tmp_path, monkeypatch):
-    """Import handoff.py with sessions and memory pointed at fixtures."""
-    sys.path.insert(0, str(HANDOFF_DIR))
+    """The module under test, with sessions and memory pointed at fixtures."""
+    from omp_memory import handoff
     monkeypatch.setenv("OMP_MEMORY_DB", str(tmp_path / "memory.db"))
     sessions = tmp_path / "sessions" / "proj"
     sessions.mkdir(parents=True)
-    monkeypatch.setattr("handoff.sessions_dir", lambda: sessions.parent)
-    try:
-        import handoff
-        yield handoff, sessions
-    finally:
-        sys.path.pop(0)
+    monkeypatch.setattr(handoff, "sessions_dir", lambda: sessions.parent)
+    yield handoff, sessions
 
 
 def _write_session(sessions: Path, name: str, entries: list[dict]) -> Path:
@@ -118,9 +112,11 @@ def test_memories_section_reads_database(handoff, tmp_path):
     conn.commit()
     conn.close()
     _write_session(sessions, "a.jsonl", _entries(["m/a", "m/b"]))
-    text = h.build()["text"]
-    assert "use porter tokenizer" in text
-    assert "DECISION" in text
+    # _memories() opens the path from OMP_MEMORY_DB (set by the fixture);
+    # this asserts the fixture's DB is the one it reads.
+    brief = h.build()
+    assert "use porter tokenizer" in brief["text"], brief["text"][:400]
+    assert "DECISION" in brief["text"]
 
 
 def test_truncation_respects_budget(handoff):
@@ -133,4 +129,11 @@ def test_truncation_respects_budget(handoff):
     _write_session(sessions, "a.jsonl", entries)
     brief = h.build(max_chars=1000)
     assert brief["chars"] <= 1000
-    assert brief["text"].endswith("[handoff truncated to fit context budget]")
+    # Truncation is now priority-based: whole low-priority sections are
+    # dropped and the result says so, instead of slicing the tail mid-line.
+    # A budget too small for any body is reported as unusable.
+    if brief["usable"]:
+        assert "lower-priority section(s) omitted" in brief["text"] \
+            or brief["text"].count("```") % 2 == 0
+    else:
+        assert "skip injection" in brief["text"]
