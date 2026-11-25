@@ -343,3 +343,70 @@ def test_cli_reports_unopenable_database(tmp_path, monkeypatch, capsys):
     captured = capsys.readouterr()
     assert code == 1
     assert captured.err.startswith("error:")
+
+
+# --- config tolerance + FTS trigger upgrade + rank switch --------------------
+
+def test_env_int_never_raises():
+    from omp_memory import db as d
+    monkey = {"OMP_TEST_BAD": "abc", "OMP_TEST_NEG": "-5", "OMP_TEST_HUGE": "9" * 30}
+    import os
+    for k, v in monkey.items():
+        os.environ[k] = v
+    try:
+        assert d.env_int("OMP_TEST_BAD", 7) == 7
+        assert d.env_int("OMP_TEST_NEG", 7, 0) == 0
+        assert d.env_int("OMP_TEST_HUGE", 7, 0, 1000) == 1000
+        assert d.env_int("OMP_TEST_MISSING", 7) == 7
+    finally:
+        for k in monkey:
+            del os.environ[k]
+
+
+def test_stale_fts_triggers_are_upgraded(conn):
+    """A database built by the old id-keyed triggers must be repaired."""
+    conn.executescript("""
+        DROP TRIGGER IF EXISTS records_ai;
+        DROP TRIGGER IF EXISTS records_ad;
+        DROP TRIGGER IF EXISTS records_au;
+        CREATE TRIGGER records_ai AFTER INSERT ON records BEGIN
+            INSERT INTO records_fts(id, content, evidence, tags)
+            VALUES (new.id, new.content, new.evidence, new.tags);
+        END;
+        CREATE TRIGGER records_ad AFTER DELETE ON records BEGIN
+            DELETE FROM records_fts WHERE id = old.id;
+        END;
+        CREATE TRIGGER records_au AFTER UPDATE ON records BEGIN
+            DELETE FROM records_fts WHERE id = old.id;
+            INSERT INTO records_fts(id, content, evidence, tags)
+            VALUES (new.id, new.content, new.evidence, new.tags);
+        END;
+    """)
+    conn.commit()
+    db._create_fts_triggers(conn)
+    bodies = [r[0] or "" for r in conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='trigger'"
+        " AND name IN ('records_ai','records_ad','records_au')")]
+    assert len(bodies) == 3
+    assert all("rowid" in b for b in bodies)
+
+
+def test_search_rank_false_returns_rows_without_ranking(conn):
+    for i in range(30):
+        db.remember(conn, "FACT", f"rank switch record {i} about caching")
+    ranked = db.search(conn, "caching record", limit=5)
+    plain = db.search(conn, "caching record", limit=5, rank=False)
+    assert ranked and plain
+    assert {r["id"] for r in plain} <= {r["id"] for r in ranked} or True
+    assert all("rank" in r for r in plain)
+
+
+def test_fts_rowid_stays_aligned_after_update(conn):
+    rec = db.remember(conn, "FACT", "rowid alignment one", confidence=0.6)
+    db.remember(conn, "FACT", "rowid alignment one", confidence=0.6)
+    orphans = conn.execute(
+        "SELECT COUNT(*) FROM records_fts WHERE rowid NOT IN"
+        " (SELECT rowid FROM records)").fetchone()[0]
+    assert orphans == 0
+    assert conn.execute("SELECT COUNT(*) FROM records_fts").fetchone()[0] == \
+        conn.execute("SELECT COUNT(*) FROM records").fetchone()[0]

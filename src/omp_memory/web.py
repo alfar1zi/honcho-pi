@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import math
 import mimetypes
 import os
@@ -32,7 +33,8 @@ if _ENV_WEB:
     WEB_DIR = Path(_ENV_WEB)
 else:
     _WEB_CANDIDATES = [
-        Path(__file__).resolve().parent.parent.parent / "web",
+        Path(__file__).resolve().parent / "web",          # packaged wheel
+        Path(__file__).resolve().parent.parent.parent / "web",  # repo checkout
         Path.home() / ".omp/memory/web",
     ]
     WEB_DIR = next((p for p in _WEB_CANDIDATES if (p / "dist" / "index.html").is_file()),
@@ -737,6 +739,11 @@ def main(argv=None):
         try:
             graph = _refresh_graph()
             _broadcast("graph:updated", graph)
+        except sqlite3.OperationalError as e:
+            # A brand-new store has no schema until something writes to it;
+            # that is an empty universe, not a failure worth a warning.
+            if "no such table" not in str(e):
+                print(f"[overview] graph refresh failed: {e}", file=__import__("sys").stderr)
         except Exception as e:  # a broken store must not kill the viewer
             print(f"[overview] graph refresh failed: {e}", file=__import__("sys").stderr)
     threading.Thread(target=_self_heal, daemon=True).start()

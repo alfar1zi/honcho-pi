@@ -40,6 +40,17 @@ package-dir = { "" = "src" }
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The graph UI is static, built once and shipped inside the package so
+# `omp-memory overview` works from a plain `pip install` -- without this the
+# wheel had 17 .py files and no web/dist, and overview printed
+# "dist missing: .../site-packages/web/dist".
+[tool.setuptools.package-data]
+omp_memory = ["web/dist/**/*"]
+
+[tool.setuptools.data-files]
+"omp_memory/web" = ["web/dist/index.html"]
+"omp_memory/web/dist/assets" = ["web/dist/assets/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

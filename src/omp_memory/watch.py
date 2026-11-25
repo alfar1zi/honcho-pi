@@ -17,11 +17,12 @@ import sys
 import time
 from pathlib import Path
 
+from . import db
 from .capture import latest_session, sessions_dir
 
-IDLE_SECONDS = int(os.environ.get("OMP_MEMORY_IDLE_SECONDS", "600"))
-POLL_SECONDS = int(os.environ.get("OMP_MEMORY_POLL_SECONDS", "60"))
-SLEEP_INTERVAL = int(os.environ.get("OMP_MEMORY_SLEEP_INTERVAL", "3600"))
+IDLE_SECONDS = db.env_int("OMP_MEMORY_IDLE_SECONDS", 600, 1)
+POLL_SECONDS = db.env_int("OMP_MEMORY_POLL_SECONDS", 60, 1)
+SLEEP_INTERVAL = db.env_int("OMP_MEMORY_SLEEP_INTERVAL", 3600, 1)
 
 STATE_FILE = Path(
     os.environ.get(

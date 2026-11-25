@@ -31,10 +31,29 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+def env_int(name: str, default: int, low: int = 0, high: int = 2 ** 31 - 1) -> int:
+    """Read an integer env var without ever raising.
+
+    These values are read at import time, so a typo like
+    OMP_MEMORY_BUSY_TIMEOUT_MS=30s used to abort the import of the whole
+    package -- the MCP server would not start at all, which reads to the
+    operator as "the tool is broken", not "one setting is wrong". A bad
+    value falls back to the default and is clamped to a sane range.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(str(raw).strip(), 10)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, value))
+
+
 DB_PATH = os.environ.get("OMP_MEMORY_DB", str(Path.home() / ".omp/memory/memory.db"))
 BACKUP_DIR = os.environ.get("OMP_MEMORY_BACKUP_DIR", str(Path.home() / ".omp/memory/backups"))
-MAX_BACKUPS = int(os.environ.get("OMP_MEMORY_MAX_BACKUPS", "10"))
-BUSY_TIMEOUT_MS = int(os.environ.get("OMP_MEMORY_BUSY_TIMEOUT_MS", "30000"))
+MAX_BACKUPS = env_int("OMP_MEMORY_MAX_BACKUPS", 10, 0, 1000)
+BUSY_TIMEOUT_MS = env_int("OMP_MEMORY_BUSY_TIMEOUT_MS", 30000, 1, 600000)
 
 
 def _restrict_to_owner(path: str) -> None:
@@ -728,27 +747,32 @@ def _create_fts_triggers(conn: sqlite3.Connection):
     re-adds them, "no such table" if a swap lands between the two halves).
     The migration paths that legitimately replace the table drop them first.
     """
-    have = conn.execute(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger'"
+    # Existence is not enough: an older build keyed these triggers on the
+    # `id` column, and a DELETE ... WHERE id = ? makes FTS5 scan the whole
+    # content table (14k statements for one update at 14k rows, 264ms per
+    # write). The body is inspected so a database created by the old build
+    # gets the rowid-keyed triggers on its next open.
+    rows = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='trigger'"
         " AND name IN ('records_ai','records_ad','records_au')"
-    ).fetchone()[0]
-    if have == 3:
+    ).fetchall()
+    if len(rows) == 3 and all("rowid" in (r[0] or "") for r in rows):
         return
     conn.executescript("""
     DROP TRIGGER IF EXISTS records_ai;
     DROP TRIGGER IF EXISTS records_ad;
     DROP TRIGGER IF EXISTS records_au;
     CREATE TRIGGER records_ai AFTER INSERT ON records BEGIN
-        INSERT INTO records_fts(id, content, evidence, tags)
-        VALUES (new.id, new.content, new.evidence, new.tags);
+        INSERT INTO records_fts(rowid, id, content, evidence, tags)
+        VALUES (new.rowid, new.id, new.content, new.evidence, new.tags);
     END;
     CREATE TRIGGER records_ad AFTER DELETE ON records BEGIN
-        DELETE FROM records_fts WHERE id = old.id;
+        DELETE FROM records_fts WHERE rowid = old.rowid;
     END;
     CREATE TRIGGER records_au AFTER UPDATE ON records BEGIN
-        DELETE FROM records_fts WHERE id = old.id;
-        INSERT INTO records_fts(id, content, evidence, tags)
-        VALUES (new.id, new.content, new.evidence, new.tags);
+        DELETE FROM records_fts WHERE rowid = old.rowid;
+        INSERT INTO records_fts(rowid, id, content, evidence, tags)
+        VALUES (new.rowid, new.id, new.content, new.evidence, new.tags);
     END;
     """)
 
@@ -825,8 +849,8 @@ def _reconcile_fts(conn: sqlite3.Connection):
     if fts_count != rec_count:
         conn.execute("DELETE FROM records_fts")
         conn.execute(
-            "INSERT INTO records_fts(id, content, evidence, tags)"
-            " SELECT id, content, evidence, tags FROM records")
+            "INSERT INTO records_fts(rowid, id, content, evidence, tags)"
+            " SELECT rowid, id, content, evidence, tags FROM records")
 
 
 def _migrate(conn: sqlite3.Connection):
@@ -853,8 +877,8 @@ def _migrate(conn: sqlite3.Connection):
                 "CREATE VIRTUAL TABLE records_fts USING fts5(id, content, evidence, tags)"
             )
             conn.execute(
-                "INSERT INTO records_fts(id, content, evidence, tags)"
-                " SELECT id, content, evidence, tags FROM records"
+                "INSERT INTO records_fts(rowid, id, content, evidence, tags)"
+                " SELECT rowid, id, content, evidence, tags FROM records"
             )
         _create_fts_triggers(conn)
         conn.execute("DELETE FROM schema_version")
@@ -916,8 +940,8 @@ def _migrate(conn: sqlite3.Connection):
             "id, content, evidence, tags, tokenize='porter unicode61')"
         )
         conn.execute(
-            "INSERT INTO records_fts(id, content, evidence, tags)"
-            " SELECT id, content, evidence, tags FROM records"
+            "INSERT INTO records_fts(rowid, id, content, evidence, tags)"
+            " SELECT rowid, id, content, evidence, tags FROM records"
         )
         conn.execute(
             "CREATE VIRTUAL TABLE records_fts_vocab USING fts5vocab(records_fts, row)"
@@ -1264,7 +1288,8 @@ def _candidates(conn: sqlite3.Connection, content: str, rtype: str, limit: int) 
     own = content_id(content)
     rows = []
     try:
-        rows = search(conn, content, limit=limit * 8, rtype=rtype)
+        rows = search(conn, content, limit=limit * 8, rtype=rtype,
+                      allow_repair=False, rank=False)
     except sqlite3.Error:
         rows = []
     others = [r for r in rows if r["id"] != own]
@@ -1288,7 +1313,11 @@ def _candidates(conn: sqlite3.Connection, content: str, rtype: str, limit: int) 
     tokens = [t[:MAX_LIKE_TOKEN] for t in tokens]
     sql += " AND (" + " OR ".join("content LIKE ?" for _ in tokens) + ")"
     params.extend(f"%{tok}%" for tok in tokens)
-    sql += " LIMIT ?"
+    # Newest-first so SQLite can stop early: a LIKE over content has no
+    # index, and scanning the whole table cost 10ms per write at 12k
+    # records (another linear term in the ingest curve). An advisory
+    # near-duplicate check only needs recent candidates anyway.
+    sql += " ORDER BY rowid DESC LIMIT ?"
     params.append(limit * 8)
     return [dict(r) for r in conn.execute(sql, params) if r["id"] != own]
 
@@ -1892,15 +1921,25 @@ def _repair_typos(conn: sqlite3.Connection, words: list, vocab: list) -> list:
     return fixed
 
 
-def _search_after_repairs(conn: sqlite3.Connection, query: str, **kwargs) -> list:
-    """Search exact first; on an empty result, retry with repaired words."""
-    rows = _search_exact(conn, query, **kwargs)
-    if rows:
+def _search_after_repairs(conn: sqlite3.Connection, query: str,
+                          allow_repair: bool = True, rank: bool = True,
+                          **kwargs) -> list:
+    """Search exact first; on an empty result, retry with repaired words.
+
+    allow_repair=False skips the fuzzy stage. The write path
+    (decide -> find_similar -> _candidates) uses it: a near-duplicate
+    lookup does not need typo correction, and difflib over the whole
+    vocabulary (9.6k terms) cost ~46ms per write at 1.5k records -- the
+    dominant term in a superlinear ingest curve (40ms at 500 rows to 81ms
+    at 4k).
+    """
+    rows = _search_exact(conn, query, rank=rank, **kwargs)
+    if rows or not allow_repair:
         return rows
     vocab = _vocab(conn)
     words = _repair_typos(conn, _tokens(query), vocab)
     if words != _tokens(query):
-        rows = _search_exact(conn, " ".join(words), **kwargs)
+        rows = _search_exact(conn, " ".join(words), rank=rank, **kwargs)
     return rows
 
 
@@ -2021,21 +2060,34 @@ def _query_known(conn: sqlite3.Connection, query: str) -> bool:
     graphify vocabulary gate, stdlib: unknown vocabulary means the query is
     outside what this store can answer, so the honest reply is abstention,
     not a partial-token guess. Known synonyms count as known words.
+
+    Probed with three indexed lookups instead of materialising the whole
+    vocabulary: _vocab() cost ~17ms per call at 4k records and the write
+    path calls this once per write, which made ingest superlinear. An
+    empty index still returns True so a fresh store does not abstain on
+    everything.
     """
-    vocab = _vocab(conn)
-    if not vocab:
-        return True  # empty index: nothing to gate against
-    vocab_set = set(vocab)
+    # COUNT(*) over fts5vocab walks every term (17ms at 12k records); the
+    # records count is O(1) and answers the same question (is the index
+    # empty?). _query_known runs once per write, so the 17ms was a real
+    # term in the ingest curve.
+    total = conn.execute("SELECT COUNT(*) FROM records").fetchone()[0]
+    if not total:
+        return True
     for w in _tokens(query):
         s = _stem(w)
-        if s in vocab_set or any(t.startswith(s) for t in vocab_set):
+        row = conn.execute(
+            "SELECT term FROM records_fts_vocab WHERE term >= ?"
+            " ORDER BY term LIMIT 1", (s,)).fetchone()
+        if row and (row[0] == s or row[0].startswith(s)):
             return True
         if _WORD_TO_GROUP.get(w):
             return True
     return False
 
 
-def _search_relaxed(conn: sqlite3.Connection, query: str, **kwargs) -> list:
+def _search_relaxed(conn: sqlite3.Connection, query: str,
+                    allow_repair: bool = True, rank: bool = True, **kwargs) -> list:
     """When no record contains every word, rank by best single-word match.
 
     A four-word natural-language query ("ganti model pindah sesi") usually
@@ -2051,7 +2103,8 @@ def _search_relaxed(conn: sqlite3.Connection, query: str, **kwargs) -> list:
     intent forward (Rummel & Kvavilashvili 2023). Cue hits ride at the end
     of the pool; the cue bonus in recall() does the ranking.
     """
-    rows = _search_after_repairs(conn, query, **kwargs)
+    rows = _search_after_repairs(conn, query, allow_repair=allow_repair,
+                                 **kwargs)
     if not rows:
         # Concept translation beats word soup: a record covering BOTH
         # concepts under different spellings is a better answer than one
@@ -2059,7 +2112,7 @@ def _search_relaxed(conn: sqlite3.Connection, query: str, **kwargs) -> list:
         # the OR relaxation.
         syn_expr = _synonym_query(query)
         if syn_expr:
-            rows = _search_exact(conn, syn_expr, **kwargs)
+            rows = _search_exact(conn, syn_expr, rank=rank, **kwargs)
             for r in rows:
                 # Provenance: matched via concept translation, not the
                 # operator's literal words. recall() surfaces the flag.
@@ -2079,7 +2132,7 @@ def _search_relaxed(conn: sqlite3.Connection, query: str, **kwargs) -> list:
         if len(words) >= 2:
             or_expr = _or_query(words)
             if or_expr:
-                rows = _search_exact(conn, ">" + or_expr, **kwargs)
+                rows = _search_exact(conn, ">" + or_expr, rank=rank, **kwargs)
     cue_rows = _cue_pool(conn, query, **kwargs)
     if cue_rows:
         seen = {r["id"] for r in rows}
@@ -2148,23 +2201,31 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
                   project_id: str = None, session_id: str = None,
                   verified_only: bool = False,
                   min_confidence: float = 0.0, pool: int = None,
-                  about_peer: str = None, as_of: str = None):
+                  about_peer: str = None, as_of: str = None,
+                  rank: bool = True):
     raw = query.startswith('>')
     match = query.lstrip('>') if raw else _fts_query(query)
     if not match:
         return []
-    sql = """
-        SELECT r.id, r.type, r.content, r.evidence, r.verified, r.confidence, r.source, r.tags,
-               r.created_at, r.updated_at, r.session_id, r.project_id, r.parent_id,
-               r.about_peer, r.superseded_by, r.importance, r.cue, r.decay_tau,
-               r.stale, r.valid_from, r.valid_until,
-               bm25(records_fts, 0.0, 5.0, 1.0, 0.5) / CASE r.type
+    # bm25() in the SELECT list is evaluated per matching row: on a broad OR
+    # query that matches the whole corpus it costs ~70ms because FTS5 scores
+    # every candidate before LIMIT applies. The near-duplicate prefilter
+    # only needs rows, so rank=False omits the scoring entirely.
+    # rank=False drops the column entirely: a literal "0.0 AS rank" kept the
+    # same three-column projection shape and measured *slower* than bm25,
+    # because SQLite no longer used the bare MATCH plan.
+    rank_expr = (""", bm25(records_fts, 0.0, 5.0, 1.0, 0.5) / CASE r.type
                    WHEN 'RULE' THEN 1.4 WHEN 'CORRECTION' THEN 1.4
                    WHEN 'DECISION' THEN 1.2 WHEN 'WORKFLOW' THEN 1.2
                    WHEN 'PROCEDURAL' THEN 1.2 WHEN 'INTENT' THEN 1.0
                    WHEN 'FACT' THEN 1.0 WHEN 'REFLECTIVE' THEN 0.9
                    WHEN 'INFERENCE' THEN 0.8 WHEN 'ASSUMPTION' THEN 0.7
-                   ELSE 1.0 END AS rank
+                   ELSE 1.0 END AS rank""" if rank else "")
+    sql = """
+        SELECT r.id, r.type, r.content, r.evidence, r.verified, r.confidence, r.source, r.tags,
+               r.created_at, r.updated_at, r.session_id, r.project_id, r.parent_id,
+               r.about_peer, r.superseded_by, r.importance, r.cue, r.decay_tau,
+               r.stale, r.valid_from, r.valid_until""" + rank_expr + """
         FROM records_fts
         JOIN records r ON r.id = records_fts.id
         WHERE records_fts MATCH ?
@@ -2191,11 +2252,21 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
         sql += (" AND (r.valid_from='' OR r.valid_from<=?)"
                 " AND (r.valid_until='' OR r.valid_until>?)")
         params.extend([as_of, as_of])
-    sql += " ORDER BY rank, r.verified DESC, r.confidence DESC, r.updated_at DESC LIMIT ?"
+    # Ranking every candidate with bm25 costs ~12ms when a broad OR query
+    # matches the whole corpus (12k rows); the near-duplicate prefilter only
+    # needs *candidates*, so it passes rank=False and pays ~0.1ms instead.
+    if rank:
+        sql += (" ORDER BY rank, r.verified DESC, r.confidence DESC,"
+                " r.updated_at DESC LIMIT ?")
+    else:
+        sql += " LIMIT ?"
     params.append(pool if pool is not None else limit)
     rows = [dict(row) for row in conn.execute(sql, params)]
     if not rows:
         return []
+    if not rank:
+        for row in rows:
+            row.setdefault("rank", 0.0)
     # bm25 accumulates per matched term, so the lexical ceiling needs each
     # record's matched-term count: the query terms the record actually
     # matches. AND queries matched every term by construction; OR queries
@@ -2230,7 +2301,8 @@ def search(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = N
            project_id: str = None, session_id: str = None,
            verified_only: bool = False,
            min_confidence: float = 0.0, pool: int = None,
-           about_peer: str = None, as_of: str = None):
+           about_peer: str = None, as_of: str = None,
+           allow_repair: bool = True, rank: bool = True):
     """Exact AND first, then typo-repaired, then best single-word match.
 
     as_of (ISO timestamp) answers 'what was true then': records whose
@@ -2239,6 +2311,7 @@ def search(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: str = N
     """
     return _search_relaxed(conn, query, limit=limit, rtype=rtype,
                            project_id=project_id, session_id=session_id,
+                           allow_repair=allow_repair, rank=rank,
                            verified_only=verified_only,
                            min_confidence=min_confidence, pool=pool,
                            about_peer=about_peer, as_of=as_of)

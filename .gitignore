@@ -28,3 +28,6 @@ node_modules/
 
 # Web runtime graph cache: regenerated from the store on every run.
 web/data/graph.json
+
+# Packaged web assets are copied from web/dist at build time.
+src/omp_memory/web/

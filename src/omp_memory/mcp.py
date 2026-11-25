@@ -49,7 +49,7 @@ SERVER_VERSION = "2.0.0"
 PROTOCOL_VERSION = "2024-11-05"
 
 MAX_CONTENT = 4000
-MAX_RECALL_DEFAULT = int(os.environ.get("HONCHO_MAX_RECALL", "8"))
+MAX_RECALL_DEFAULT = db.env_int("HONCHO_MAX_RECALL", 8, 1, 50)
 
 # Last recall result per user ("" for single-tenant). Reinforce without an id
 # targets these: the agent that just used a recalled memory does not always
@@ -890,7 +890,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 def serve_http() -> None:
     host = os.environ.get("HONCHO_HOST", "127.0.0.1")
-    port = int(os.environ.get("HONCHO_PORT", "8765"))
+    port = db.env_int("HONCHO_PORT", 8765, 1, 65535)
     tokens = {t.strip() for t in os.environ.get("HONCHO_TOKENS", "").split(",") if t.strip()}
     _Handler.tokens = tokens
     if host not in ("127.0.0.1", "localhost", "::1") and not tokens:
