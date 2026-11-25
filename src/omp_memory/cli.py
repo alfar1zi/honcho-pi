@@ -31,9 +31,24 @@ def _sessions_dir() -> Path:
     return _memory_dir() / "sessions"
 
 
+class CliError(Exception):
+    """A user-facing failure: report it plainly, exit non-zero, no traceback."""
+
+
 def _open():
-    conn = db.connect()
-    db.init_db(conn)
+    """Open and migrate the store, turning storage failures into a clear
+    message. Without this a corrupt or unreadable database surfaced as a
+    bare traceback on stderr and an empty stdout, which reads as success to
+    anything that only checks stdout."""
+    try:
+        conn = db.connect()
+    except Exception as exc:  # sqlite3.OperationalError, OSError, ...
+        raise CliError(f"cannot open the memory database: {exc}") from exc
+    try:
+        db.init_db(conn)
+    except Exception as exc:
+        conn.close()
+        raise CliError(f"cannot initialise the memory database: {exc}") from exc
     return conn
 
 

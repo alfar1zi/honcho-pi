@@ -329,3 +329,17 @@ def test_migration_backfills_fts(tmp_path, monkeypatch):
         assert db.search(c, "migration probe", limit=3)
     finally:
         c.close()
+
+
+# --- CLI boundary ------------------------------------------------------------
+
+def test_cli_reports_unopenable_database(tmp_path, monkeypatch, capsys):
+    from omp_memory import cli
+    bad = tmp_path / "notadb.db"
+    bad.write_bytes(b"\x00" * 4096)
+    monkeypatch.setenv("OMP_MEMORY_DB", str(bad))
+    monkeypatch.setenv("OMP_MEMORY_BACKUP_DIR", str(tmp_path / "bak"))
+    code = cli.main(["health"])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert captured.err.startswith("error:")
