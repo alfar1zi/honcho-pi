@@ -343,6 +343,9 @@ def _merge_provenance(stored: str, incoming: str) -> str:
 # "shipping-service 1000") reach 0.82. No single threshold separates those two
 # bands, so a high score is an advisory and the only automatic merge requires
 # a number-identical candidate above UPSERT_THRESHOLD as well.
+# SQLite's LIKE implementation has a pattern-complexity ceiling; tokens
+# longer than this are truncated for the LIKE prefilter only.
+MAX_LIKE_TOKEN = 64
 SIMILAR_THRESHOLD = 0.50
 UPSERT_THRESHOLD = 0.85
 
@@ -827,7 +830,15 @@ def _reconcile_fts(conn: sqlite3.Connection):
 
 
 def _migrate(conn: sqlite3.Connection):
-    """Bring an older database up to SCHEMA_VERSION. Idempotent."""
+    """Bring an older database up to SCHEMA_VERSION. Idempotent.
+
+    _reconcile_fts runs on BOTH paths. It used to run only on the
+    already-current early return, so a legacy database that actually went
+    through the migration blocks (v14 -> v18 and every other upgrade) ended
+    up with an empty FTS index: quick_check passed, every row was present,
+    and recall returned nothing. Reproduced with a synthetic v14 database:
+    30 rows, 0 FTS rows, recall 0 hits.
+    """
     version = _current_schema_version(conn)
     if version >= SCHEMA_VERSION:
         _reconcile_fts(conn)
@@ -1137,6 +1148,9 @@ def _migrate(conn: sqlite3.Connection):
         conn.execute("INSERT INTO schema_version(version) VALUES (18)")
         conn.commit()
 
+    # Every migration path must leave the index consistent with the table.
+    _reconcile_fts(conn)
+
 
 def init_db(conn: sqlite3.Connection, db_path: str = None, auto_repair: bool = True):
     """Create or migrate the schema on an open connection.
@@ -1266,6 +1280,12 @@ def _candidates(conn: sqlite3.Connection, content: str, rtype: str, limit: int) 
     if rtype:
         sql += " AND type=?"
         params.append(rtype)
+    # SQLite caps LIKE pattern length (a 60k-character token raised
+    # "LIKE or GLOB pattern too complex" and killed the whole write). The
+    # first MAX_LIKE_TOKEN characters are enough to identify the row; a
+    # truncated token can only make the prefilter broader, and Jaccard
+    # scoring downstream still decides.
+    tokens = [t[:MAX_LIKE_TOKEN] for t in tokens]
     sql += " AND (" + " OR ".join("content LIKE ?" for _ in tokens) + ")"
     params.extend(f"%{tok}%" for tok in tokens)
     sql += " LIMIT ?"
@@ -1321,6 +1341,8 @@ def _idf_veto(conn: sqlite3.Connection, a: str, b: str) -> bool:
     sa = set(_tokens(a))
     sb = set(_tokens(b))
     for t in sa ^ sb:
+        if len(t) > MAX_LIKE_TOKEN:
+            continue
         df = conn.execute(
             "SELECT COUNT(*) FROM records WHERE content LIKE ?",
             (f"%{t}%",)).fetchone()[0]

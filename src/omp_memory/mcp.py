@@ -167,6 +167,24 @@ def with_conn(user: str = "", fn=None):
 # Tool implementations
 # --------------------------------------------------------------------------
 
+def _as_float(value, default: float) -> float:
+    """Tolerant numeric parse for MCP arguments.
+
+    A client can send "abc" or a null for a numeric field; float() would
+    raise and kill the whole tool call. Bad input is clamped to the default
+    rather than crashing the server.
+    """
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed != parsed:  # NaN
+        return default
+    return parsed
+
+
 def _clip(text: str, limit: int = MAX_CONTENT) -> str:
     text = (text or "").strip()
     return text if len(text) <= limit else text[: limit - 3] + "..."
@@ -206,13 +224,13 @@ def tool_recall(args: Dict[str, Any], user: str = "") -> str:
         query = str(args.get("query") or "").strip()
         if not query:
             return "recall: query is required"
-        limit = int(args.get("limit") or MAX_RECALL_DEFAULT)
+        limit = int(_as_float(args.get("limit"), MAX_RECALL_DEFAULT))
         limit = max(1, min(limit, 50))
         rtype = args.get("type")
         project = args.get("project")
         session = args.get("session")
         verified_only = bool(args.get("verified_only"))
-        min_confidence = float(args.get("min_confidence") or 0.0)
+        min_confidence = _as_float(args.get("min_confidence"), 0.0)
         about_peer = args.get("about_peer")
         # recall() reranks and takes the same confidence filters, so every
         # query path keeps the same ranking instead of silently downgrading
@@ -267,7 +285,7 @@ def tool_recall(args: Dict[str, Any], user: str = "") -> str:
 
 def tool_digest(args: Dict[str, Any], user: str = "") -> str:
     def body(conn):
-        budget = max(200, min(int(args.get("budget") or 2000), 20000))
+        budget = max(200, min(int(_as_float(args.get("budget"), 2000)), 20000))
         d = db.digest(conn, budget=budget, project_id=args.get("project"))
         return d["text"]
     return with_conn(user, body)
@@ -289,13 +307,13 @@ def tool_remember(args: Dict[str, Any], user: str = "") -> str:
             content=_clip(content),
             evidence=_clip(str(args.get("evidence") or "")),
             verified=1 if args.get("verified") else 0,
-            confidence=float(args.get("confidence") if args.get("confidence") is not None else 0.6),
+            confidence=_as_float(args.get("confidence"), 0.6),
             source=str(args.get("source") or "agent"),
             tags=str(args.get("tags") or ""),
             session_id=str(args.get("session") or ""),
             project_id=str(args.get("project") or ""),
             about_peer=str(args.get("about_peer") or ""),
-            importance=float(args.get("importance") if args.get("importance") is not None else 0.5),
+            importance=_as_float(args.get("importance"), 0.5),
             cue=str(args.get("cue") or ""),
         )
         rid = result["id"]

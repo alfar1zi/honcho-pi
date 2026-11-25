@@ -260,3 +260,72 @@ def test_record_signals_bulk_matches_single(conn):
     bulk = db._record_signals_bulk(conn, [a["id"], b["id"]])
     assert len(bulk[a["id"]]) == len(db._record_signals(conn, a["id"]))
     assert bulk[b["id"]] == []
+
+
+# --- audit wave: hostile input, migration, LIKE cap, MCP args ----------------
+
+def test_large_content_does_not_crash_write(conn):
+    for i in range(10):
+        db.remember(conn, "FACT", f"seed record {i} about alpha beta")
+    rec = db.remember(conn, "FACT", "x" * 200000)
+    assert rec["action"] in ("create", "update")
+
+
+def test_like_token_is_capped(conn):
+    assert db.MAX_LIKE_TOKEN <= 128
+    rec = db.remember(conn, "FACT", "y" * 5000)
+    assert rec["id"]
+
+
+def test_mcp_numeric_args_are_tolerant(conn):
+    from omp_memory import mcp
+    out = mcp.tool_remember({"content": "tolerant parse probe", "confidence": "abc"})
+    assert "EXC" not in out and "Traceback" not in out
+    out = mcp.tool_recall({"query": "tolerant parse", "limit": "not-a-number"})
+    assert "Traceback" not in out
+
+
+def test_migration_backfills_fts(tmp_path, monkeypatch):
+    """A legacy DB that actually migrates must end with a working index."""
+    import sqlite3
+    path = str(tmp_path / "legacy.db")
+    raw = sqlite3.connect(path)
+    raw.executescript("""
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version(version) VALUES (14);
+        CREATE TABLE records (
+          id TEXT PRIMARY KEY, type TEXT NOT NULL, content TEXT NOT NULL,
+          evidence TEXT NOT NULL DEFAULT '', verified INTEGER NOT NULL DEFAULT 0,
+          confidence REAL NOT NULL DEFAULT 0.5, source TEXT NOT NULL DEFAULT '',
+          tags TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL, session_id TEXT NOT NULL DEFAULT '',
+          project_id TEXT NOT NULL DEFAULT '', parent_id TEXT NOT NULL DEFAULT '',
+          project_ids TEXT NOT NULL DEFAULT '', last_decay_at TEXT NOT NULL DEFAULT '',
+          about_peer TEXT NOT NULL DEFAULT '', event_id TEXT NOT NULL DEFAULT '',
+          decay_exempt_until TEXT NOT NULL DEFAULT '',
+          superseded_by TEXT NOT NULL DEFAULT '',
+          importance REAL NOT NULL DEFAULT 0.5, cue TEXT NOT NULL DEFAULT '',
+          decay_tau REAL NOT NULL DEFAULT 0,
+          valid_from TEXT NOT NULL DEFAULT '', valid_until TEXT NOT NULL DEFAULT '',
+          anchor_path TEXT NOT NULL DEFAULT '', anchor_sha TEXT NOT NULL DEFAULT '',
+          stale INTEGER NOT NULL DEFAULT 0
+        );
+    """)
+    for i in range(20):
+        raw.execute(
+            "INSERT INTO records(id,type,content,created_at,updated_at,confidence,verified)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (f"legacy{i}", "FACT", f"legacy record {i} migration probe",
+             "2025-01-01T00:00:00+00:00", "2025-01-01T00:00:00+00:00", 0.8, 1))
+    raw.commit()
+    raw.close()
+    monkeypatch.setenv("OMP_MEMORY_DB", path)
+    monkeypatch.setenv("OMP_MEMORY_BACKUP_DIR", str(tmp_path / "bak"))
+    c = db.connect(path)
+    db.init_db(c)
+    try:
+        assert c.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 20
+        assert c.execute("SELECT COUNT(*) FROM records_fts").fetchone()[0] == 20
+        assert db.search(c, "migration probe", limit=3)
+    finally:
+        c.close()
