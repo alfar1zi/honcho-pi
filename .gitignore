@@ -25,3 +25,6 @@ bench/out/*.err
 *.sqlite-wal
 *.sqlite-shm
 node_modules/
+
+# Web runtime graph cache: regenerated from the store on every run.
+web/data/graph.json
