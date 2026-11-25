@@ -78,7 +78,7 @@ def server(tmp_path):
 
 def test_handshake_and_tool_list(server):
     result = server.request("initialize", {})["result"]
-    assert result["serverInfo"] == {"name": "honcho", "version": "2.0.0"}
+    assert result["serverInfo"] == {"name": "honcho", "version": __import__("omp_memory").__version__}
     assert result["capabilities"] == {"tools": {"listChanged": False}}
     assert "Never store secrets" in result["instructions"]
 

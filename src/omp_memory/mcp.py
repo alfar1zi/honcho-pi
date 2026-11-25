@@ -42,10 +42,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from . import db
+from . import __version__
 from .context import _neutralize_fence
 
 SERVER_NAME = "honcho"
-SERVER_VERSION = "2.0.0"
+# Single source of truth: the distribution version. A hardcoded string here
+# drifted from pyproject (0.2.0) and reported 2.0.0 to every MCP client.
+SERVER_VERSION = __version__
 PROTOCOL_VERSION = "2024-11-05"
 
 MAX_CONTENT = 4000

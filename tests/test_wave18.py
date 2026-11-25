@@ -430,3 +430,22 @@ def test_backups_are_unique_and_rotation_keeps_newest(tmp_path, monkeypatch):
     assert len(kept) == 3
     assert kept == sorted(names)[-3:], "rotation kept the wrong snapshots"
     conn.close()
+
+
+# --- version consistency (loop 5) --------------------------------------------
+
+def test_mcp_version_matches_package_version():
+    from omp_memory import __version__
+    from omp_memory import mcp
+    assert mcp.SERVER_VERSION == __version__
+
+
+def test_package_version_matches_pyproject():
+    from pathlib import Path
+    import re
+    import omp_memory
+    root = Path(omp_memory.__file__).resolve().parent.parent.parent
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+    m = re.search(r'^version = "([^"]+)"', pyproject, re.M)
+    assert m, "version missing from pyproject"
+    assert m.group(1) == omp_memory.__version__

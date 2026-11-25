@@ -1,5 +1,7 @@
 """Local-first SQLite memory for coding agents."""
 
+__version__ = "0.2.0"
+
 from .db import (
     BACKUP_DIR,
     DB_PATH,
@@ -95,7 +97,7 @@ from .provider import (
     is_core_memory_provider,
 )
 
-__version__ = "0.2.0"
+
 
 __all__ = [
     "BACKUP_DIR",
