@@ -165,6 +165,31 @@ omp-memory health                           # integrity + backup status
 omp-memory overview                         # the universe, in your browser
 ```
 
+Maintenance and recovery:
+
+```bash
+omp-memory maintenance decay                # age confidence toward the floor
+omp-memory maintenance forget_cold --apply  # delete cold records (report first)
+omp-memory maintenance promote              # hot inferences -> FACT
+omp-memory backup                           # consistent snapshot (VACUUM INTO)
+omp-memory repair                           # restore the newest usable snapshot
+omp-memory disk                             # free space + store size
+omp-memory checkpoint --session <id>        # snapshot evidence before compaction
+omp-memory restore <checkpoint-id>          # rebuild from a checkpoint
+```
+
+Inspection and export:
+
+```bash
+omp-memory recap                            # summarise a session or project
+omp-memory context                          # fenced memory block for a prompt
+omp-memory scan "text"                      # secret scan, same rules as capture
+omp-memory mirror ./docs/memory             # export records to markdown
+omp-memory reinforce <id> success           # record an outcome
+omp-memory promote <id>                     # verified record -> RULE
+omp-memory analyze                          # derive INFERENCE rows from logs
+```
+
 ## What the bench shows
 
 Measured, not claimed. Two tiers, kept separate because their metrics are not comparable:
@@ -219,19 +244,34 @@ hits = m.recall(conn, "install dependencies", limit=3)
 
 ## Configuration
 
-| Variable | Default |
-| --- | --- |
-| `OMP_MEMORY_DB` | `~/.omp/memory/memory.db` |
-| `OMP_MEMORY_BACKUP_DIR` | `~/.omp/memory/backups` |
-| `OMP_MEMORY_MAX_BACKUPS` | `10` |
-| `OMP_MEMORY_WEB_DIR` | built UI assets for `overview` |
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `OMP_MEMORY_DB` | `~/.omp/memory/memory.db` | database file |
+| `OMP_MEMORY_BACKUP_DIR` | `~/.omp/memory/backups` | snapshot directory |
+| `OMP_MEMORY_MAX_BACKUPS` | `10` | snapshots kept (newest win) |
+| `OMP_MEMORY_BUSY_TIMEOUT_MS` | `30000` | SQLite lock wait |
+| `OMP_MEMORY_WEB_DIR` | bundled assets | UI root for `overview` |
+| `OMP_MEMORY_IDLE_SECONDS` | `600` | watch: idle before a sleep pass |
+| `OMP_MEMORY_POLL_SECONDS` | `60` | watch: poll interval |
+| `OMP_MEMORY_SLEEP_INTERVAL` | `3600` | watch: seconds between sleep passes |
+| `OMP_MEMORY_SESSIONS` | agent sessions dir | where `capture` reads logs from |
+| `OMP_PROFILE` | `default` | profile name under `~/.omp/profiles` |
+| `HONCHO_HOME` | `~/.omp/profiles/<p>/agent/honcho` | MCP data root |
+| `HONCHO_MAX_RECALL` | `8` | default recall limit |
+| `HONCHO_TRANSPORT` | `stdio` | `stdio` or `http` |
+| `HONCHO_PORT` | `8765` | HTTP port when `HONCHO_TRANSPORT=http` |
+| `HONCHO_TOKENS` | unset | comma list of bearer tokens for HTTP mode |
+| `HONCHO_EXTRA_TOOLS` | unset | `os.pathsep` list of extra tool directories |
+
+Every value is parsed tolerantly: a malformed number falls back to its default
+instead of stopping the server from starting.
 
 Updates: `npx honcho-pi@latest update` (keeps the database). Status: `npx honcho-pi@latest status`.
 
 ## Development
 
 ```bash
-python -m pytest              # 386 tests, no network
+python -m pytest              # 471 tests, no network
 bash bin/clean-code.sh        # quality gate
 bash bin/web-deploy.sh        # build + deploy the web UI
 ```

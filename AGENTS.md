@@ -3,7 +3,7 @@
 ## Commands
 
 ```bash
-python -m pytest          # full suite, ~12s, no network
+python -m pytest          # full suite, ~30s, no network
 bash bin/clean-code.sh    # quality gate
 bash install.sh --dry-run # preview install
 ```
