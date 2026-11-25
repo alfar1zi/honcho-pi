@@ -20,7 +20,7 @@ def test_schema_v15_columns(conn):
     assert {"decay_tau", "valid_from", "valid_until",
             "anchor_path", "anchor_sha", "stale"} <= cols
     v = conn.execute("SELECT version FROM schema_version").fetchone()[0]
-    assert v == 17
+    assert v == 18
 
 
 def test_digest_budget_and_stability(conn):

@@ -98,3 +98,51 @@ def test_supersede_closes_valid_until(conn):
         "SELECT valid_until, superseded_by FROM records WHERE superseded_by != ''"
     ).fetchone()
     assert row["valid_until"] != ""
+
+
+# --- consolidation ratchet (CogMemory finding) -------------------------------
+
+def test_consolidate_pays_once_per_retrieval_batch(conn):
+    rec = db.remember(conn, "FACT", "consolidation ratchet probe value",
+                      confidence=0.5)
+    rid = rec["id"]
+    for _ in range(db.RETRIEVALS_FOR_CONSOLIDATION):
+        db.log_retrieval(conn, [rid])
+    conf0 = float(conn.execute("SELECT confidence FROM records WHERE id=?",
+                               (rid,)).fetchone()[0])
+    first = db.consolidate(conn)
+    assert len(first) == 1
+    conf1 = float(conn.execute("SELECT confidence FROM records WHERE id=?",
+                               (rid,)).fetchone()[0])
+    assert conf1 > conf0
+    # The same retrieval rows must not pay again.
+    for _ in range(3):
+        assert db.consolidate(conn) == []
+    conf2 = float(conn.execute("SELECT confidence FROM records WHERE id=?",
+                               (rid,)).fetchone()[0])
+    assert conf2 == conf1
+
+
+def test_consolidate_does_not_reset_updated_at(conn):
+    rec = db.remember(conn, "FACT", "immortality probe value", confidence=0.5)
+    rid = rec["id"]
+    before = conn.execute("SELECT updated_at FROM records WHERE id=?",
+                          (rid,)).fetchone()[0]
+    for _ in range(db.RETRIEVALS_FOR_CONSOLIDATION):
+        db.log_retrieval(conn, [rid])
+    db.consolidate(conn)
+    after = conn.execute("SELECT updated_at FROM records WHERE id=?",
+                         (rid,)).fetchone()[0]
+    assert before == after
+
+
+def test_new_retrievals_after_consolidation_earn_again(conn):
+    rec = db.remember(conn, "FACT", "second batch probe value", confidence=0.5)
+    rid = rec["id"]
+    for _ in range(db.RETRIEVALS_FOR_CONSOLIDATION):
+        db.log_retrieval(conn, [rid])
+    assert len(db.consolidate(conn)) == 1
+    assert db.consolidate(conn) == []
+    for _ in range(db.RETRIEVALS_FOR_CONSOLIDATION):
+        db.log_retrieval(conn, [rid])
+    assert len(db.consolidate(conn)) == 1

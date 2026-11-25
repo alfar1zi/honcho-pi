@@ -167,7 +167,7 @@ INTENT_CUE_BONUS = 0.10
 INTENT_DECAY_TAU_DAYS = 7.0
 
 PRE_COMPRESS_CHECKPOINT_API_VERSION = 2
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 # Recall reranking weights. Lexical is dominant (0.70) because recall is
 # primarily an inquiry of relevance. Heat is moderate (0.25) so stale yet
 # relevant records do not sink while breaking ties among equally relevant
@@ -594,7 +594,8 @@ _RECORDS_DDL = """CREATE TABLE IF NOT EXISTS records (
         valid_until TEXT NOT NULL DEFAULT '',
         anchor_path TEXT NOT NULL DEFAULT '',
         anchor_sha TEXT NOT NULL DEFAULT '',
-        stale INTEGER NOT NULL DEFAULT 0
+        stale INTEGER NOT NULL DEFAULT 0,
+        consolidated_at TEXT NOT NULL DEFAULT ''
     );"""
 
 
@@ -1109,6 +1110,19 @@ def _migrate(conn: sqlite3.Connection):
         conn.execute("INSERT INTO schema_version(version) VALUES (17)")
         conn.commit()
 
+    if version < 18:
+        # v18: consolidated_at closes the consolidation ratchet. Without it
+        # the same three retrieval rows paid out CONSOLIDATE_GAIN on every
+        # sleep pass, pinning any recalled record at confidence 1.0 within
+        # hours and permanently defeating decay.
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(records)").fetchall()]
+        if "consolidated_at" not in cols:
+            conn.execute(
+                "ALTER TABLE records ADD COLUMN consolidated_at TEXT NOT NULL DEFAULT ''")
+        conn.execute("DELETE FROM schema_version")
+        conn.execute("INSERT INTO schema_version(version) VALUES (18)")
+        conn.commit()
+
 
 def init_db(conn: sqlite3.Connection, db_path: str = None, auto_repair: bool = True):
     """Create or migrate the schema on an open connection.
@@ -1503,24 +1517,32 @@ def consolidate(conn, now=None) -> list:
     """Reward repeated retrieval with a small confidence gain.
 
     Roediger & Karpicke 2006: retrieval practice consolidates. A record
-    pulled back three or more times in the last week with no success or
-    failure attached is being used without contradiction; it earns
-    CONSOLIDATE_GAIN once per pass. Records already verified stay put.
+    pulled back RETRIEVALS_FOR_CONSOLIDATION times since its last
+    consolidation with no success or failure attached is being used
+    without contradiction; it earns CONSOLIDATE_GAIN once.
+
+    Two invariants keep this from becoming a ratchet:
+    - Retrievals are counted only AFTER the record's last consolidation
+      (`consolidated_at`), so the same three rows cannot pay out twice.
+    - updated_at is NOT touched. It is the recency signal and one of
+      apply_decay's anchors; resetting it on every pass made a frequently
+      recalled record immortal (confidence pinned at 1.0 within hours and
+      decay forever looking at a fresh timestamp).
     """
     now = now or datetime.now(timezone.utc)
     cutoff = (now - timedelta(days=RETRIEVAL_WINDOW_DAYS)).isoformat()
     rows = conn.execute(
         """
-        SELECT r.id, r.confidence,
+        SELECT r.id, r.confidence, r.consolidated_at,
                (SELECT count(*) FROM reinforcement x
                  WHERE x.record_id = r.id AND x.signal = 'retrieval'
-                   AND x.ts >= ?) AS retrievals,
+                   AND x.ts >= ? AND x.ts > r.consolidated_at) AS retrievals,
                (SELECT count(*) FROM reinforcement x
                  WHERE x.record_id = r.id AND x.signal = 'success'
-                   AND x.ts >= ?) AS successes,
+                   AND x.ts >= ? AND x.ts > r.consolidated_at) AS successes,
                (SELECT count(*) FROM reinforcement x
                  WHERE x.record_id = r.id AND x.signal = 'failure'
-                   AND x.ts >= ?) AS failures
+                   AND x.ts >= ? AND x.ts > r.consolidated_at) AS failures
         FROM records r
         WHERE r.verified = 0 AND r.superseded_by = ''
         """, (cutoff, cutoff, cutoff)).fetchall()
@@ -1531,7 +1553,7 @@ def consolidate(conn, now=None) -> list:
         if row["successes"] or row["failures"]:
             continue
         conf = min(1.0, float(row["confidence"] or 0.0) + CONSOLIDATE_GAIN)
-        conn.execute("UPDATE records SET confidence=?, updated_at=? WHERE id=?",
+        conn.execute("UPDATE records SET confidence=?, consolidated_at=? WHERE id=?",
                      (conf, now.isoformat(), row["id"]))
         consolidated.append({"id": row["id"], "from": row["confidence"],
                              "to": conf})
