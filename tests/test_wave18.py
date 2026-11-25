@@ -175,3 +175,41 @@ def test_provenance_penalty_does_not_apply_to_verified(conn):
                     verified=1, confidence=0.9, source="auto-capture")
     hits = db.recall(conn, "gateway timeout thirty seconds", limit=5)
     assert hits and hits[0]["id"] == v["id"]
+
+
+# --- secure delete / FTS purge (stage 2) --------------------------------------
+
+def test_secure_delete_is_enabled(conn):
+    assert conn.execute("PRAGMA secure_delete").fetchone()[0] == 1
+
+
+def test_forgotten_content_leaves_the_db_file(tmp_path, monkeypatch):
+    path = str(tmp_path / "purge.db")
+    monkeypatch.setenv("OMP_MEMORY_DB", path)
+    monkeypatch.setenv("OMP_MEMORY_BACKUP_DIR", str(tmp_path / "bak"))
+    c = db.connect(path)
+    db.init_db(c)
+    canary = "SECRETCANARYVALUE should vanish from disk"
+    rec = db.remember(c, "FACT", canary, verified=1)
+    c.commit()
+    # With secure_delete and WAL the text may live in the WAL, not the main
+    # file, so search both before asserting it is gone.
+    def on_disk():
+        blobs = []
+        for suffix in ("", "-wal"):
+            fp = path + suffix
+            if __import__("os").path.exists(fp):
+                with open(fp, "rb") as handle:
+                    blobs.append(handle.read())
+        return b"".join(blobs)
+
+    assert b"SECRETCANARYVALUE" in on_disk()
+    c.execute("DELETE FROM reinforcement WHERE record_id=?", (rec["id"],))
+    c.execute("DELETE FROM records WHERE id=?", (rec["id"],))
+    c.commit()
+    db.purge_fts_free_pages(c)
+    c.commit()
+    c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    c.commit()
+    c.close()
+    assert b"SECRETCANARYVALUE" not in on_disk()

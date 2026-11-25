@@ -391,6 +391,10 @@ def tool_forget(args: Dict[str, Any], user: str = "") -> str:
         conn.execute("DELETE FROM reinforcement WHERE record_id=?", (rid,))
         conn.execute("DELETE FROM records WHERE id=?", (rid,))
         conn.commit()
+        # secure_delete scrubs ordinary pages; the FTS index needs its own
+        # rewrite or the forgotten text stays readable in the db file.
+        db.purge_fts_free_pages(conn)
+        conn.commit()
         return f"Forgot {rid} ({rec['type']})"
     return with_conn(user, body)
 
