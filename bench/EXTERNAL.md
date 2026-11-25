@@ -125,3 +125,46 @@ to 31 days, FSRS-6 learns d=0.1542; both are shallower than 0.5. But they
 describe different things (nonsense-syllable savings vs fact retention), so
 changing beta would be tuning to a curve honcho is not modelling. **No
 change made**; flagged with the source so the decision is auditable.
+
+## External probe 2: LoCoMo (ACL 2024)
+
+Second external dataset, chosen because it fixes two LongMemEval blind spots:
+per-turn gold labels (`dia_id`, e.g. `D1:3`) and **dated sessions**, so the
+temporal path is exercised instead of inert.
+
+- Dataset: `snap-research/locomo` `data/locomo10.json`, 2,805,274 bytes
+- SHA-256: `79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4`
+  (byte-identical to the upstream GitHub file; local copy verified)
+- Adapter: `bench/locomo.py`, stdlib, SHA-gated, one project per conversation
+  (10 dialogues stay separate, as in the canonical setup)
+- 5,882 turns ingested; 1,977 QA items scored
+
+| Category | n | hit@1 | R@10 |
+|---|---:|---:|---:|
+| temporal | 320 | 0.4562 | 0.7031 |
+| multi-hop | 841 | 0.4007 | 0.6742 |
+| adversarial | 446 | 0.3700 | 0.6020 |
+| open-domain | 89 | 0.2022 | 0.4157 |
+| single-hop | 281 | 0.1957 | 0.6050 |
+| **Overall** | **1,977** | **0.3647** | **--** |
+
+### Why this is much lower than LongMemEval (0.9556 R@5)
+
+Not a contradiction -- a different question. LongMemEval-oracle asks whether
+the evidence turn is retrievable when the question was authored from that
+same evidence. LoCoMo asks conversational questions ("When did Caroline go
+to the LGBTQ support group?") whose answer turn says "I went to that support
+group last Tuesday", with no word overlap. Lexical retrieval cannot close
+that gap; the low score is an honest measurement of the lexical ceiling,
+and it is the strongest argument yet for the optional semantic boundary
+that the zero-dependency rule keeps parked.
+
+This also confirms the audit's methodological finding: R@5 0.9556 was a
+lexical number, not a quality number.
+
+### Cost note
+
+`bench/locomo.py` uses `search()` rather than `recall()`: the probe asks
+whether the right turn is findable at all, and full recall (PPR + MMR +
+cue/heat) is ~3x the cost across ~2k probes. Recall quality on this corpus
+is a separate, later measurement.

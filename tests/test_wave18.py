@@ -241,3 +241,22 @@ def test_recency_actually_moves_heat(conn):
     import datetime
     now = datetime.datetime.fromisoformat("2026-11-24T00:00:00+00:00")
     assert db.heat_of(conn, new, now=now) > db.heat_of(conn, old, now=now)
+
+
+# --- vocabulary cache + signals bulk (stage 4 perf) --------------------------
+
+def test_vocab_cache_invalidates_on_write(conn):
+    v1 = len(db._vocab(conn))
+    db.upsert_record(conn, "FACT", "zzuniquecacheterm about widgets")
+    conn.commit()
+    v2 = len(db._vocab(conn))
+    assert v2 > v1
+
+
+def test_record_signals_bulk_matches_single(conn):
+    a = db.remember(conn, "FACT", "bulk signals alpha", confidence=0.5)
+    b = db.remember(conn, "FACT", "bulk signals beta", confidence=0.5)
+    db.reinforce(conn, a["id"], "success", source="probe")
+    bulk = db._record_signals_bulk(conn, [a["id"], b["id"]])
+    assert len(bulk[a["id"]]) == len(db._record_signals(conn, a["id"]))
+    assert bulk[b["id"]] == []

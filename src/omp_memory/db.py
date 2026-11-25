@@ -1798,18 +1798,47 @@ def _fts_query(query: str) -> str:
 FUZZY_CUTOFF = 0.75
 MIN_REPAIR_LEN = 5
 
+_VOCAB_CACHE: dict = {}
+_VOCAB_CACHE_LOCK = threading.Lock()
+
+
 def _vocab(conn: sqlite3.Connection) -> list:
     """Distinct stemmed terms in the index, for typo repair.
 
     fts5vocab is a read-only mirror of the index, so it is always in sync
     and never needs maintenance. Missing table means an uninitialised or
     in-memory database; an empty vocabulary makes every repair a no-op.
+
+    Loading the full term list was the top cost of a rerank (0.35s of 1.4s
+    over five queries) because it ran twice per query. The list is cached
+    per (database file, sqlite data_version): any write by another
+    connection bumps data_version and invalidates the entry, so the cache
+    cannot go stale silently.
     """
     try:
-        return [r[0] for r in conn.execute(
+        db_file = conn.execute("PRAGMA database_list").fetchone()[2]
+        # data_version only bumps on commits from OTHER connections, so the
+        # same-connection writer needs the record count too: any insert or
+        # delete changes it, and an FTS term set cannot change without one.
+        version = (conn.execute("PRAGMA data_version").fetchone()[0],
+                   conn.execute("SELECT COUNT(*) FROM records").fetchone()[0])
+    except sqlite3.OperationalError:
+        db_file, version = "", (-1, -1)
+    key = (db_file, version)
+    with _VOCAB_CACHE_LOCK:
+        cached = _VOCAB_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        vocab = [r[0] for r in conn.execute(
             "SELECT term FROM records_fts_vocab ORDER BY term")]
     except sqlite3.OperationalError:
-        return []
+        vocab = []
+    with _VOCAB_CACHE_LOCK:
+        _VOCAB_CACHE[key] = vocab
+        if len(_VOCAB_CACHE) > 8:
+            _VOCAB_CACHE.pop(next(iter(_VOCAB_CACHE)))
+    return vocab
 
 
 def _repair_typos(conn: sqlite3.Connection, words: list, vocab: list) -> list:
@@ -2422,8 +2451,9 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
     chain_heads = {c["superseded_by"] for c in candidates
                    if c.get("superseded_by")}
     scored = []
+    signal_map = _record_signals_bulk(conn, [c["id"] for c in candidates])
     for cand in candidates:
-        signals = _record_signals(conn, cand["id"])
+        signals = signal_map.get(cand["id"], [])
         parts = heat_parts(cand, signals, now=now)
         heat = parts["heat"]
         lexical = lexicals[cand["id"]]
@@ -2773,6 +2803,27 @@ def _record_signals(conn: sqlite3.Connection, record_id: str) -> list:
         "SELECT signal, source, delta, ts FROM reinforcement WHERE record_id=? ORDER BY ts",
         (record_id,)).fetchall()
     return [dict(r) for r in rows]
+
+
+def _record_signals_bulk(conn: sqlite3.Connection, record_ids: list) -> dict:
+    """Signals for many records in one query, keyed by record id.
+
+    recall() reranks a pool of candidates and needs each one's history for
+    heat. One query per candidate is an N+1 that dominated rerank time on a
+    large corpus (LoCoMo: ~5.9k turns). Chunked to stay under SQLite's
+    variable limit.
+    """
+    out = {rid: [] for rid in record_ids}
+    ids = list(dict.fromkeys(record_ids))
+    for start in range(0, len(ids), 900):
+        chunk = ids[start:start + 900]
+        marks = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+            "SELECT record_id, signal, source, delta, ts FROM reinforcement"
+            f" WHERE record_id IN ({marks}) ORDER BY ts", chunk).fetchall()
+        for row in rows:
+            out[row["record_id"]].append(dict(row))
+    return out
 
 
 def heat_parts(row: dict, signals: list, now=None) -> dict:
