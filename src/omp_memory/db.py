@@ -1171,7 +1171,8 @@ def init_db(conn: sqlite3.Connection, db_path: str = None, auto_repair: bool = T
 def upsert_record(conn: sqlite3.Connection, rtype: str, content: str, evidence: str = "",
                   verified: int = 0, confidence: float = 0.5, source: str = "",
                   tags: str = "", session_id: str = "", project_id: str = "",
-                  parent_id: str = "", event_id: str = "") -> str:
+                  parent_id: str = "", event_id: str = "",
+                  happened_at: str = "") -> str:
     if rtype not in VALID_TYPES:
         raise ValueError(f"invalid type: {rtype}")
     if not content:
@@ -1180,6 +1181,11 @@ def upsert_record(conn: sqlite3.Connection, rtype: str, content: str, evidence: 
     confidence = min(1.0, max(0.0, float(confidence)))
     project_key = project_id or ""
     session_key = session_id or ""
+    # happened_at lets an import or a benchmark place a record at its real
+    # time. It defaults to now, so every existing caller is unchanged, but
+    # without it a temporal benchmark is inert: every row would look
+    # one second old and the recency/decay machinery could never be tested.
+    stamp = happened_at or now_iso()
     record_id = record_id_for(rtype, content, source, project_key)
 
     existing = conn.execute(
@@ -1198,7 +1204,7 @@ def upsert_record(conn: sqlite3.Connection, rtype: str, content: str, evidence: 
         conn.execute(
             "UPDATE records SET updated_at=?, evidence=?, verified=?, confidence=?,"
             " tags=?, session_id=?, parent_id=?, event_id=? WHERE id=?",
-            (now_iso(), evidence or "", 1 if verified else 0, confidence,
+            (stamp, evidence or "", 1 if verified else 0, confidence,
              tags or "", session_key, parent_id or "", event_id, record_id)
         )
     else:
@@ -1208,7 +1214,7 @@ def upsert_record(conn: sqlite3.Connection, rtype: str, content: str, evidence: 
                  created_at,updated_at,session_id,project_id,parent_id,event_id)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (record_id, rtype, content, evidence or "", 1 if verified else 0, confidence,
-              source or "", tags or "", now_iso(), now_iso(), session_key, project_key,
+              source or "", tags or "", stamp, stamp, session_key, project_key,
               parent_id or "", event_id or ""))
 
     conn.commit()

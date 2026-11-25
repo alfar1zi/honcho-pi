@@ -213,3 +213,31 @@ def test_forgotten_content_leaves_the_db_file(tmp_path, monkeypatch):
     c.commit()
     c.close()
     assert b"SECRETCANARYVALUE" not in on_disk()
+
+
+# --- happened_at (stage 3): temporal ingest --------------------------------
+
+def test_happened_at_sets_both_timestamps(conn):
+    rid = db.upsert_record(conn, "FACT", "legacy note about gateways",
+                           happened_at="2025-01-01T00:00:00+00:00")
+    row = conn.execute("SELECT created_at, updated_at FROM records WHERE id=?",
+                       (rid,)).fetchone()
+    assert row["created_at"].startswith("2025-01-01")
+    assert row["updated_at"].startswith("2025-01-01")
+
+
+def test_happened_at_defaults_to_now(conn):
+    rid = db.upsert_record(conn, "FACT", "fresh note about gateways")
+    row = conn.execute("SELECT created_at FROM records WHERE id=?",
+                       (rid,)).fetchone()
+    assert row["created_at"] >= "2026-01-01"
+
+
+def test_recency_actually_moves_heat(conn):
+    old = db.upsert_record(conn, "FACT", "old value one",
+                           happened_at="2025-01-01T00:00:00+00:00")
+    new = db.upsert_record(conn, "FACT", "new value one",
+                           happened_at="2026-11-20T00:00:00+00:00")
+    import datetime
+    now = datetime.datetime.fromisoformat("2026-11-24T00:00:00+00:00")
+    assert db.heat_of(conn, new, now=now) > db.heat_of(conn, old, now=now)
