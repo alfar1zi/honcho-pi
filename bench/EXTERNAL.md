@@ -104,3 +104,24 @@ R@5 is unchanged but hit@1 drops ~0.09: the agent's own answer outranks
 the human-authored gold turn. **Verdict: rejected.** A claim ledger must
 not be a recallable memory type; if implemented at all it belongs in a
 separate audit table with no FTS exposure. No engine change was made.
+
+## Open: PPR restart alpha
+
+HippoRAG reports damping 0.5; honcho restarts at alpha=0.15. `bench/ppr_ab.py`
+raced 0.15 / 0.30 / 0.50 on the pinned synthetic corpus: all three returned
+hit@1 0.5400, MRR 0.5472 (n=200). The arms are identical because PPR's bonus
+never decides top-1 there -- lexical already dominates, so the probe cannot
+falsify the constant. Verified separately that alpha does change the
+normalised mass (0.58 vs 0.21 at the third node), so the null result is the
+benchmark's limit, not a wiring bug. **No change made**; alpha stays 0.15
+until a multi-hop-specific probe exists.
+
+## Open: decay exponent
+
+`DECAY_POWER_TAU_DAYS=10, DECAY_POWER_BETA=0.5` gives retention(30d)=0.50,
+i.e. it is a deliberate 30-day half-life, not an approximation error.
+Murre & Dros (PMC4492928, Table 5) fit a1=0.09-0.17 for savings over minutes
+to 31 days, FSRS-6 learns d=0.1542; both are shallower than 0.5. But they
+describe different things (nonsense-syllable savings vs fact retention), so
+changing beta would be tuning to a curve honcho is not modelling. **No
+change made**; flagged with the source so the decision is auditable.
