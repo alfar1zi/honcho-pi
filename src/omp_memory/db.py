@@ -340,10 +340,40 @@ def _tokens(text: str) -> list:
     return _TOKEN_RE.findall(identity_text(text))
 
 
+_NUMERIC_RE = re.compile(
+    r"\d+(?:\.\d+)?\s*(?:"
+    r"seconds|secs|sec|minutes|mins|min|hours|hrs|hr|days|day|weeks|wk|months|years|yr"
+    r"|ms|tb|gb|mb|kb|px|rem|em|%|b|k|m|s|h|d|w|y"
+    r")?",
+    re.IGNORECASE)
+
+
 def _numeric_tokens(text: str) -> frozenset:
-    """Numbers are compared exactly: "section 2" and "section 9" are different
-    facts however similar the surrounding words are."""
-    return frozenset(t for t in _tokens(text) if t.isdigit())
+    """Numbers are compared exactly, including their unit.
+
+    "timeout 1000ms", "retention 30d", "$40k", "5GB" all reduce to nothing
+    under a bare isdigit() test, which silently disabled the number guard on
+    both the upsert path and the numeric-conflict branch. The unit is kept in
+    the token so "30 days" and "30 hours" cannot be treated as the same
+    quantity; whitespace between number and unit is normalised away.
+    """
+    out = set()
+    for m in _NUMERIC_RE.finditer(text):
+        t = re.sub(r"\s+", "", m.group(0).lower())
+        if not any(ch.isdigit() for ch in t):
+            continue
+        # Plural/long unit spellings normalise to one canonical form so
+        # "30 days" and "30d" are the same quantity, while "30d" and "30h"
+        # stay different.
+        t = re.sub(r"(seconds|secs|sec)$", "s", t)
+        t = re.sub(r"(minutes|mins|min)$", "min", t)
+        t = re.sub(r"(hours|hrs|hr)$", "h", t)
+        t = re.sub(r"(days|day)$", "d", t)
+        t = re.sub(r"(weeks|wk)$", "w", t)
+        t = re.sub(r"(months)$", "mo", t)
+        t = re.sub(r"(years|yr)$", "y", t)
+        out.add(t)
+    return frozenset(out)
 
 
 def similarity(a: str, b: str) -> float:
@@ -1234,25 +1264,33 @@ def find_similar(conn: sqlite3.Connection, content: str, limit: int = 5,
     return hits[:limit]
 
 
-def _idf(conn: sqlite3.Connection, token: str) -> float:
-    """Inverse document frequency of a token across stored records.
+IDF_VETO_DF_RATIO = 0.02   # a token in <=2% of the corpus is discriminating
+IDF_VETO_MIN_DF = 2        # never veto on a token that appears once
 
-    Stdlib-only IDF over the FTS index: log(1 + N / (1 + df)). Rare
-    tokens get a high value, common ones a low one.
+
+def _idf_veto(conn: sqlite3.Connection, a: str, b: str) -> bool:
+    """Fellegi-Sunter blocking-key veto on a *relative* rarity test.
+
+    The earlier absolute theta=2.0 was not a rarity test: log(1+N/(1+df))>2
+    means df < 15.5% of the corpus at large N, is unsatisfiable for N<=6
+    (so the shipped tests never exercised it), and for N>=7 fires on any
+    token the other side merely lacks -- blocking legitimate paraphrase
+    merges. Rarity is now stated directly as a document-frequency ratio
+    with a floor, so a token present in one or two records is only treated
+    as a blocking key once the corpus is large enough for that to mean
+    something.
     """
-    total = conn.execute("SELECT COUNT(*) FROM records").fetchone()[0] or 1
-    df = conn.execute(
-        "SELECT COUNT(*) FROM records WHERE content LIKE ?", (f"%{token}%",)).fetchone()[0]
-    return math.log(1.0 + total / (1.0 + df))
-
-
-def _idf_veto(conn: sqlite3.Connection, a: str, b: str, theta: float = 2.0) -> bool:
-    """Claude-mem #3038 style: a rare discriminating token present on only
-    one side vetoes a merge regardless of lexical similarity."""
+    total = conn.execute("SELECT COUNT(*) FROM records").fetchone()[0] or 0
+    if total < 8:
+        return False
+    limit = max(IDF_VETO_MIN_DF, int(total * IDF_VETO_DF_RATIO))
     sa = set(_tokens(a))
     sb = set(_tokens(b))
     for t in sa ^ sb:
-        if _idf(conn, t) > theta:
+        df = conn.execute(
+            "SELECT COUNT(*) FROM records WHERE content LIKE ?",
+            (f"%{t}%",)).fetchone()[0]
+        if 0 < df <= limit:
             return True
     return False
 
@@ -1402,14 +1440,30 @@ def _set_superseded(conn, record_id: str, source: str,
     own_numbers = _numeric_tokens(rewritten[0])
     similar = [c for c in similar
                if _numeric_tokens(c["content"]) == own_numbers]
+    # Close the loser's validity window at the winner's valid_from, the
+    # Graphiti edge-invalidation rule: bi-temporal as_of must not return a
+    # fact whose window should already be shut. The old code set only the
+    # superseded_by pointer, so as_of queries kept serving the stale fact.
+    winner_from = conn.execute(
+        "SELECT valid_from, updated_at FROM records WHERE id=?",
+        (record_id,)).fetchone()
+    close_at = (winner_from[0] if winner_from and winner_from[0] else
+                (winner_from[1] if winner_from else ""))
     linked = []
     for cand in similar:
         if cand["id"] == record_id:
             continue
-        conn.execute(
-            "UPDATE records SET superseded_by=? WHERE id=?"
-            " AND superseded_by=''",
-            (record_id, cand["id"]))
+        if close_at:
+            conn.execute(
+                "UPDATE records SET superseded_by=?,"
+                " valid_until=CASE WHEN valid_until='' THEN ? ELSE valid_until END"
+                " WHERE id=? AND superseded_by=''",
+                (record_id, close_at, cand["id"]))
+        else:
+            conn.execute(
+                "UPDATE records SET superseded_by=? WHERE id=?"
+                " AND superseded_by=''",
+                (record_id, cand["id"]))
         linked.append(cand["id"])
     # Chain resolution: rows superseded by the rewritten record may
     # themselves be the target of older markers (A -> B, B -> C). After
@@ -2011,7 +2065,7 @@ def _search_exact(conn: sqlite3.Connection, query: str, limit: int = 20, rtype: 
                r.created_at, r.updated_at, r.session_id, r.project_id, r.parent_id,
                r.about_peer, r.superseded_by, r.importance, r.cue, r.decay_tau,
                r.stale, r.valid_from, r.valid_until,
-               bm25(records_fts, 5.0, 1.0, 0.5) / CASE r.type
+               bm25(records_fts, 0.0, 5.0, 1.0, 0.5) / CASE r.type
                    WHEN 'RULE' THEN 1.4 WHEN 'CORRECTION' THEN 1.4
                    WHEN 'DECISION' THEN 1.2 WHEN 'WORKFLOW' THEN 1.2
                    WHEN 'PROCEDURAL' THEN 1.2 WHEN 'INTENT' THEN 1.0
