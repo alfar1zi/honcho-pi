@@ -455,6 +455,14 @@ def tool_maintenance(args: Dict[str, Any], user: str = "") -> str:
                 reflect=bool(args.get("reflect")),
                 staging=bool(args.get("staging")))
             return json.dumps(report, indent=2, sort_keys=True)
+        if op == "ingest_md":
+            # omp's `learn` tool appends to memories/**/learned.md after a
+            # tombstone that says memory moved here. Nothing read those files
+            # after the one-time reclaim, so recent lessons existed only on
+            # disk. This op closes that fork incrementally (mtime+size+sha).
+            from . import md_ingest
+            report = md_ingest.ingest_md(db, conn, apply=bool(args.get("apply")))
+            return json.dumps(report, indent=2, sort_keys=True)
         if op == "review":
             # Hermes background-review without our own LLM: return the
             # review contract + recent candidates; the host agent (already
@@ -499,8 +507,8 @@ def tool_maintenance(args: Dict[str, Any], user: str = "") -> str:
             return json.dumps(db.mark_not_conflict(conn, str(a), str(b)),
                               indent=2, sort_keys=True)
         return (f"maintenance: unknown op {op}; use decay | sleep | reflect | "
-                "forget_cold | promote | capture | review | pending | approve | reject"
-                " | not_conflict")
+                "forget_cold | promote | capture | ingest_md | review | pending"
+                " | approve | reject | not_conflict")
     return with_conn(user, body)
 def _scan_secret(text: str) -> Optional[str]:
     # One pattern list for every write door (capture, MCP, web).
@@ -613,7 +621,9 @@ TOOLS: List[Dict[str, Any]] = [
                        "(or with apply=true deletes) untouched cold records, "
                        "op=promote reconsiders hot INFERENCE/ASSUMPTION, "
                        "op=capture extracts lessons (staging=true parks them for "
-                       "review), op=pending lists staged writes, op=approve/reject "
+                       "review), op=ingest_md imports omp's builtin "
+                       "memories/**/*.md incrementally, op=pending lists staged "
+                       "writes, op=approve/reject "
                        "decides one by pending_id, op=not_conflict records an "
                        "adjudicated compatible pair (a, b) so it never resurfaces."),
         "inputSchema": {
