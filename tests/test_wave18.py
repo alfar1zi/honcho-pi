@@ -146,3 +146,32 @@ def test_new_retrievals_after_consolidation_earn_again(conn):
     for _ in range(db.RETRIEVALS_FOR_CONSOLIDATION):
         db.log_retrieval(conn, [rid])
     assert len(db.consolidate(conn)) == 1
+
+
+# --- provenance gating (stage 1) ---------------------------------------------
+
+def test_low_trust_unverified_is_penalized_below_verified(conn):
+    true = db.remember(conn, "FACT", "release cadence is weekly on tuesdays",
+                       verified=1, confidence=0.9, source="agent")
+    db.remember(conn, "FACT", "release cadence is weekly on tuesdays always",
+                verified=0, confidence=0.9, source="auto-capture")
+    hits = db.recall(conn, "release cadence weekly tuesdays", limit=5)
+    assert hits and hits[0]["id"] == true["id"]
+
+
+def test_provenance_penalty_is_off_for_trusted_sources(conn):
+    a = db.remember(conn, "FACT", "cache ttl is sixty seconds here",
+                    verified=0, confidence=0.9, source="agent")
+    db.remember(conn, "FACT", "cache ttl is sixty seconds here too",
+                verified=0, confidence=0.9, source="auto-capture")
+    assert db.LOW_TRUST_SOURCES
+    assert "agent" not in db.LOW_TRUST_SOURCES
+    hits = db.recall(conn, "cache ttl sixty seconds", limit=5)
+    assert hits and hits[0]["id"] == a["id"]
+
+
+def test_provenance_penalty_does_not_apply_to_verified(conn):
+    v = db.remember(conn, "FACT", "gateway timeout is thirty seconds",
+                    verified=1, confidence=0.9, source="auto-capture")
+    hits = db.recall(conn, "gateway timeout thirty seconds", limit=5)
+    assert hits and hits[0]["id"] == v["id"]

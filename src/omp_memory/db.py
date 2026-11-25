@@ -158,6 +158,17 @@ REWRITE_MAX_CONTENT_LEN = 20000
 # query always resolves a chain to its current answer.
 SUPERSEDED_BOOST = 0.05
 SUPERSEDED_PENALTY = 0.15
+# Low-trust provenance. An auto-captured or scraped record competes with a
+# human-verified one on equal footing unless something marks the difference.
+# The penalty is deliberately small and only applies when the record is
+# unverified AND its source is in the low-trust set: a big or unconditional
+# penalty would downrank genuine auto-captured knowledge, which is most of a
+# real corpus. Measured, not assumed: bench/provenance_ab.py.
+PROVENANCE_PENALTY_ENABLED = True
+PROVENANCE_PENALTY = 0.04
+LOW_TRUST_SOURCES = frozenset({
+    "auto-capture", "scrape", "scraped", "external", "web", "unknown",
+})
 # Cue-triggered recall for INTENT records (Rummel & Kvavilashvili 2023): a
 # query carrying the intent's cue pulls the intent forward by this bonus,
 # scaled by importance and faded by how long the intent has waited.
@@ -2413,6 +2424,10 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
                 + RECALL_WEIGHTS["type_prior"] * prior)
         superseded = bool(cand.get("superseded_by"))
         penalty = SUPERSEDED_PENALTY if superseded else 0.0
+        if (PROVENANCE_PENALTY_ENABLED and not cand.get("verified")
+                and str(cand.get("source") or "").strip().casefold()
+                in LOW_TRUST_SOURCES):
+            penalty += PROVENANCE_PENALTY
         boost = SUPERSEDED_BOOST if cand["id"] in chain_heads else 0.0
         bonus = cue_bonus.get(cand["id"], 0.0)
         assoc = ppr.get(cand["id"], 0.0)
