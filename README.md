@@ -155,6 +155,9 @@ The agent uses MCP; you can use the CLI:
 
 ```bash
 omp-memory search "wal corruption"          # ranked search
+omp-memory search "what broke" --explain    # why each hit ranked where it did
+omp-memory search "what broke" --expand 5   # each hit plus its temporal neighbours
+omp-memory search "old fact" --as-of 2025-06-01   # what was true then
 omp-memory digest                           # always-in-context block for session start
 omp-memory capture --task "fix WAL" --outcome "set busy_timeout" --verified
 omp-memory pack team.pack                   # sync the store via a git-committable file
@@ -169,8 +172,16 @@ Maintenance and recovery:
 
 ```bash
 omp-memory maintenance decay                # age confidence toward the floor
+omp-memory maintenance sleep --apply        # full consolidation pass
 omp-memory maintenance forget_cold --apply  # delete cold records (report first)
 omp-memory maintenance promote              # hot inferences -> FACT
+omp-memory maintenance reflect --apply      # abstract patterns across sessions
+omp-memory maintenance capture --apply      # extract lessons from the session log
+omp-memory maintenance ingest_md --apply    # import omp's builtin memories/**/*.md
+omp-memory maintenance pending              # staged writes awaiting review
+omp-memory maintenance approve --pending-id 3   # accept one staged write
+omp-memory maintenance reject --pending-id 3    # refuse it
+omp-memory maintenance not_conflict --a <id> --b <id>  # these two do not contradict
 omp-memory backup                           # consistent snapshot (VACUUM INTO)
 omp-memory repair                           # restore the newest usable snapshot
 omp-memory disk                             # free space + store size
@@ -196,10 +207,13 @@ Measured, not claimed. Two tiers, kept separate because their metrics are not co
 
 **External, labeled** (`bench/EXTERNAL.md`, two datasets, SHA-pinned). LongMemEval
 oracle, 428 scored questions: evidence retrieval R@5 **0.9556**, hit@1 **0.6285**,
-every category >= 0.93 R@5. LoCoMo (1,977 QA, per-turn gold): hit@1 **0.3647**,
-R@10 0.60-0.70 -- the lexical ceiling, since LoCoMo questions share no words with
-their answers. This measures **evidence retrieval**, not QA accuracy or F1; no
-vendor comparison is implied.
+every category >= 0.93 R@5. LoCoMo (1,977 QA, per-turn gold), measured through
+`recall()` which is what the MCP server serves: hit@1 **0.2630**, R@10
+**0.5878**; the same probe run through `search()` (lexical only) gives 0.3647 and
+0.5190, and `--expand 5` lifts the pair to 0.3799/0.7714 at window level. LoCoMo
+is near the lexical ceiling: on the sampled failing question the gold turn and
+all three turns that beat it share exactly 4 of 9 query tokens. This measures
+**evidence retrieval**, not QA accuracy or F1; no vendor comparison is implied.
 
 **Internal, self-referential** (`bench/RESULTS.md`, pinned synthetic corpus):
 update-correctness 4/4, freshness ~8ms, R@5=1.0 saturated -- useful for
@@ -267,6 +281,48 @@ hits = m.recall(conn, "install dependencies", limit=3)
 | Corrupt database | raises and keeps the file; `repair` restores from the newest usable backup |
 | Secret leakage | capture, MCP writes, and the web editor scan for secrets before storing |
 | Disk exhaustion | CLI capture refuses below 100 MB free |
+| Unreviewed writes | `capture --staging` parks candidates in `pending_writes` with a content hash; `approve` is the only path that writes them, and a payload changed after staging raises instead of approving |
+| Stale evidence | an anchor file whose checksum changed marks the record `stale`, and `recall` scores it 0.20 lower |
+| Pruning safety | `sleep` only merges records that clear the same three guards a write does: score >= 0.85, identical numbers, no rare-token veto |
+
+`omp-memory health` also reports what is decaying, not just whether the file is
+sound: `never_retrieved` (share of records recall has never returned),
+`duplicate_groups`, `stale_anchors`, `superseded`, `low_confidence`.
+
+## Why a hit ranked where it did
+
+`recall(explain=True)` (or `search --explain`) attaches the score
+decomposition per hit:
+
+```json
+{"terms": {"lexical": 0.682583, "heat": 0.124067, "type_prior": 0.05, "ppr": 0.1},
+ "total": 0.95665,
+ "heat_parts": {"confidence": 0.55, "recency": 0.995076, "reinforcement": 0.0}}
+```
+
+The terms are the weighted values the ranker summed, so they add up to the
+score exactly. There is no approximation to disagree with the ranking.
+
+## Feature inventory
+
+Measured from the running code, not from this file.
+
+**MCP tools (8):** `recall` (query, limit, type, project, session,
+verified_only, min_confidence, brief, as_of, expand, explain), `remember`,
+`reinforce`, `forget`, `stats`, `maintenance` (11 ops), `digest`, `handoff`.
+
+**CLI (22 commands):** capture, search, recap, context, reinforce, promote,
+analyze, health, stats, digest, maintenance, backup, repair, mirror,
+skill-export, pack, unpack, disk, scan, overview, checkpoint, restore.
+
+**Engine:** FTS5 bm25 with per-type divisor and column weights; synonym
+concept groups; vocabulary gate; typo repair; PPR association graph with hub
+penalty and weakest-link bonus; MMR; bi-temporal `as_of`; `not_conflict`
+adjudication; power-law decay (30-day half-life); reinforcement signals;
+consolidation; spacing effect; retrieval-induced forgetting; reconsolidation
+gate; staging with hash pinning; checksum anchors; provenance penalty; budgeted
+digest; markdown / SKILL.md / sync-pack export; web graph UI; session capture;
+builtin-markdown ingestion; handoff brief + omp extension.
 
 ## Configuration
 
@@ -297,7 +353,7 @@ Updates: `npx honcho-pi@latest update` (keeps the database). Status: `npx honcho
 ## Development
 
 ```bash
-python -m pytest              # 471 tests, no network
+python -m pytest              # 513 tests, no network
 bash bin/clean-code.sh        # quality gate
 bash bin/web-deploy.sh        # build + deploy the web UI
 ```
