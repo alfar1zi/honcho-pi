@@ -47,9 +47,6 @@ where = ["src"]
 [tool.setuptools.package-data]
 omp_memory = ["web/dist/**/*"]
 
-[tool.setuptools.data-files]
-"omp_memory/web" = ["web/dist/index.html"]
-"omp_memory/web/dist/assets" = ["web/dist/assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

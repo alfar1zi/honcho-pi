@@ -390,3 +390,42 @@ def test_overview_parser_registered():
     assert args.command == "overview"
     assert args.port == 4999
     assert args.no_open is True
+
+
+def test_maintenance_ops_match_the_mcp_dispatch():
+    """Both surfaces must reach the same operations.
+
+    The CLI once implemented 3 of 11, so a cron job or an operator with no
+    agent had no path to sleep/reflect/capture/ingest_md/review/pending/
+    approve/reject/not_conflict. `review` regressed afterwards (MCP only)
+    because nothing compared the two lists.
+    """
+    import re
+    from omp_memory import cli, mcp
+
+    parser = cli.build_parser()
+    subs = [a for a in parser._actions if getattr(a, "dest", None) == "command"][0].choices
+    cli_ops = sorted(next(a.choices for a in subs["maintenance"]._actions
+                          if getattr(a, "dest", None) == "op"))
+
+    src = open(mcp.__file__).read()
+    start = src.index("def tool_maintenance")
+    block = src[start:start + 5000]
+    mcp_ops = set(re.findall(r'op\s*==\s*"([a-z_]+)"', block))
+    for group in re.findall(r"op in \(([^)]+)\)", block):
+        mcp_ops.update(re.findall(r'"([a-z_]+)"', group))
+
+    assert set(cli_ops) == mcp_ops, (
+        f"CLI only: {sorted(set(cli_ops) - mcp_ops)}; "
+        f"MCP only: {sorted(mcp_ops - set(cli_ops))}")
+
+
+def test_search_exposes_session_and_brief():
+    """Both are real MCP recall arguments; the CLI omitted them silently."""
+    from omp_memory import cli
+
+    parser = cli.build_parser()
+    subs = [a for a in parser._actions if getattr(a, "dest", None) == "command"][0].choices
+    opts = {a.dest for a in subs["search"]._actions}
+    assert "session" in opts
+    assert "brief" in opts

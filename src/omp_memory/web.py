@@ -59,6 +59,12 @@ def build_graph() -> dict:
     """Read the store and rebuild the default graph (records + skills)."""
     conn = db.connect()
     try:
+        # init_db on a fresh machine: `pip install` then `overview` used to
+        # crash here with "no such table: records", and the handler died
+        # mid-response so the browser saw a dropped connection instead of an
+        # error it could report. The CLI and the MCP server both migrate on
+        # open; the web surface was the only one that skipped it.
+        db.init_db(conn)
         rows = db.list_records(conn, limit=1000)
     finally:
         conn.close()
@@ -388,7 +394,7 @@ def _update_record(record_id: str, patch: dict) -> dict:
     try:
         r = db.get_record(conn, record_id)
         if not r:
-            raise KeyError(record_id)
+            raise db.NotFound(f"record {record_id} not found")
         content = patch.get("content", r["content"])
         if not isinstance(content, str) or not content.strip():
             raise ValueError("content must not be empty")
@@ -700,8 +706,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             updated = _update_record(record_id, payload)
-        except KeyError:
-            self._json({"error": "not found"}, 404)
+        except (KeyError, db.NotFound) as e:
+            self._json({"error": str(e) or "not found"}, 404)
             return
         except ValueError as e:
             self._json({"error": str(e)}, 400)

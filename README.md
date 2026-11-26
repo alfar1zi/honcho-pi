@@ -158,6 +158,8 @@ omp-memory search "wal corruption"          # ranked search
 omp-memory search "what broke" --explain    # why each hit ranked where it did
 omp-memory search "what broke" --expand 5   # each hit plus its temporal neighbours
 omp-memory search "old fact" --as-of 2025-06-01   # what was true then
+omp-memory search "wal corruption" --session sess-20261126   # one capture session
+omp-memory search "wal corruption" --brief      # id + first line + token estimate
 omp-memory digest                           # always-in-context block for session start
 omp-memory capture --task "fix WAL" --outcome "set busy_timeout" --verified
 omp-memory pack team.pack                   # sync the store via a git-committable file
@@ -178,6 +180,7 @@ omp-memory maintenance promote              # hot inferences -> FACT
 omp-memory maintenance reflect --apply      # abstract patterns across sessions
 omp-memory maintenance capture --apply      # extract lessons from the session log
 omp-memory maintenance ingest_md --apply    # import omp's builtin memories/**/*.md
+omp-memory maintenance review               # candidates + the rules to judge them by
 omp-memory maintenance pending              # staged writes awaiting review
 omp-memory maintenance approve --pending-id 3   # accept one staged write
 omp-memory maintenance reject --pending-id 3    # refuse it
@@ -193,9 +196,9 @@ Inspection and export:
 
 ```bash
 omp-memory recap                            # summarise a session or project
-omp-memory context                          # fenced memory block for a prompt
+omp-memory context "wal corruption"         # fenced memory block for a prompt
 omp-memory scan "text"                      # secret scan, same rules as capture
-omp-memory mirror ./docs/memory             # export records to markdown
+omp-memory mirror ~/memory-mirror --init    # export records to a git repo
 omp-memory reinforce <id> success           # record an outcome
 omp-memory promote <id>                     # verified record -> RULE
 omp-memory analyze                          # derive INFERENCE rows from logs
@@ -355,7 +358,7 @@ Updates: `npx honcho-pi@latest update` (keeps the database). Status: `npx honcho
 ## Development
 
 ```bash
-python -m pytest              # 513 tests, no network
+python -m pytest              # 526 tests, no network
 bash bin/clean-code.sh        # quality gate
 bash bin/web-deploy.sh        # build + deploy the web UI
 ```

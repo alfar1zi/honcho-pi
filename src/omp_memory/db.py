@@ -1264,7 +1264,10 @@ def upsert_record(conn: sqlite3.Connection, rtype: str, content: str, evidence: 
     """Insert or merge one record by content identity; returns its id."""
     if rtype not in VALID_TYPES:
         raise ValueError(f"invalid type: {rtype}")
-    if not content:
+    if not content.strip():
+        # Whitespace-only is not a fact: it stores a row that can never match
+        # a query and inflates every count. save_memory() already strips-and-
+        # rejects; this writer was the one place that let it through.
         raise ValueError("content must not be empty")
     if len(content) > MAX_RECORD_CHARS:
         # Refuse rather than silently truncate: a cut-off fact is worse than a
@@ -2933,6 +2936,15 @@ def list_pending(conn: sqlite3.Connection, status: str = "pending") -> list:
         "SELECT * FROM pending_writes WHERE status=? ORDER BY created_at", (status,))]
 
 
+class NotFound(LookupError):
+    """A record or staged write the caller named does not exist.
+
+    Distinct from ValueError: the HTTP surface maps it to 404 and the CLI
+    prints its message. A bare KeyError was used before, and str(KeyError)
+    is just the id, so every surface printed "error: 3".
+    """
+
+
 def decide_pending(conn: sqlite3.Connection, pending_id: int, approve: bool) -> dict:
     """Approve -> upsert into records; reject -> mark rejected. The hash is
     re-checked at decision time so an edited payload cannot ride an old approval.
@@ -2940,7 +2952,9 @@ def decide_pending(conn: sqlite3.Connection, pending_id: int, approve: bool) -> 
     row = conn.execute("SELECT * FROM pending_writes WHERE id=?",
                        (pending_id,)).fetchone()
     if not row:
-        raise KeyError(pending_id)
+        # A bare KeyError prints as "error: 3" on the CLI, because str(exc) is
+        # the key itself. Carry the meaning in the exception instead.
+        raise NotFound(f"pending write {pending_id} not found")
     row = dict(row)
     if row["status"] != "pending":
         return {"id": pending_id, "status": row["status"], "noop": True}
@@ -3917,7 +3931,7 @@ def export_skill(conn: sqlite3.Connection, record_id: str, out_dir) -> dict:
     """
     r = get_record(conn, record_id)
     if not r:
-        raise KeyError(record_id)
+        raise NotFound(f"record {record_id} not found")
     if r["type"] not in ("PROCEDURAL", "WORKFLOW", "REFLECTIVE", "RULE"):
         raise ValueError(f"skill export needs PROCEDURAL/WORKFLOW/REFLECTIVE/RULE, got {r['type']}")
     out_path = Path(out_dir).expanduser().resolve()

@@ -204,16 +204,18 @@ def cmd_search(args) -> int:
         # as_of and expand only exist on recall(); plain search stays the
         # fast lexical path. Routing on the flags keeps one command for both
         # instead of asking the operator to remember which flags need which.
-        if args.as_of or args.expand or args.explain:
+        if args.as_of or args.expand or args.explain or args.brief:
             rows = db.recall(
                 conn, args.query, limit=args.limit, rtype=args.type,
-                project_id=args.project, verified_only=args.verified,
+                project_id=args.project, session_id=args.session,
+                verified_only=args.verified,
                 min_confidence=args.min_confidence, as_of=args.as_of,
                 expand=args.expand, full=True, explain=args.explain)
         else:
             rows = db.search(
                 conn, args.query, limit=args.limit, rtype=args.type,
-                project_id=args.project, verified_only=args.verified,
+                project_id=args.project, session_id=args.session,
+                verified_only=args.verified,
                 min_confidence=args.min_confidence,
             )
     finally:
@@ -224,6 +226,18 @@ def cmd_search(args) -> int:
         return 0
     if not rows:
         print("no matches")
+        return 0
+    if args.brief:
+        lines = []
+        for row in rows:
+            first = next((l for l in row["content"].splitlines() if l.strip()), "")
+            lines.append(f"- {row['id']} [{row['type']}] {first[:100]} "
+                         f"(conf {float(row['confidence']):.2f})")
+        body = "\n".join(lines)
+        print(f"Recalled {len(rows)} record(s) for {args.query!r} (brief index):")
+        print(body)
+        print(f"~{len(body) // 4} tokens. Detail: recall with a narrower query, "
+              "or reuse an id above.")
         return 0
     for row in rows:
         print(f"{row['id']}  [{row['type']}]  conf={row['confidence']:.2f}  {row['content']}")
@@ -326,6 +340,15 @@ def cmd_maintenance(args) -> int:
         elif op == "ingest_md":
             from . import md_ingest
             print(json.dumps(md_ingest.ingest_md(conn, db, apply=args.apply),
+                             indent=2, sort_keys=True))
+        elif op == "review":
+            # Same contract the MCP tool returns: the host agent is already an
+            # LLM, so this surfaces candidates plus the review rules rather
+            # than calling out to a model.
+            from . import capture
+            report = capture.capture_session(db, conn, apply=False)
+            print(json.dumps({"review_prompt": capture.REVIEW_PROMPT,
+                              "candidates": report.get("candidates", [])},
                              indent=2, sort_keys=True))
         elif op == "pending":
             print(json.dumps(db.list_pending(conn), indent=2, sort_keys=True))
@@ -512,8 +535,8 @@ def cmd_skill_export(args) -> int:
     conn = _open()
     try:
         result = db.export_skill(conn, args.record_id, args.dir)
-    except (KeyError, ValueError) as e:
-        print(f"skill-export: {e}")
+    except (ValueError, db.NotFound) as e:
+        print(f"skill-export: {e}", file=sys.stderr)
         return 1
     finally:
         conn.close()
@@ -656,6 +679,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="window size; each hit gains temporally adjacent records")
     p.add_argument("--explain", action="store_true",
                    help="show the score decomposition")
+    p.add_argument("--session", default=None,
+                   help="restrict to one capture session")
+    p.add_argument("--brief", action="store_true",
+                   help="L0 index: id, type and first line only, with a token "
+                        "estimate (same shape as the MCP recall brief)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_search)
 
@@ -710,7 +738,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("maintenance",
                        help="maintenance ops (same set the MCP server exposes)")
     p.add_argument("op", choices=["decay", "forget_cold", "promote", "sleep",
-                                  "reflect", "capture", "ingest_md", "pending",
+                                  "reflect", "capture", "ingest_md", "review", "pending",
                                   "approve", "reject", "not_conflict"])
     p.add_argument("--apply", action="store_true",
                    help="write changes (default: report only)")

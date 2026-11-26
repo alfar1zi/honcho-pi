@@ -17,6 +17,24 @@ OMP_MEMORY_SESSIONS overrides the sessions root.
 """
 from __future__ import annotations
 
+# The review contract, kept here so the MCP tool and the CLI op cannot drift
+# apart: both surfaces must ask the host agent for the same judgements. The
+# host agent is already an LLM, so this engine never calls out to one.
+REVIEW_PROMPT = (
+    "Review these candidate lessons from the session. For each: "
+    "(1) GROUNDING: is it supported by what actually happened, "
+    "not by what the agent wished happened? "
+    "(2) ROUTING: durable knowledge -> remember (FACT only if "
+    "verified, else INFERENCE); user preference -> about_peer; "
+    "one-off noise -> drop. "
+    "(3) DO NOT CAPTURE: environment failures (command not "
+    "found, missing credentials), unfixed complaints, secrets, "
+    "or anything already in memory (recall first, read before "
+    "write). "
+    "(4) If a candidate corrects an existing record, use "
+    "reinforce correction with evidence, not a new row."
+)
+
 import json
 import os
 import re

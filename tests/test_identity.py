@@ -4,6 +4,8 @@ The surface variants that used to split a fact are casing, whitespace, and the
 provenance fields (source, project). A real paraphrase is a different record,
 because no threshold separates paraphrase from near-miss reliably.
 """
+import pytest
+
 from omp_memory import db as memory_db
 
 
@@ -149,3 +151,15 @@ def test_every_exported_name_resolves():
     for name in ("content_id", "identity_text", "normalize_content", "remember",
                  "similarity", "decide", "find_similar", "StreamingContextScrubber"):
         assert name in omp_memory.__all__, f"{name} missing from __all__"
+
+
+def test_whitespace_only_content_is_refused(conn):
+    """save_memory stripped-and-rejected; upsert_record accepted it.
+
+    A whitespace row can never match a query and inflates every count, so the
+    stricter rule is the correct one on both write paths.
+    """
+    for blank in ("", "   ", "\n\t\n"):
+        with pytest.raises(ValueError, match="must not be empty"):
+            memory_db.upsert_record(conn, "FACT", blank, evidence="",
+                                    verified=0, confidence=0.5, source="t")

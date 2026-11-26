@@ -66,7 +66,10 @@ def test_update_record_rejects_empty_and_missing(graph_env):
     rid = db.upsert_record(graph_env, "FACT", "some lesson", session_id="s")
     with pytest.raises(ValueError):
         web._update_record(rid, {"content": "   "})
-    with pytest.raises(KeyError):
+    # NotFound, not KeyError: str(KeyError) is just the id, so every surface
+    # printed "error: nonexistent". The handler maps NotFound to 404 and
+    # still accepts KeyError for callers that raise it.
+    with pytest.raises(db.NotFound):
         web._update_record("nonexistent", {"content": "x"})
 
 
@@ -328,3 +331,25 @@ def test_load_graph_rebuilds_after_other_process_write(graph_env, tmp_path):
     # Stable afterwards: no rebuild loop when nothing changed.
     g3 = web._load_graph()
     assert len(g3["nodes"]) == len(g2["nodes"])
+
+
+def test_build_graph_migrates_a_fresh_store(tmp_path, monkeypatch):
+    """`pip install` then `overview` on a new machine used to crash here.
+
+    build_graph() opened the file without init_db(), so /api/graph raised
+    "no such table: records" inside the request thread and the handler died
+    mid-response: the browser saw a dropped connection, not an error.
+    """
+    fresh = tmp_path / "fresh.db"
+    monkeypatch.setenv("OMP_MEMORY_DB", str(fresh))
+    graph = web.build_graph()
+    assert graph["nodes"] is not None
+    assert fresh.exists()
+    # And the schema really is there, not just an empty graph.
+    conn = db.connect(str(fresh))
+    try:
+        assert conn.execute(
+            "SELECT count(*) FROM sqlite_master WHERE name='records'"
+        ).fetchone()[0] == 1
+    finally:
+        conn.close()

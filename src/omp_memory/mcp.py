@@ -469,21 +469,7 @@ def tool_maintenance(args: Dict[str, Any], user: str = "") -> str:
             # an LLM) executes it and writes back via remember/correction.
             from . import capture
             report = capture.capture_session(db, conn, apply=False)
-            prompt = (
-                "Review these candidate lessons from the session. For each: "
-                "(1) GROUNDING: is it supported by what actually happened, "
-                "not by what the agent wished happened? "
-                "(2) ROUTING: durable knowledge -> remember (FACT only if "
-                "verified, else INFERENCE); user preference -> about_peer; "
-                "one-off noise -> drop. "
-                "(3) DO NOT CAPTURE: environment failures (command not "
-                "found, missing credentials), unfixed complaints, secrets, "
-                "or anything already in memory (recall first, read before "
-                "write). "
-                "(4) If a candidate corrects an existing record, use "
-                "reinforce correction with evidence, not a new row."
-            )
-            return json.dumps({"review_prompt": prompt,
+            return json.dumps({"review_prompt": capture.REVIEW_PROMPT,
                                "candidates": report.get("candidates", [])},
                               indent=2, sort_keys=True)
         if op == "pending":
@@ -495,7 +481,7 @@ def tool_maintenance(args: Dict[str, Any], user: str = "") -> str:
                 return f"maintenance: {op} needs pending_id (see op=pending)"
             try:
                 result = db.decide_pending(conn, int(pid), approve=(op == "approve"))
-            except KeyError:
+            except (KeyError, db.NotFound):
                 return f"maintenance: pending {pid} not found"
             except ValueError as e:
                 return f"maintenance: {e}"
