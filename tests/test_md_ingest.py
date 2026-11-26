@@ -88,3 +88,36 @@ def test_missing_root_is_reported_not_raised(tmp_path, monkeypatch):
     out = md_ingest.ingest_md(conn, db, root=tmp_path / "nope", apply=False)
     assert out["error"] == "memories directory not found"
     conn.close()
+
+
+def test_mcp_maintenance_ingest_md_calls_the_right_argument_order(tmp_path, monkeypatch):
+    """Regression: mcp passed (db, conn) while the signature is (conn, db_mod).
+
+    The op failed with "'sqlite3.Connection' object has no attribute 'DB_PATH'"
+    and nothing caught it, because no test exercised the MCP path.
+    """
+    root = tmp_path / "memories"
+    md = root / "-proj--" / "learned.md"
+    _write(md, True, ["a lesson ingested through the MCP maintenance op " * 2])
+    monkeypatch.setenv("OMP_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("OMP_MEMORY_BACKUP_DIR", str(tmp_path / "bak"))
+    monkeypatch.setenv("OMP_MEMORY_MD_ROOT", str(root))
+    from omp_memory import mcp
+    out = mcp.tool_maintenance({"op": "ingest_md", "apply": False})
+    assert "DB_PATH" not in out, out
+    assert '"files": 1' in out
+
+
+def test_cli_maintenance_ingest_md_works(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "memories"
+    md = root / "-proj--" / "learned.md"
+    _write(md, True, ["another lesson through the CLI maintenance path " * 2])
+    monkeypatch.setenv("OMP_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("OMP_MEMORY_BACKUP_DIR", str(tmp_path / "bak"))
+    monkeypatch.setenv("OMP_MEMORY_MD_ROOT", str(root))
+    from omp_memory import cli
+    code = cli.main(["maintenance", "ingest_md"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "DB_PATH" not in out
+    assert '"files": 1' in out

@@ -461,7 +461,7 @@ def tool_maintenance(args: Dict[str, Any], user: str = "") -> str:
             # after the one-time reclaim, so recent lessons existed only on
             # disk. This op closes that fork incrementally (mtime+size+sha).
             from . import md_ingest
-            report = md_ingest.ingest_md(db, conn, apply=bool(args.get("apply")))
+            report = md_ingest.ingest_md(conn, db, apply=bool(args.get("apply")))
             return json.dumps(report, indent=2, sort_keys=True)
         if op == "review":
             # Hermes background-review without our own LLM: return the

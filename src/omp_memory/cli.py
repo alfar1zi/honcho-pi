@@ -201,11 +201,21 @@ def _audit(action: str, detail: str, session: str, project: str) -> None:
 def cmd_search(args) -> int:
     conn = _open()
     try:
-        rows = db.search(
-            conn, args.query, limit=args.limit, rtype=args.type,
-            project_id=args.project, verified_only=args.verified,
-            min_confidence=args.min_confidence,
-        )
+        # as_of and expand only exist on recall(); plain search stays the
+        # fast lexical path. Routing on the flags keeps one command for both
+        # instead of asking the operator to remember which flags need which.
+        if args.as_of or args.expand:
+            rows = db.recall(
+                conn, args.query, limit=args.limit, rtype=args.type,
+                project_id=args.project, verified_only=args.verified,
+                min_confidence=args.min_confidence, as_of=args.as_of,
+                expand=args.expand, full=True)
+        else:
+            rows = db.search(
+                conn, args.query, limit=args.limit, rtype=args.type,
+                project_id=args.project, verified_only=args.verified,
+                min_confidence=args.min_confidence,
+            )
     finally:
         conn.close()
 
@@ -282,14 +292,60 @@ def cmd_reinforce(args) -> int:
 
 
 def cmd_maintenance(args) -> int:
+    """Every maintenance op the MCP server exposes, reachable from a shell.
+
+    The CLI used to implement only 3 of the 10 ops, so `sleep`, `reflect`,
+    `capture`, `ingest_md`, `review`, `pending`, `approve`, `reject` and
+    `not_conflict` could only be triggered by an agent over MCP. A cron job,
+    a systemd timer, or an operator with no agent running had no path to them.
+    Parity is the fix: same names, same arguments.
+    """
     conn = _open()
     try:
-        if args.op == "decay":
+        op = args.op
+        if op == "decay":
             print(json.dumps({"decayed": db.apply_decay(conn)}, indent=2, sort_keys=True))
-        elif args.op == "forget_cold":
+        elif op == "forget_cold":
             print(json.dumps(db.forget_cold(conn, apply=args.apply), indent=2, sort_keys=True))
-        elif args.op == "promote":
+        elif op == "promote":
             print(json.dumps({"promotion": db.promote_hot(conn)}, indent=2, sort_keys=True))
+        elif op == "sleep":
+            print(json.dumps(db.sleep_pass(conn, apply=args.apply),
+                             indent=2, sort_keys=True))
+        elif op == "reflect":
+            from . import experience
+            print(json.dumps(experience.reflect(conn, apply=args.apply),
+                             indent=2, sort_keys=True))
+        elif op == "capture":
+            from . import capture
+            report = capture.capture_session(
+                db, conn, apply=args.apply, reflect=args.reflect,
+                staging=args.staging)
+            print(json.dumps({k: v for k, v in report.items() if k != "candidates"},
+                             indent=2, sort_keys=True))
+        elif op == "ingest_md":
+            from . import md_ingest
+            print(json.dumps(md_ingest.ingest_md(conn, db, apply=args.apply),
+                             indent=2, sort_keys=True))
+        elif op == "pending":
+            print(json.dumps(db.list_pending(conn), indent=2, sort_keys=True))
+        elif op in ("approve", "reject"):
+            if args.pending_id is None:
+                print(f"maintenance {op}: --pending-id is required", file=sys.stderr)
+                return 2
+            print(json.dumps(db.decide_pending(conn, args.pending_id,
+                                               approve=(op == "approve")),
+                             indent=2, sort_keys=True))
+        elif op == "not_conflict":
+            if not args.a or not args.b:
+                print("maintenance not_conflict: --a and --b are required",
+                      file=sys.stderr)
+                return 2
+            print(json.dumps(db.mark_not_conflict(conn, args.a, args.b),
+                             indent=2, sort_keys=True))
+        else:
+            print(f"maintenance: unknown op {op}", file=sys.stderr)
+            return 2
     finally:
         conn.close()
     return 0
@@ -594,6 +650,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--project", default=None)
     p.add_argument("--verified", action="store_true")
     p.add_argument("--min-confidence", type=float, default=0.0)
+    p.add_argument("--as-of", default=None,
+                   help="ISO timestamp: what was true then")
+    p.add_argument("--expand", type=int, default=0,
+                   help="window size; each hit gains temporally adjacent records")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_search)
 
@@ -645,10 +705,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--project", default=None)
     p.set_defaults(func=cmd_digest)
 
-    p = sub.add_parser("maintenance", help="decay, forget cold records, promote hot ones")
-    p.add_argument("op", choices=["decay", "forget_cold", "promote"])
+    p = sub.add_parser("maintenance",
+                       help="maintenance ops (same set the MCP server exposes)")
+    p.add_argument("op", choices=["decay", "forget_cold", "promote", "sleep",
+                                  "reflect", "capture", "ingest_md", "pending",
+                                  "approve", "reject", "not_conflict"])
     p.add_argument("--apply", action="store_true",
-                   help="forget_cold: actually delete (default report only)")
+                   help="write changes (default: report only)")
+    p.add_argument("--reflect", action="store_true",
+                   help="capture: run the abstraction pass afterwards")
+    p.add_argument("--staging", action="store_true",
+                   help="capture: park candidates for review instead of writing")
+    p.add_argument("--pending-id", type=int, default=None,
+                   help="approve/reject: the pending write id")
+    p.add_argument("--a", default=None, help="not_conflict: first record id")
+    p.add_argument("--b", default=None, help="not_conflict: second record id")
     p.set_defaults(func=cmd_maintenance)
     p = sub.add_parser("backup", help="consistent snapshot")
     p.set_defaults(func=cmd_backup)
