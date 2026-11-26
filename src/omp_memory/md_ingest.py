@@ -47,6 +47,10 @@ MIN_ENTRY_CHARS = 60
 # Splitting at sentence boundaries keeps each stored unit about one idea, which
 # is what lexical scoring can actually discriminate.
 MAX_ENTRY_CHARS = 700
+# When no break exists at all, cut here rather than at the store cap: a 2,000
+# character piece still dominates lexical ranking, which is the thing being
+# fixed. 900 keeps a substantial thought while staying near the corpus median.
+HARD_CUT_CHARS = 900
 STATE_NAME = "ingest_md.json"
 # Which filenames are curated lessons. `raw_memories.md` is the full narrative
 # of each rollout (1,605 candidate entries across 170 files, dominated by
@@ -119,7 +123,10 @@ def entries_after_tombstone(text: str) -> list[str]:
     return out
 
 
-_SENTENCE_END = re.compile(r"(?<=[.!?;])\s+")
+# Break on sentence punctuation, semicolons, and list markers: a `learn` entry
+# often embeds bullet sub-points, and a pattern that only knows ". " leaves a
+# 2,000-character blob containing 26 real breaks inside it.
+_SENTENCE_END = re.compile(r"(?<=[.!?;])\s+|\s*\n\s*[-*]\s+|\s*\n\s*\n\s*")
 
 
 def _split_long(text: str, limit: int = MAX_ENTRY_CHARS) -> list[str]:
@@ -132,13 +139,13 @@ def _split_long(text: str, limit: int = MAX_ENTRY_CHARS) -> list[str]:
     """
     if len(text) <= limit:
         return [text]
-    if len(text) > _STORE_CAP:
-        # No sentence boundary can help here: the store would refuse it. Cut at
-        # the last space before the cap so no word is split, and keep the rest
-        # as its own entry.
-        head = text[:_STORE_CAP]
+    if len(text) > HARD_CUT_CHARS:
+        # No break point exists in a chunk this long: cut at the last word
+        # boundary before HARD_CUT_CHARS so no word is split, and recurse on
+        # the remainder.
+        head = text[:HARD_CUT_CHARS]
         cut = head.rfind(" ")
-        cut = cut if cut > MIN_ENTRY_CHARS else _STORE_CAP
+        cut = cut if cut > MIN_ENTRY_CHARS else HARD_CUT_CHARS
         rest = text[cut:].strip()
         return [text[:cut].strip()] + (_split_long(rest, limit) if rest else [])
     pieces: list[str] = []

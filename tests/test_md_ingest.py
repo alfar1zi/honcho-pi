@@ -145,15 +145,28 @@ def test_long_entry_is_split_at_sentences():
 
 
 def test_short_entry_is_not_split():
+    """A genuine short entry passes through untouched."""
     text = "One short lesson about queues."
     assert md_ingest._split_long(text) == [text]
+    # And a plausible medium one, still under the hard cut.
+    medium = "A lesson of " + "word " * 50
+    assert md_ingest._split_long(medium) == [medium]
 
 
-def test_single_over_long_sentence_is_kept_whole():
-    """Truncating prose would corrupt the memory it carries."""
+def test_single_over_long_sentence_is_cut_not_truncated():
+    """No break point exists, so it is cut at a word boundary, not truncated.
+
+    Earlier behaviour kept it whole up to the store cap. Measured later: a
+    2,000-character piece still dominates lexical ranking, which is the very
+    problem being fixed. Cutting at HARD_CUT_CHARS loses no characters --
+    the remainder becomes its own record.
+    """
     sentence = "word " * 300 + "."
     parts = md_ingest._split_long(sentence)
-    assert parts == [sentence.strip()]
+    assert len(parts) > 1
+    assert max(len(p) for p in parts) <= md_ingest.HARD_CUT_CHARS
+    # Nothing dropped: rejoining the pieces reproduces the input words.
+    assert " ".join(parts).split() == sentence.split()
 
 
 def test_split_does_not_create_runt_fragments():
@@ -195,3 +208,19 @@ def test_upsert_refuses_content_over_the_cap(conn):
         db.upsert_record(conn, "FACT", "x" * (db.MAX_RECORD_CHARS + 1))
     # exactly at the cap is allowed
     assert db.upsert_record(conn, "FACT", "y" * db.MAX_RECORD_CHARS)
+
+
+def test_bullet_separated_text_is_split():
+    """A `learn` entry with embedded bullets has no ". " breaks at all."""
+    text = "header point. " + "\n- bullet detail with content " * 60
+    parts = md_ingest._split_long(text)
+    assert len(parts) > 1
+    assert max(len(p) for p in parts) <= md_ingest.HARD_CUT_CHARS + 50
+
+
+def test_no_break_text_is_cut_at_the_hard_limit():
+    """Without any break point, cutting at 2,000 would still dominate ranking."""
+    blob = "word " * 600
+    parts = md_ingest._split_long(blob)
+    assert len(parts) > 1
+    assert max(len(p) for p in parts) <= md_ingest.HARD_CUT_CHARS
