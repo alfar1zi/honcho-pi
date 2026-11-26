@@ -121,3 +121,35 @@ def test_cli_maintenance_ingest_md_works(tmp_path, monkeypatch, capsys):
     assert code == 0
     assert "DB_PATH" not in out
     assert '"files": 1' in out
+
+
+def test_long_entry_is_split_at_sentences():
+    """A 2,000-char learn entry must not become one record that sweeps queries."""
+    long = " ".join(f"Point {i} about caching layers and pipelines." for i in range(60))
+    assert len(long) > md_ingest.MAX_ENTRY_CHARS
+    parts = md_ingest._split_long(long)
+    assert len(parts) > 1
+    for piece in parts:
+        assert len(piece) <= md_ingest.MAX_ENTRY_CHARS, len(piece)
+        assert len(piece) >= md_ingest.MIN_ENTRY_CHARS
+    # No sentence is cut in half: every piece ends like a sentence.
+    for piece in parts:
+        assert piece.rstrip()[-1] in ".!?;", piece[-30:]
+
+
+def test_short_entry_is_not_split():
+    text = "One short lesson about queues."
+    assert md_ingest._split_long(text) == [text]
+
+
+def test_single_over_long_sentence_is_kept_whole():
+    """Truncating prose would corrupt the memory it carries."""
+    sentence = "word " * 300 + "."
+    parts = md_ingest._split_long(sentence)
+    assert parts == [sentence.strip()]
+
+
+def test_split_does_not_create_runt_fragments():
+    text = ". ".join(["A" * 200] * 4) + ". Tail."
+    parts = md_ingest._split_long(text)
+    assert all(len(p) >= md_ingest.MIN_ENTRY_CHARS for p in parts), [len(p) for p in parts]

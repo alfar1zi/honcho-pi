@@ -2560,7 +2560,8 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
            session_id: str = None, now=None,
            verified_only: bool = False, min_confidence: float = 0.0,
            about_peer: str = None, as_of: str = None,
-           expand: int = 0, explain: bool = False) -> list:
+           expand: int = 0, explain: bool = False,
+           exclude: list = None) -> list:
     """Rerank candidate memories combining lexical match, heat and type prior.
 
     Confidence enters once, through heat (which already weights it 0.45); a
@@ -2661,6 +2662,14 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
 
     scored.sort(key=_sort_key)
     top = _mmr_select(scored, limit)
+    if exclude:
+        # Cross-prompt diversity: a record already shown for the previous
+        # prompt is usually the same generic lesson winning again (measured:
+        # 30 prompts surfaced 44 distinct records, one of them 10 times). The
+        # caller passes what it already injected; those drop out so the next
+        # prompt reaches different memory instead of repeating the same three.
+        skip = set(exclude)
+        top = [item for item in top if item[0]["id"] not in skip] or top
     abstained = bool(top) and top[0][5] < ABSTAIN_SCORE
 
     out = []

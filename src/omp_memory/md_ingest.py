@@ -28,9 +28,17 @@ import hashlib
 import json
 import os
 import re
+import re
 from pathlib import Path
 
 MIN_ENTRY_CHARS = 60
+# A single `learn` entry can run 2,000+ characters. Stored whole, one such
+# record sweeps every query that shares any of its many words: measured on the
+# live store, 5 of the 6 most-returned records were md-ingested entries of
+# 1,800-2,300 characters, at confidence 0.55, crowding out specific facts.
+# Splitting at sentence boundaries keeps each stored unit about one idea, which
+# is what lexical scoring can actually discriminate.
+MAX_ENTRY_CHARS = 700
 STATE_NAME = "ingest_md.json"
 # Which filenames are curated lessons. `raw_memories.md` is the full narrative
 # of each rollout (1,605 candidate entries across 170 files, dominated by
@@ -97,9 +105,44 @@ def entries_after_tombstone(text: str) -> list[str]:
         if not match:
             continue
         body = match.group(1).strip()
-        if len(body) >= MIN_ENTRY_CHARS:
-            out.append(body)
+        if len(body) < MIN_ENTRY_CHARS:
+            continue
+        out.extend(_split_long(body))
     return out
+
+
+_SENTENCE_END = re.compile(r"(?<=[.!?;])\s+")
+
+
+def _split_long(text: str, limit: int = MAX_ENTRY_CHARS) -> list[str]:
+    """Break an over-long entry at sentence boundaries, never mid-sentence.
+
+    A fragment shorter than MIN_ENTRY_CHARS is merged into the previous piece
+    rather than stored as a stub, so the split produces units that are each
+    self-contained. If a single sentence exceeds the limit on its own it is
+    kept whole: truncating prose would corrupt the memory it is meant to carry.
+    """
+    if len(text) <= limit:
+        return [text]
+    pieces: list[str] = []
+    current = ""
+    for sentence in _SENTENCE_END.split(text):
+        candidate = f"{current} {sentence}".strip() if current else sentence
+        if current and len(candidate) > limit:
+            pieces.append(current)
+            current = sentence
+        else:
+            current = candidate
+    if current:
+        pieces.append(current)
+    # Re-merge a runt tail into its predecessor.
+    merged: list[str] = []
+    for piece in pieces:
+        if merged and len(piece) < MIN_ENTRY_CHARS:
+            merged[-1] = f"{merged[-1]} {piece}"
+        else:
+            merged.append(piece)
+    return [p for p in merged if len(p) >= MIN_ENTRY_CHARS]
 
 
 def ingest_md(conn, db_mod, root: Path = None, apply: bool = False) -> dict:
