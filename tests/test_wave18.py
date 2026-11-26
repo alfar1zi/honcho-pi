@@ -631,3 +631,35 @@ def test_explain_penalty_is_negative_when_superseded(conn):
     conn.commit()
     hits = db.recall(conn, "superseded probe value", limit=1, explain=True)
     assert hits[0]["explain"]["terms"]["penalty"] <= 0
+
+
+# --- health decay report (loop 10) ------------------------------------------
+
+def test_health_reports_decay_metrics(conn):
+    rec = db.remember(conn, "FACT", "decay metric probe one about caches")
+    db.remember(conn, "FACT", "decay metric probe one about caches")  # duplicate
+    db.remember(conn, "FACT", "fresh probe two about queues")
+    db.log_retrieval(conn, [rec["id"]])
+    rep = db.decay_report(conn)
+    assert rep["total_records"] == 2, rep
+    assert rep["never_retrieved"] == 1
+    assert rep["never_retrieved_pct"] == 50.0
+    assert rep["duplicate_groups"] == 0  # remember() dedupes by identity
+
+
+def test_health_report_shape_is_stable(conn):
+    db.remember(conn, "FACT", "shape probe")
+    h = db.health(conn)
+    for key in ("status", "db_path", "backup_count", "backup_stale",
+                "total_records", "decay"):
+        assert key in h, key
+    for key in ("never_retrieved", "never_retrieved_pct", "duplicate_groups",
+                "stale_anchors", "superseded", "low_confidence"):
+        assert key in h["decay"], key
+
+
+def test_stale_anchor_count_reflects_the_flag(conn):
+    rec = db.remember(conn, "FACT", "anchored probe about files")
+    conn.execute("UPDATE records SET stale=1 WHERE id=?", (rec["id"],))
+    conn.commit()
+    assert db.decay_report(conn)["stale_anchors"] == 1

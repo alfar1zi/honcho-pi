@@ -3607,6 +3607,48 @@ def health(conn: sqlite3.Connection) -> dict:
         "backup_count": backups,
         "backup_stale": stale,
         "total_records": total,
+        "decay": decay_report(conn),
+    }
+
+
+def decay_report(conn: sqlite3.Connection) -> dict:
+    """What is actually rotting, measured rather than guessed.
+
+    Vendor thresholds (70% hit rate, 15% null rate) are useless here: this
+    store sits at 88% never-retrieved, so a vendor number would fire
+    permanently and train the operator to ignore it. These six numbers are
+    computable from the tables that exist, and each has an action:
+
+      never_retrieved   share of records with no retrieval row -- the store is
+                        larger than what recall actually reaches
+      duplicate_groups  exact-content duplicates (same normalized text)
+      stale_anchors     records whose anchor file changed (checksum mismatch)
+      superseded        records already replaced by a correction
+      low_confidence    unverified records at or near the decay floor
+      unbacked_up_days  age of the newest snapshot, in days
+    """
+    total = conn.execute("SELECT COUNT(*) FROM records").fetchone()[0] or 1
+    never = conn.execute(
+        "SELECT COUNT(*) FROM records r WHERE NOT EXISTS"
+        " (SELECT 1 FROM reinforcement x WHERE x.record_id = r.id)").fetchone()[0]
+    dupes = conn.execute(
+        "SELECT COUNT(*) FROM (SELECT content FROM records"
+        " GROUP BY content HAVING COUNT(*) > 1)").fetchone()[0]
+    stale = conn.execute(
+        "SELECT COUNT(*) FROM records WHERE stale = 1").fetchone()[0]
+    superseded = conn.execute(
+        "SELECT COUNT(*) FROM records WHERE superseded_by != ''").fetchone()[0]
+    low = conn.execute(
+        "SELECT COUNT(*) FROM records WHERE verified = 0 AND confidence <= ?",
+        (DECAY_FLOOR + FORGET_FLOOR_SLACK,)).fetchone()[0]
+    return {
+        "never_retrieved": never,
+        "never_retrieved_pct": round(100.0 * never / total, 1),
+        "duplicate_groups": dupes,
+        "stale_anchors": stale,
+        "superseded": superseded,
+        "low_confidence": low,
+        "total_records": total,
     }
 
 
