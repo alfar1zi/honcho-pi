@@ -542,6 +542,10 @@ TOOLS: List[Dict[str, Any]] = [
                 "as_of": {"type": "string",
                           "description": "ISO timestamp: what was true then "
                                          "(bi-temporal validity filter)."},
+                "expand": {"type": "integer", "default": 0,
+                           "description": "Window size (0 = off). Each hit gains a "
+                                          "`window` of temporally adjacent records, "
+                                          "for answers that span several turns."},
             },
             "required": ["query"],
         },
