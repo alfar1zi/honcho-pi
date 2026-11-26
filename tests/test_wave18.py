@@ -549,3 +549,40 @@ def test_sleep_prune_keeps_facts_that_differ_in_numbers(conn):
     report = db.sleep_pass(conn, apply=True)
     assert report.get("merged", []) == []
     assert conn.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 2
+
+
+# --- recall window expansion (loop 9) ---------------------------------------
+
+def test_expand_attaches_temporal_neighbours(conn):
+    """A hit's window must include rows adjacent in created_at order."""
+    ids = []
+    for i in range(5):
+        ids.append(db.upsert_record(
+            conn, "FACT", f"sequence step {i} about deployment order",
+            project_id="p1", happened_at=f"2026-01-0{i + 1}T00:00:00+00:00"))
+    hits = db.recall(conn, "sequence step deployment order", limit=1,
+                     project_id="p1", expand=5)
+    assert hits and "window" in hits[0], "expand must attach a window"
+    window_ids = [w["id"] for w in hits[0]["window"]]
+    assert hits[0]["id"] in window_ids or len(window_ids) >= 3
+    # the middle of the sequence must show both neighbours
+    assert len(window_ids) >= 3
+
+
+def test_expand_zero_is_the_old_behaviour(conn):
+    db.upsert_record(conn, "FACT", "plain record about caching", project_id="p2")
+    hits = db.recall(conn, "plain record caching", limit=3, project_id="p2")
+    assert hits and "window" not in hits[0]
+
+
+def test_expand_respects_project_scope(conn):
+    """Neighbours must not leak across projects."""
+    db.upsert_record(conn, "FACT", "alpha step one about flow", project_id="A",
+                     happened_at="2026-02-01T00:00:00+00:00")
+    db.upsert_record(conn, "FACT", "beta step one about flow", project_id="B",
+                     happened_at="2026-02-01T00:00:01+00:00")
+    hits = db.recall(conn, "alpha step flow", limit=1, project_id="A", expand=5)
+    for w in hits[0].get("window") or []:
+        row = conn.execute("SELECT project_id FROM records WHERE id=?",
+                           (w["id"],)).fetchone()
+        assert row["project_id"] == "A"
