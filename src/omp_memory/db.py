@@ -167,6 +167,15 @@ RECONSOLIDATION_WINDOW_MINUTES = 45.0
 # confidently-wrong record contaminates it deeper, so the caller must mark
 # the correction as verified or the rewrite is refused.
 REWRITE_MAX_CONTENT_LEN = 20000
+# Hard ceiling on one stored record. Measured cause: five separate writers
+# (reclaim, migrate, experience, agent writes, the .md ingest) each had their
+# own idea of "one record", so entries of 2,000-2,400 characters sat beside
+# 60-character facts. A record that long shares a term with almost any query
+# and wins on matched-term fraction regardless of relevance -- measured: 30
+# real prompts surfaced only 44 distinct records and one record appeared 10
+# times. The ingest path splits at 700; this is the backstop for every other
+# caller, so a new writer cannot reintroduce the problem.
+MAX_RECORD_CHARS = 2000
 # Superseded records keep their row (history is append-only) but are
 # downranked in recall: the correction that replaced them is the current
 # answer. A small penalty is enough because the replacement is usually
@@ -1257,6 +1266,13 @@ def upsert_record(conn: sqlite3.Connection, rtype: str, content: str, evidence: 
         raise ValueError(f"invalid type: {rtype}")
     if not content:
         raise ValueError("content must not be empty")
+    if len(content) > MAX_RECORD_CHARS:
+        # Refuse rather than silently truncate: a cut-off fact is worse than a
+        # rejected write, because the caller believes the whole sentence is
+        # stored. The message names the fix (split) instead of the symptom.
+        raise ValueError(
+            f"content is {len(content)} chars, over the {MAX_RECORD_CHARS} "
+            "limit for one record; split it into self-contained entries")
 
     confidence = min(1.0, max(0.0, float(confidence)))
     project_key = project_id or ""

@@ -1,5 +1,7 @@
 """Ingest omp's builtin markdown memory into the store, incrementally."""
 import json
+
+import pytest
 from pathlib import Path
 
 from omp_memory import db, md_ingest
@@ -130,11 +132,16 @@ def test_long_entry_is_split_at_sentences():
     parts = md_ingest._split_long(long)
     assert len(parts) > 1
     for piece in parts:
-        assert len(piece) <= md_ingest.MAX_ENTRY_CHARS, len(piece)
+        # The split target is MAX_ENTRY_CHARS; a sentence that cannot be broken
+        # may legally run up to the store cap (upsert_record's limit), but never
+        # past it.
+        assert len(piece) <= db.MAX_RECORD_CHARS, len(piece)
         assert len(piece) >= md_ingest.MIN_ENTRY_CHARS
-    # No sentence is cut in half: every piece ends like a sentence.
-    for piece in parts:
-        assert piece.rstrip()[-1] in ".!?;", piece[-30:]
+    # Punctuation is only guaranteed when no forced cut was needed: a piece cut
+    # at the store cap ends mid-sentence by design (losing text would be worse).
+    if all(len(p) <= md_ingest.MAX_ENTRY_CHARS for p in parts):
+        for piece in parts:
+            assert piece.rstrip()[-1] in ".!?;", piece[-30:]
 
 
 def test_short_entry_is_not_split():
@@ -153,3 +160,38 @@ def test_split_does_not_create_runt_fragments():
     text = ". ".join(["A" * 200] * 4) + ". Tail."
     parts = md_ingest._split_long(text)
     assert all(len(p) >= md_ingest.MIN_ENTRY_CHARS for p in parts), [len(p) for p in parts]
+
+
+def test_single_monster_sentence_is_cut_at_the_store_cap():
+    """No sentence boundary exists, but the store would reject it."""
+    monster = "word " * 900
+    parts = md_ingest._split_long(monster)
+    assert len(parts) > 1
+    assert max(len(p) for p in parts) <= db.MAX_RECORD_CHARS
+    # No word split in half: every piece ends at a word boundary.
+    for piece in parts:
+        assert piece == piece.strip()
+        assert not piece.endswith("wor"), piece[-10:]
+
+
+def test_ingest_never_writes_past_the_store_cap(tmp_path, monkeypatch):
+    root = tmp_path / "memories"
+    md = root / "-proj--" / "learned.md"
+    md.parent.mkdir(parents=True)
+    md.write_text("- " + ("word " * 900) + "\n", encoding="utf-8")
+    monkeypatch.setenv("OMP_MEMORY_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("OMP_MEMORY_BACKUP_DIR", str(tmp_path / "bak"))
+    conn = db.connect(str(tmp_path / "m.db"))
+    db.init_db(conn)
+    out = md_ingest.ingest_md(conn, db, root=root, apply=True)
+    assert out["written"] >= 1
+    longest = conn.execute("SELECT MAX(length(content)) FROM records").fetchone()[0]
+    assert longest <= db.MAX_RECORD_CHARS
+    conn.close()
+
+
+def test_upsert_refuses_content_over_the_cap(conn):
+    with pytest.raises(ValueError, match="over the .* limit"):
+        db.upsert_record(conn, "FACT", "x" * (db.MAX_RECORD_CHARS + 1))
+    # exactly at the cap is allowed
+    assert db.upsert_record(conn, "FACT", "y" * db.MAX_RECORD_CHARS)

@@ -31,6 +31,14 @@ import re
 import re
 from pathlib import Path
 
+def _store_cap() -> int:
+    """The engine's own ceiling, read lazily so this module stays importable."""
+    from .db import MAX_RECORD_CHARS
+    return MAX_RECORD_CHARS
+
+
+_STORE_CAP = _store_cap()
+
 MIN_ENTRY_CHARS = 60
 # A single `learn` entry can run 2,000+ characters. Stored whole, one such
 # record sweeps every query that shares any of its many words: measured on the
@@ -124,6 +132,15 @@ def _split_long(text: str, limit: int = MAX_ENTRY_CHARS) -> list[str]:
     """
     if len(text) <= limit:
         return [text]
+    if len(text) > _STORE_CAP:
+        # No sentence boundary can help here: the store would refuse it. Cut at
+        # the last space before the cap so no word is split, and keep the rest
+        # as its own entry.
+        head = text[:_STORE_CAP]
+        cut = head.rfind(" ")
+        cut = cut if cut > MIN_ENTRY_CHARS else _STORE_CAP
+        rest = text[cut:].strip()
+        return [text[:cut].strip()] + (_split_long(rest, limit) if rest else [])
     pieces: list[str] = []
     current = ""
     for sentence in _SENTENCE_END.split(text):
@@ -135,10 +152,13 @@ def _split_long(text: str, limit: int = MAX_ENTRY_CHARS) -> list[str]:
             current = candidate
     if current:
         pieces.append(current)
-    # Re-merge a runt tail into its predecessor.
+    # Re-merge a runt tail into its predecessor, but never past the store cap:
+    # a single sentence longer than MAX_RECORD_CHARS would otherwise be
+    # rejected by upsert_record and abort the whole ingest.
     merged: list[str] = []
     for piece in pieces:
-        if merged and len(piece) < MIN_ENTRY_CHARS:
+        if (merged and len(piece) < MIN_ENTRY_CHARS
+                and len(merged[-1]) + len(piece) + 1 <= _STORE_CAP):
             merged[-1] = f"{merged[-1]} {piece}"
         else:
             merged.append(piece)
