@@ -207,7 +207,9 @@ Measured, not claimed. Two tiers, kept separate because their metrics are not co
 
 **External, labeled** (`bench/EXTERNAL.md`, two datasets, SHA-pinned). LongMemEval
 oracle, 428 scored questions: evidence retrieval R@5 **0.9556**, hit@1 **0.6285**,
-every category >= 0.93 R@5. LoCoMo (1,977 QA, per-turn gold), measured through
+every category >= 0.93 R@5. `--expand 5` lifts R@5 to **0.9836** (hit@1 unchanged,
+cost unchanged) because the gold turn is often adjacent to a hit rather than the
+hit itself. LoCoMo (1,977 QA, per-turn gold), measured through
 `recall()` which is what the MCP server serves: hit@1 **0.2630**, R@10
 **0.5878**; the same probe run through `search()` (lexical only) gives 0.3647 and
 0.5190, and `--expand 5` lifts the pair to 0.3799/0.7714 at window level. LoCoMo

@@ -97,7 +97,7 @@ def build_corpus(records, limit=500):
     return out
 
 
-def evaluate(data_path, limit=500, verify=True, db_path=None):
+def evaluate(data_path, limit=500, verify=True, db_path=None, expand=0):
     qas = load(data_path, verify=verify)
     corpus = build_corpus(qas, limit=limit)
     path = db_path or os.environ["OMP_MEMORY_DB"]
@@ -148,13 +148,18 @@ def evaluate(data_path, limit=500, verify=True, db_path=None):
         # that: the question's decoys stay in the candidate pool, but turns
         # from 499 other people cannot crowd the top-5. Queries are human
         # authored, so this is not self-referential.
-        hits = db.recall(conn, q, limit=5, project_id=f"q:{qa['question_id']}")
+        hits = db.recall(conn, q, limit=5, project_id=f"q:{qa['question_id']}",
+                         expand=expand)
         got = [h["id"] for h in hits]
         typ = qa.get("question_type", "?")
         slot = by_type.setdefault(typ, {"r5": 0, "hit1": 0, "n": 0})
         slot["n"] += 1
         total += 1
-        if gold.intersection(got):
+        window_ids = set()
+        for h in hits:
+            window_ids |= {w["id"] for w in (h.get("window") or [])}
+        covered = gold.intersection(set(got) | window_ids)
+        if covered:
             r5 += 1
             slot["r5"] += 1
         if got and got[0] in gold:
@@ -167,6 +172,7 @@ def evaluate(data_path, limit=500, verify=True, db_path=None):
         "questions": total,
         "records_ingested": sum(len(t) for _, t in corpus),
         "scope": "per-question haystack (canonical LongMemEval)",
+        "expand": expand,
         "R@5": round(r5 / total, 4) if total else 0.0,
         "hit@1": round(hit1 / total, 4) if total else 0.0,
         "by_type": {k: {"R@5": round(v["r5"] / v["n"], 4),
@@ -181,8 +187,11 @@ def main():
     ap.add_argument("--limit", type=int, default=500)
     ap.add_argument("--no-verify", action="store_true")
     ap.add_argument("--db", default=None)
+    ap.add_argument("--expand", type=int, default=0,
+                    help="window size; gold found in a hit's window counts")
     args = ap.parse_args()
-    print(json.dumps(evaluate(args.data, args.limit, not args.no_verify, args.db),
+    print(json.dumps(evaluate(args.data, args.limit, not args.no_verify, args.db,
+                              expand=args.expand),
                      indent=2, sort_keys=True))
     return 0
 
