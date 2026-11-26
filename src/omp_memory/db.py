@@ -2560,7 +2560,7 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
            session_id: str = None, now=None,
            verified_only: bool = False, min_confidence: float = 0.0,
            about_peer: str = None, as_of: str = None,
-           expand: int = 0) -> list:
+           expand: int = 0, explain: bool = False) -> list:
     """Rerank candidate memories combining lexical match, heat and type prior.
 
     Confidence enters once, through heat (which already weights it 0.45); a
@@ -2632,10 +2632,23 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
         bonus = cue_bonus.get(cand["id"], 0.0)
         assoc = ppr.get(cand["id"], 0.0)
         score = round(max(0.0, base + bonus + boost - penalty + assoc), 6)
-        scored.append((cand, parts, heat, lexical, prior, score))
+        # Explainability: every term above is already computed and then
+        # discarded. Keeping the decomposition costs one tuple slot and makes
+        # a score auditable instead of opaque -- the parts sum to `score`
+        # exactly, so an explanation can never disagree with the ranking.
+        parts_out = {
+            "lexical": round(RECALL_WEIGHTS["lexical"] * lexical, 6),
+            "heat": round(RECALL_WEIGHTS["heat"] * heat, 6),
+            "type_prior": round(RECALL_WEIGHTS["type_prior"] * prior, 6),
+            "ppr": round(assoc, 6),
+            "cue": round(bonus, 6),
+            "boost": round(boost, 6),
+            "penalty": round(-penalty, 6),
+        }
+        scored.append((cand, parts, heat, lexical, prior, score, parts_out))
 
     def _sort_key(item):
-        c, parts, heat, lexical, prior, score = item
+        c, parts, heat, lexical, prior, score, _parts = item
         ts = _parse_ts(c.get("updated_at"))
         epoch = ts.timestamp() if ts else 0.0
         return (
@@ -2652,7 +2665,7 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
 
     out = []
     if full:
-        for c, parts, heat, lexical, prior, score in top:
+        for c, parts, heat, lexical, prior, score, parts_out in top:
             item = {
                 "id": c["id"],
                 "type": c["type"],
@@ -2680,9 +2693,11 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
             }
             if c.get("synonym_match"):
                 item["synonym_match"] = True
+            if explain:
+                item["explain"] = _explain_parts(parts_out, parts)
             out.append(item)
     else:
-        for c, parts, heat, lexical, prior, score in top:
+        for c, parts, heat, lexical, prior, score, parts_out in top:
             out.append({
                 "id": c["id"],
                 "type": c["type"],
@@ -2695,9 +2710,31 @@ def recall(conn: sqlite3.Connection, query: str, limit: int = 8, full: bool = Fa
                 "session_id": c.get("session_id", ""),
                 "about_peer": c.get("about_peer", ""),
             })
+            if explain:
+                out[-1]["explain"] = _explain_parts(parts_out, parts)
     if expand and out:
         out = _expand_context(conn, out, expand, full=full)
     return out
+
+
+def _explain_parts(weights: dict, heat_detail: dict) -> dict:
+    """Score decomposition that sums to the score, plus the heat sub-parts.
+
+    `weights` holds the weighted terms; `heat_detail` is heat_parts(), which
+    already decomposes heat into confidence/recency/reinforcement with their
+    fixed 0.45/0.25/0.30 weights. Both are what the ranker actually used, so
+    the explanation cannot drift from the ranking.
+    """
+    total = round(sum(weights.values()), 6)
+    return {
+        "terms": weights,
+        "total": total,
+        "heat_parts": {
+            key: heat_detail.get(key)
+            for key in ("confidence", "recency", "reinforcement",
+                        "successes", "age_days")
+        },
+    }
 
 
 def _expand_context(conn: sqlite3.Connection, hits: list, expand: int,

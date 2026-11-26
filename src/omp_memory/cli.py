@@ -204,12 +204,12 @@ def cmd_search(args) -> int:
         # as_of and expand only exist on recall(); plain search stays the
         # fast lexical path. Routing on the flags keeps one command for both
         # instead of asking the operator to remember which flags need which.
-        if args.as_of or args.expand:
+        if args.as_of or args.expand or args.explain:
             rows = db.recall(
                 conn, args.query, limit=args.limit, rtype=args.type,
                 project_id=args.project, verified_only=args.verified,
                 min_confidence=args.min_confidence, as_of=args.as_of,
-                expand=args.expand, full=True)
+                expand=args.expand, full=True, explain=args.explain)
         else:
             rows = db.search(
                 conn, args.query, limit=args.limit, rtype=args.type,
@@ -654,6 +654,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="ISO timestamp: what was true then")
     p.add_argument("--expand", type=int, default=0,
                    help="window size; each hit gains temporally adjacent records")
+    p.add_argument("--explain", action="store_true",
+                   help="show the score decomposition")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_search)
 

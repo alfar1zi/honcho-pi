@@ -542,6 +542,9 @@ TOOLS: List[Dict[str, Any]] = [
                 "as_of": {"type": "string",
                           "description": "ISO timestamp: what was true then "
                                          "(bi-temporal validity filter)."},
+                "explain": {"type": "boolean", "default": False,
+                            "description": "Attach the score decomposition; the "
+                                           "terms sum exactly to the score."},
                 "expand": {"type": "integer", "default": 0,
                            "description": "Window size (0 = off). Each hit gains a "
                                           "`window` of temporally adjacent records, "

@@ -586,3 +586,48 @@ def test_expand_respects_project_scope(conn):
         row = conn.execute("SELECT project_id FROM records WHERE id=?",
                            (w["id"],)).fetchone()
         assert row["project_id"] == "A"
+
+
+# --- recall explain (loop 10) ------------------------------------------------
+
+def test_explain_terms_sum_to_the_score(conn):
+    """The decomposition must be able to reproduce the ranking exactly."""
+    for i in range(6):
+        db.remember(conn, "FACT", f"explain probe {i} about caching layers",
+                    verified=1 if i % 2 else 0, confidence=0.6 + i / 20)
+    hits = db.recall(conn, "explain probe caching", limit=5, explain=True)
+    assert hits
+    for h in hits:
+        e = h["explain"]
+        assert abs(sum(e["terms"].values()) - h["score"]) < 1e-6, h
+        assert abs(e["total"] - h["score"]) < 1e-6
+
+
+def test_explain_reports_heat_decomposition(conn):
+    rec = db.remember(conn, "FACT", "heat breakdown probe about queues", confidence=0.8)
+    before = db.recall(conn, "heat breakdown probe queues", limit=1, explain=True)
+    base_conf = before[0]["explain"]["heat_parts"]["confidence"]
+    assert base_conf == 0.8
+    db.reinforce(conn, rec["id"], "success", source="probe")
+    hits = db.recall(conn, "heat breakdown probe queues", limit=1, explain=True)
+    parts = hits[0]["explain"]["heat_parts"]
+    for key in ("confidence", "recency", "reinforcement"):
+        assert parts[key] is not None
+    # A success signal raises confidence by its delta, so the explained value
+    # must follow the stored one rather than the value at insert time.
+    assert parts["confidence"] > base_conf
+    assert parts["successes"] >= 1
+
+
+def test_explain_off_by_default(conn):
+    db.remember(conn, "FACT", "no explain expected here")
+    hits = db.recall(conn, "no explain expected", limit=1)
+    assert "explain" not in hits[0]
+
+
+def test_explain_penalty_is_negative_when_superseded(conn):
+    a = db.remember(conn, "FACT", "superseded probe value alpha", verified=1)
+    conn.execute("UPDATE records SET superseded_by=? WHERE id=?", (a["id"], a["id"]))
+    conn.commit()
+    hits = db.recall(conn, "superseded probe value", limit=1, explain=True)
+    assert hits[0]["explain"]["terms"]["penalty"] <= 0
